@@ -1,0 +1,8 @@
+build
+build-debug
+
+.cache
+.vscode
+CMakeUserPresets.json
+arm64-linux-gnu.toolchain.cmake
+res

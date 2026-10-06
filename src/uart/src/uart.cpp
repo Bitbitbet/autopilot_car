@@ -1,0 +1,226 @@
+#include "uart.hpp"
+#include <iostream>
+#include <memory>
+#include <string>
+
+using std::cerr;
+using std::endl;
+using std::shared_ptr;
+using std::string;
+
+Uart::Uart() = default;
+Uart::Uart(Uart &&) = default;
+
+shared_ptr<Uart> Uart::create(string portName) {
+    auto uart = std::shared_ptr<Uart>(new Uart());
+
+    auto serialPort = std::make_unique<SerialPort>();
+    // try检测语句块有没有异常
+    try {
+        serialPort->Open(portName);                               // 打开串口
+        serialPort->SetBaudRate(BaudRate::BAUD_115200);           // 设置波特率
+        serialPort->SetCharacterSize(CharacterSize::CHAR_SIZE_8); // 8位数据位
+        serialPort->SetFlowControl(FlowControl::FLOW_CONTROL_NONE); // 设置流控
+        serialPort->SetParity(Parity::PARITY_NONE);                 // 无校验
+        serialPort->SetStopBits(StopBits::STOP_BITS_1);             // 1个停止位
+    } catch (const OpenFailed &) {
+        cerr << "Serial port: " << portName << "open failed ..." << endl;
+        // error = -2;
+        return nullptr;
+    } catch (const AlreadyOpen &) {
+        cerr << "Serial port: " << portName << "open failed ..." << endl;
+        // error = -3;
+        return nullptr;
+    } catch (...) {
+        cerr << "Serial port: " << portName << " received exception ..."
+             << endl;
+        // error = -4;
+        return nullptr;
+    }
+    uart->serialPort = std::move(serialPort);
+
+    auto threadRecv = std::make_unique<std::thread>([uart]() {
+        size_t index = 0;
+        std::array<uint8_t, USB_FRAME_LENMAX> buffer; // 临时缓冲数据
+        while (1) {
+            uint8_t byte;
+            uart->serialPort->ReadByte(byte, 0);
+
+            /* 起始帧不是USB_FRAME_HEAD就不开始接收 */
+            if (index == 0 && byte != USB_FRAME_HEAD) {
+                continue;
+            }
+            /* 长度过小或过大，重新接收 */
+            if (index == 2 &&
+                (byte > USB_FRAME_LENMAX || byte < USB_FRAME_LENMIN)) {
+                index = 0;
+                continue;
+            }
+            /* 接收完毕，计算校验、提交后重置 */
+            if (index >= 3 && index == buffer[2] - 1) {
+
+                uint8_t check = 0;
+                for (size_t i = 0; i < index; ++i)
+                    check += buffer[i];
+
+                if (check == byte) {
+                    buffer[index] = byte;
+                    uart->translateBuffer(buffer);
+                }
+                index = 0;
+                continue;
+            }
+
+            buffer[index] = byte;
+            ++index;
+        }
+    });
+    uart->threadRecv = std::move(threadRecv);
+
+    // error = 0;
+    return uart;
+}
+
+Uart::~Uart() {
+    carControl(0, PWMSERVOMID);
+    threadRecv->join();
+    serialPort->Close();
+};
+void Uart::translateBuffer(
+    const std::array<uint8_t, USB_FRAME_LENMAX> &buffer) {
+    /* DEBUG 打印接收的帧 */
+    printf("USB Frame Received: [");
+    bool first = true;
+    for (size_t i = 0; i < buffer[2]; ++i) {
+        if (first) {
+            first = false;
+        } else {
+            printf(", ");
+        }
+        printf("%d", buffer[i]);
+    }
+    printf("]\n");
+
+    switch (buffer[1]) {
+    case USB_ADDR_KEY: // 接收按键信息
+        if (buffer[3] == 1) {
+            keypress = true;
+            killAll = false;
+            exitBoot = false;
+        } else if (buffer[3] == 2) {
+            keypress = false;
+            killAll = true;
+            exitBoot = false;
+        } else if (buffer[3] == 3) {
+            keypress = false;
+            killAll = false;
+            exitBoot = true;
+        }
+
+        break;
+    case 6: // 接收按键信息
+        if (buffer[3] == 1 || (buffer[3] > 100 && buffer[3] < 2000)) // 发车
+        {
+            keypress = true;
+            killAll = false;
+            exitBoot = false;
+        } else if (buffer[3] == 2 || (buffer[3] > 2000 && buffer[3] < 5000)) {
+            keypress = false;
+            killAll = true;
+            exitBoot = false;
+        } else if (buffer[3] == 3 || buffer[3] > 5000) {
+            keypress = false;
+            killAll = false;
+            exitBoot = true;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+void Uart::carControl(float speed, uint16_t servo) {
+    uint8_t buff[11];  // 多发送一个字节
+    uint8_t check = 0; // 校验位
+    Bit32Union bit32U;
+    Bit16Union bit16U;
+
+    buff[0] = USB_FRAME_HEAD;   // 通信帧头
+    buff[1] = USB_ADDR_CARCTRL; // 地址
+    buff[2] = 10;               // 帧长
+
+    bit32U.float32 = speed; // X轴线速度
+    for (int i = 0; i < 4; i++)
+        buff[i + 3] = bit32U.buff[i];
+
+    bit16U.uint16 = servo; // Y轴线速度
+    buff[7] = bit16U.buff[0];
+    buff[8] = bit16U.buff[1];
+
+    for (int i = 0; i < 9; i++)
+        check += buff[i];
+    buff[9] = check; // 校验位
+
+    writeBuffer(buff, 11);
+}
+
+/**
+ * @brief 蜂鸣器音效控制
+ *
+ * @param sound
+ */
+void Uart::buzzerSound(Buzzer sound) {
+    uint8_t buff[6];   // 多发送一个字节
+    uint8_t check = 0; // 校验位
+
+    buff[0] = USB_FRAME_HEAD;  // 帧头
+    buff[1] = USB_ADDR_BUZZER; // 地址
+    buff[2] = 5;               // 帧长
+    switch (sound) {
+    case Buzzer::ok: // 确认
+        buff[3] = 1;
+        break;
+    case Buzzer::warning: // 报警
+        buff[3] = 2;
+        break;
+    case Buzzer::finish: // 完成
+        buff[3] = 3;
+        break;
+    case Buzzer::ding: // 提示
+        buff[3] = 4;
+        break;
+    case Buzzer::start: // 开机
+        buff[3] = 5;
+        break;
+    }
+
+    for (size_t i = 0; i < 4; i++)
+        check += buff[i];
+    buff[4] = check;
+
+    writeBuffer(buff, 6);
+}
+void Uart::writeBuffer(void *buffer, size_t len) {
+    for (size_t i = 0; i < len; ++i)
+        serialPort->WriteByte(((uint8_t *)buffer)[i]);
+    serialPort->DrainWriteBuffer();
+}
+
+/**
+ * @brief 发送心跳信号
+ *
+ */
+void Uart::sendHeart() {
+    uint8_t buff[5];   // 多发送一个字节
+    uint8_t check = 0; // 校验位
+
+    buff[0] = USB_FRAME_HEAD; // 通信帧头
+    buff[1] = USB_ADDR_HEART; // 地址
+    buff[2] = 4;              // 帧长
+
+    for (int i = 0; i < 3; i++)
+        check += buff[i];
+    buff[3] = check; // 校验位
+
+    writeBuffer(buff, 5);
+}
