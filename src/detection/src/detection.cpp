@@ -31,6 +31,28 @@ using std::to_string;
 using std::unordered_map;
 using std::vector;
 
+void buildNms(const string &model_dir) {
+    string model_file = model_dir + "/nms.tar";
+    string untar_cmd = "tar -xf " + model_file + " -C . --no-same-owner";
+    string final_file = model_file + ".so";
+    string cc_cmd = "g++ -shared -fPIC -o " + final_file + " lib0.o devc.o";
+    int sys_status = 0;
+
+    sys_status = system(untar_cmd.c_str());
+    if (sys_status) {
+        cerr << "Error: cannot untar file " << model_file << endl;
+        exit(-1);
+    }
+
+    // create shared
+    sys_status = system(cc_cmd.c_str());
+    if (sys_status) {
+        cerr << "Error: compile for " << model_file << endl;
+        exit(-1);
+    }
+    cout << "compile done." << endl;
+}
+
 Detection::Detection(const string pathModel, float score_nms) {
     score = score_nms;
     // 模型初始化
@@ -43,7 +65,7 @@ Detection::Detection(const string pathModel, float score_nms) {
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(8);
     session_options.SetGraphOptimizationLevel(
-        GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+        GraphOptimizationLevel::ORT_ENABLE_ALL);
     string onnx_model = pathModel + "/post.onnx";
     this->predictor_onnx_ = make_shared<Ort::Session>(
         this->onnx_env_, onnx_model.c_str(), session_options);
@@ -96,28 +118,6 @@ void Detection::inference(cv::Mat img) {
     auto feeds = preprocess(img, {320, 320}); // 图像前处理
     run(*feeds);                              // 模型推理
     render();                                 // 后处理
-}
-
-void Detection::buildNms(const string &model_dir) {
-    string model_file = model_dir + "/nms.tar";
-    string untar_cmd = "tar -xf " + model_file + " -C . --no-same-owner";
-    string final_file = model_file + ".so";
-    string cc_cmd = "g++ -shared -fPIC -o " + final_file + " lib0.o devc.o";
-    int sys_status = 0;
-
-    sys_status = system(untar_cmd.c_str());
-    if (sys_status) {
-        cerr << "Error: cannot untar file " << model_file << endl;
-        exit(-1);
-    }
-
-    // create shared
-    sys_status = system(cc_cmd.c_str());
-    if (sys_status) {
-        cerr << "Error: compile for " << model_file << endl;
-        exit(-1);
-    }
-    cout << "compile done." << endl;
 }
 
 void Detection::transposeAndCopyToTensor(const Mat &src, NDTensor &dst) {

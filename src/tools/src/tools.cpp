@@ -13,11 +13,6 @@ using std::vector;
 Mapping ipm = Mapping(Size(COLSIMAGE, ROWSIMAGE),
                       Size(COLSIMAGEIPM, ROWSIMAGEIPM)); // 逆透视变换类
 
-/**
- * @brief 存储图像至本地
- *
- * @param image 需要存储的图像
- */
 void savePicture(Mat &image) {
     // 存图
     string name = ".jpg";
@@ -28,11 +23,6 @@ void savePicture(Mat &image) {
     imwrite(name, image);
 }
 
-/**
- * @brief 存储图像至本地
- *
- * @param image 需要存储的图像
- */
 void savePicture(string path, Mat &image) {
     // 存图
     string name = ".jpg";
@@ -42,13 +32,6 @@ void savePicture(string path, Mat &image) {
     imwrite(name, image);
 }
 
-//--------------------------------------------------[公共方法]----------------------------------------------------
-/**
- * @brief int集合平均值计算
- *
- * @param arr 输入数据集合
- * @return double
- */
 double average(vector<int> vec) {
     if (vec.size() < 1)
         return -1;
@@ -61,12 +44,6 @@ double average(vector<int> vec) {
     return (double)sum / vec.size();
 }
 
-/**
- * @brief int集合数据方差计算
- *
- * @param vec Int集合
- * @return double
- */
 double sigma(vector<int> vec) {
     if (vec.size() < 1)
         return 0;
@@ -80,12 +57,6 @@ double sigma(vector<int> vec) {
     return sigma;
 }
 
-/**
- * @brief 赛道点集的方差计算
- *
- * @param vec
- * @return double
- */
 double sigma(vector<PointX> vec) {
     if (vec.size() < 1)
         return 0;
@@ -124,13 +95,6 @@ static uint64_t comb(uint64_t n, uint64_t k) {
     return res;
 }
 
-/**
- * @brief 贝塞尔曲线
- *
- * @param dt
- * @param input
- * @return vector<PointX>
- */
 vector<PointX> Bezier(double dt, vector<PointX> input) {
     vector<PointX> output;
 
@@ -153,25 +117,11 @@ vector<PointX> Bezier(double dt, vector<PointX> input) {
     return output;
 }
 
-/**
- * @brief 格式化double类型数据为字符串
- *
- * @param val 输入数据
- * @param fixed 保留小数位数
- * @return auto 输出字符串
- */
 string double2String(double val, int fixed) {
     auto str = to_string(val);
     return str.substr(0, str.find(".") + fixed + 1);
 }
-/**
- * @brief 点到直线的距离计算
- *
- * @param a 直线的起点
- * @param b 直线的终点
- * @param p 目标点
- * @return double
- */
+
 double distanceForPoint2Line(PointX a, PointX b, PointX p) {
     int d = 0; // 距离
 
@@ -189,14 +139,6 @@ double distanceForPoint2Line(PointX a, PointX b, PointX p) {
     return (2 * area / ab_distance);
 }
 
-/**
- * @brief 计算两点原是域上距离
- *
- * @param startPoint起点
- * @param endPoint终点
- *        KickEdgePoint 是否剔除边界点（包含边界点的距离默认999）
- * @return double
- */
 double distanceForOrigin(PointX startPoint, PointX endPoint) {
     Point2d a, b;
     a.x = startPoint.y;
@@ -209,27 +151,8 @@ double distanceForOrigin(PointX startPoint, PointX endPoint) {
     return e;
 }
 
-/**
- * @brief 图像帧数是否在范围内判断
- * @param 输入起始点和终止点
- * @inform 可以用于任何判断是否在范围内
- * @return
- */
-bool posInRange(double pos, double a, double b) {
-    if (pos < a || pos > b)
-        return false;
-    else
-        return true;
-}
-/**
- * @brief 利用贝塞尔曲线的补线函数
- *
- * @param k 纵向倍率，默认为1
- * @param n 贝塞尔参数，越大补线间隔越大，点越稀疏
- * @param 输入起始点和终止点
- *
- * @return
- */
+bool posInRange(double pos, double a, double b) { return pos < a || pos > b; }
+
 vector<PointX> simpleLine(PointX startPoint, PointX endPoint, double n,
                           double k) {
     PointX midPoint1((startPoint.x + endPoint.x) * k / 2,
@@ -238,12 +161,7 @@ vector<PointX> simpleLine(PointX startPoint, PointX endPoint, double n,
     vector<PointX> b_modify = Bezier(n, input); // 贝塞尔曲线方法
     return b_modify;
 }
-/**
- * @brief 图像平滑算法
- * @param 输入点集
- *
- * @return
- */
+
 vector<PointX> smoothLine(vector<PointX> Temp1, double n, double k) {
     vector<PointX> AimPoints;
     if (Temp1.size()) {
@@ -264,24 +182,11 @@ vector<PointX> smoothLine(vector<PointX> Temp1, double n, double k) {
     return AimPoints;
 }
 
-/**
- * @brief 计算两点之间斜率
- * @param PointX a,b
- * @return double
- */
 double gradientCal(PointX a, PointX b) {
     double k = (double)(a.y - b.y) / (a.x - b.x); // 斜率
     return k;
 }
 
-/**
- * @brief 判断范围内边界点是否为一条直线
- *
- * @param  PointsEdge边界点集
- *         startLine起点
- *         endLine终点
- * @return bias起点终点拟合直线后偏移较大的点
- */
 int linearCheck(vector<PointX> PointsEdge, int startLine, int endLine,
                 int judgebias) {
     int bias = 0;
@@ -298,15 +203,6 @@ int linearCheck(vector<PointX> PointsEdge, int startLine, int endLine,
     return bias;
 }
 
-/**
- * @brief 矫正域上判断点的位置是否适合
- *
- * @param startPoint起点
- * @param endPoint终点
- * @param Min_Len 矫正域赛道允许最短长度
- * @param Max_Len 矫正域赛道允许最长长度
- * @return bool
- */
 bool breakpointCheck(PointX startPoint, PointX endPoint, int Min_Len,
                      int Max_Len) {
     Point2f a, b;
@@ -316,8 +212,6 @@ bool breakpointCheck(PointX startPoint, PointX endPoint, int Min_Len,
     b.y = endPoint.x;
     Point2f c = ipm.homography(a), d = ipm.homography(b);
     double e = distanceForPoints(c, d);
-    if (e >= Min_Len && e <= Max_Len)
-        return true;
-    else
-        return false;
+
+    return e >= Min_Len && e <= Max_Len;
 }

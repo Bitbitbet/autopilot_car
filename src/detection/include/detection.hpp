@@ -29,13 +29,6 @@ class Detection {
      */
     void inference(cv::Mat img);
 
-    /**
-     * @brief
-     *
-     * @param model_dir
-     */
-    void buildNms(const std::string &model_dir);
-
     void transposeAndCopyToTensor(const Mat &src, NDTensor &dst);
 
     std::shared_ptr<std::unordered_map<std::string, NDTensor>>
