@@ -1,5 +1,7 @@
 #include "show.hpp"
 
+#include "tools.hpp"
+
 using std::string;
 using std::to_string;
 
