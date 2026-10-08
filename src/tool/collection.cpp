@@ -1,29 +1,41 @@
+#include "control.hpp"
 #include "predeal.hpp"
 #include "tools.hpp"
-#include "uart.hpp"
+#include <atomic>
+#include <cmath>
+#include <condition_variable>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>  // 文件操作类
 #include <iostream> // 输入输出类
+#include <libevdev/libevdev.h>
+#include <libudev.h>
 #include <linux/input.h>
 #include <linux/joystick.h>
 #include <memory>
 #include <mutex>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp> // OpenCV终端部署
-#include <string>             // 字符串类
-#include <sys/stat.h>         // 获取文件属性
-#include <sys/types.h>        // 基本系统数据类型
-#include <thread>             // 线程类
+#include <optional>
+#include <poll.h>
+#include <string>      // 字符串类
+#include <sys/stat.h>  // 获取文件属性
+#include <sys/types.h> // 基本系统数据类型
+#include <thread>      // 线程类
 #include <unistd.h>
 
+using std::atomic;
+using std::atomic_bool;
+using std::atomic_uint8_t;
 using std::cerr;
+using std::condition_variable;
 using std::cout;
 using std::endl;
 using std::ifstream;
 using std::lock_guard;
 using std::make_shared;
 using std::make_unique;
+using std::memory_order_relaxed;
 using std::mutex;
 using std::nullopt;
 using std::optional;
@@ -31,435 +43,371 @@ using std::shared_ptr;
 using std::string;
 using std::thread;
 using std::to_string;
+using std::unique_lock;
 using std::unique_ptr;
 
 using namespace cv;
 namespace fs = std::filesystem;
 
-/**
- * @brief 读取sysfs单值
- */
-optional<string> readToken(const string &path) {
-    if (!fs::exists(path)) {
-        return nullopt;
+string get_joystick_device_path() {
+    struct udev *udev_ctx = udev_new();
+    if (!udev_ctx) {
+        return {};
     }
-    ifstream f(path);
-    string v;
-    f >> v;
-    return v;
-}
-enum class JoyStickMode : uint8_t {
-    BD2A, // 北通2
-    BD4A, // 北通4
-    SW02, // 星途2
-    GR01, // 罗技
-};
 
-/**
- * @brief 按 vendor/product 识别手柄品牌
- */
-optional<JoyStickMode> getJoyStickMode() {
-    auto deviceName = readToken("/sys/class/input/js0/device/name");
-    auto vendor = readToken("/sys/class/input/js0/device/id/vendor");
-    auto product = readToken("/sys/class/input/js0/device/id/product");
-    if (!deviceName || !vendor || !product)
-        return nullopt;
+    struct udev_enumerate *enumerate = udev_enumerate_new(udev_ctx);
+    if (!enumerate) {
+        udev_unref(udev_ctx);
+        return {};
+    }
 
-    cout << "Joystick Information:\n"
-         << "  Device Name: " << *deviceName << "\n  Vendor ID: " << *vendor
-         << "\n  Product ID: " << *product << endl;
+    udev_enumerate_add_match_subsystem(enumerate, "input");
+    udev_enumerate_add_match_property(enumerate, "ID_INPUT_JOYSTICK", "1");
 
-    if (vendor == "045e" && product == "028e")
-        return JoyStickMode::BD2A; // 北通2
-    else if (vendor == "20bc" && product == "5046")
-        return JoyStickMode::BD4A; // 北通4
-    else if (vendor == "3537" && product == "1007")
-        return JoyStickMode::SW02; // 星途2
-    else if (vendor == "046d" && product == "c219")
-        return JoyStickMode::GR01; // 罗技
-    else
-        return JoyStickMode::SW02; // 未识别,默认星途2
+    if (udev_enumerate_scan_devices(enumerate) < 0) {
+        udev_enumerate_unref(enumerate);
+        udev_unref(udev_ctx);
+        return {};
+    }
+
+    struct udev_list_entry *devices = udev_enumerate_get_list_entry(enumerate);
+    struct udev_list_entry *entry;
+    std::string result;
+
+    udev_list_entry_foreach(entry, devices) {
+        const char *syspath = udev_list_entry_get_name(entry);
+        struct udev_device *dev =
+            udev_device_new_from_syspath(udev_ctx, syspath);
+        if (!dev) {
+            continue;
+        }
+
+        const char *devnode = udev_device_get_devnode(dev);
+        const char *sysname = udev_device_get_sysname(dev);
+
+        if (devnode && sysname && std::strncmp(sysname, "event", 5) == 0) {
+            result = devnode;
+            udev_device_unref(dev);
+            break;
+        }
+
+        udev_device_unref(dev);
+    }
+
+    udev_enumerate_unref(enumerate);
+    udev_unref(udev_ctx);
+
+    return result;
 }
 class JoyStick {
-  private:
-    JoyStickMode mode;
-    int jsDesc;
-    unique_ptr<thread> jsEventThread; // 遥控手柄子线程
-
-    bool sampleMore = false;   // 连续图像采样使能
-    bool sampleOnce = false;   // 单次图像采样使能
-    float speed = 0;           // 车速：m/s
-    float servo = PWMSERVOMID; // 打舵：PWM
-    bool forward = true;       // 车辆速度方向:默认向前
-    bool uartSend = false;     // 串口发送使能
-    bool buzzer = false;       // 提示音效
-    mutable mutex mtx;         // 保护所有共享状态
-
-    JoyStick() {}
-
-    // —— 北通2(BD2A) 映射 ——
-    void bd2a(const js_event &event) {
-        lock_guard<mutex> lk(mtx);
-
-        if (event.type == JS_EVENT_AXIS) // 摇杆
-        {
-            // cout << "AXIS: " << to_string(joy.number) << " | " <<
-            // to_string(joy.value) << endl;
-            switch (event.number) {
-            case 0: // 方向控制
-                servo = PWMSERVOMID +
-                        event.value * (PWMSERVOMID - PWMSERVOMIN) / 32767.0;
-                uartSend = true;
-                break;
-            case 5: // 两档速度选择:慢速档
-                if (event.value >= 1) {
-                    if (forward)
-                        speed = 0.3;
-                    else
-                        speed = -0.3;
-                    uartSend = true;
-                } else {
-                    speed = 0.0;
-                    uartSend = true;
-                }
-                break;
-            }
-        } else if (event.type == JS_EVENT_BUTTON) // 按键
-        {
-            // cout << "BUTTON: " << to_string(joy.number) << " | " <<
-            // to_string(joy.value) << endl;
-            switch (event.number) {
-            case 5: // 两档速度选择: 高速档
-                if (event.value >= 1) {
-                    if (forward)
-                        speed = 0.5;
-                    else
-                        speed = -0.5;
-                    uartSend = true;
-                } else {
-                    speed = 0.0;
-                    uartSend = true;
-                }
-                break;
-            case 2: // 开始单次采图
-                if (event.value == 1) {
-                    buzzer = true;     // 蜂鸣器音效
-                    sampleOnce = true; // 开启单张采图使能
-                }
-                break;
-            case 3: // 开始连续采图
-                if (event.value == 1) {
-                    buzzer = true;     // 蜂鸣器音效
-                    sampleMore = true; // 开启连续采图使能
-                }
-                break;
-            case 0:                   // 停止采图
-                if (event.value == 1) // 关闭采图使能
-                {
-                    sampleMore = false;
-                    sampleOnce = false;
-                    buzzer = true; // 蜂鸣器音效
-                }
-                break;
-            case 7:
-                if (event.value == 1) // 向前
-                {
-                    forward = true;
-                    if (speed < 0) {
-                        speed = -speed;
-                        uartSend = true;
-                    }
-                    buzzer = true; // 蜂鸣器音效
-                }
-                break;
-            case 6:
-                if (event.value == 1) // 向后
-                {
-                    forward = false;
-                    if (speed < 0) {
-                        speed = -speed;
-                        uartSend = true;
-                    }
-                    buzzer = true; // 蜂鸣器音效
-                }
-                break;
-            default: // 任意键停止运动
-                speed = 0;
-                uartSend = true;
-                break;
-            }
-        }
-    }
-
-    // —— 星途2(SW02) 映射,按键号按参考 joystick.hpp 派生 ——
-    void sw02(const js_event &event) {
-        lock_guard<mutex> lk(mtx);
-
-        if (event.type == JS_EVENT_AXIS) { // 摇杆
-            switch (event.number) {
-            case 0: // 方向控制(LX):罗技轴取负(参考LX=-axes[0])
-                servo = PWMSERVOMID -
-                        event.value * (PWMSERVOMID - PWMSERVOMIN) / 32767.0;
-                uartSend = true;
-                break;
-            }
-        } else if (event.type == JS_EVENT_BUTTON) { // 按键
-            switch (event.number) {
-            case 9: // 低速档(ZR/RT)
-                if (event.value >= 1) {
-                    if (forward)
-                        speed = 0.3;
-                    else
-                        speed = -0.3;
-                    uartSend = true;
-                } else {
-                    speed = 0.0;
-                    uartSend = true;
-                }
-                break;
-            case 7: // 高速档(R/RB)
-                if (event.value >= 1) {
-                    if (forward)
-                        speed = 0.5;
-                    else
-                        speed = -0.5;
-                    uartSend = true;
-                } else {
-                    speed = 0.0;
-                    uartSend = true;
-                }
-                break;
-            case 3: // 开始单次采图(X)
-                if (event.value == 1) {
-                    buzzer = true;
-                    sampleOnce = true;
-                }
-                break;
-            case 4: // 开始连续采图(Y)
-                if (event.value == 1) {
-                    buzzer = true;
-                    sampleMore = true;
-                }
-                break;
-            case 0: // 停止采图(A)
-                if (event.value == 1) {
-                    sampleMore = false;
-                    sampleOnce = false;
-                    buzzer = true;
-                }
-                break;
-            case 11: // 向前(Start)
-                if (event.value == 1) {
-                    forward = true;
-                    if (speed < 0) {
-                        speed = -speed;
-                        uartSend = true;
-                    }
-                    buzzer = true;
-                }
-                break;
-            case 10: // 向后(Back)
-                if (event.value == 1) {
-                    forward = false;
-                    if (speed < 0) {
-                        speed = -speed;
-                        uartSend = true;
-                    }
-                    buzzer = true;
-                }
-                break;
-            default: // 任意键停止运动
-                speed = 0;
-                uartSend = true;
-                break;
-            }
-        }
-    }
-
-    // —— 罗技(GR01) 映射,按键号按参考 joystick.hpp 派生 ——
-    void gr01(const js_event &event) {
-        lock_guard<mutex> lk(mtx);
-
-        if (event.type == JS_EVENT_AXIS) // 摇杆
-        {
-            switch (event.number) {
-            case 0: // 方向控制(LX)
-                servo = PWMSERVOMID +
-                        event.value * (PWMSERVOMID - PWMSERVOMIN) / 32767.0;
-                uartSend = true;
-                break;
-            }
-        } else if (event.type == JS_EVENT_BUTTON) // 按键
-        {
-            switch (event.number) {
-            case 7: // 低速档(RT)
-                if (event.value >= 1) {
-                    if (forward)
-                        speed = 0.3;
-                    else
-                        speed = -0.3;
-                    uartSend = true;
-                } else {
-                    speed = 0.0;
-                    uartSend = true;
-                }
-                break;
-            case 5: // 高速档(RB)
-                if (event.value >= 1) {
-                    if (forward)
-                        speed = 0.5;
-                    else
-                        speed = -0.5;
-                    uartSend = true;
-                } else {
-                    speed = 0.0;
-                    uartSend = true;
-                }
-                break;
-            case 0: // 开始单次采图(X)
-                if (event.value == 1) {
-                    buzzer = true;
-                    sampleOnce = true;
-                }
-                break;
-            case 3: // 开始连续采图(Y)
-                if (event.value == 1) {
-                    buzzer = true;
-                    sampleMore = true;
-                }
-                break;
-            case 1: // 停止采图(A)
-                if (event.value == 1) {
-                    sampleMore = false;
-                    sampleOnce = false;
-                    buzzer = true;
-                }
-                break;
-            case 9: // 向前(Start)
-                if (event.value == 1) {
-                    forward = true;
-                    if (speed < 0) {
-                        speed = -speed;
-                        uartSend = true;
-                    }
-                    buzzer = true;
-                }
-                break;
-            case 8: // 向后(Back)
-                if (event.value == 1) {
-                    forward = false;
-                    if (speed < 0) {
-                        speed = -speed;
-                        uartSend = true;
-                    }
-                    buzzer = true;
-                }
-                break;
-            default: // 任意键停止运动
-                speed = 0;
-                uartSend = true;
-                break;
-            }
-        }
-    }
-
   public:
-    ~JoyStick() {
-        jsEventThread->join();
-        close(jsDesc);
+    static shared_ptr<JoyStick> create() {
+        auto joystick_path = get_joystick_device_path();
+        if (joystick_path.empty()) {
+            cerr << "Failed to find joystick device." << endl;
+            return nullptr;
+        }
+
+        int joystick_fd = open(joystick_path.c_str(), O_RDONLY);
+        if (joystick_fd < 0) {
+            cerr << "Failed to open joystick device " << joystick_path << "."
+                 << endl;
+            return nullptr;
+        }
+        cout << "Joystick device " << joystick_path << " opened." << endl;
+
+        struct libevdev *dev = nullptr;
+        if (libevdev_new_from_fd(joystick_fd, &dev) < 0) {
+            close(joystick_fd);
+            return nullptr;
+        }
+
+        auto joystick = shared_ptr<JoyStick>(new JoyStick);
+        joystick->joystick_fd = joystick_fd;
+        joystick->dev = dev;
+
+        JoyStick *raw = joystick.get();
+        joystick->recv_thread =
+            make_unique<thread>([raw]() { raw->recv_thread_main(); });
+
+        return joystick;
     }
 
-    bool takeUartControl(float &outSpeed, float &outServo) {
-        lock_guard<mutex> lk(mtx);
-        if (!uartSend)
+    ~JoyStick() {
+        thread_stop.store(true, memory_order_relaxed);
+        if (recv_thread && recv_thread->joinable())
+            recv_thread->join();
+        if (dev)
+            libevdev_free(dev);
+        if (joystick_fd >= 0)
+            close(joystick_fd);
+    }
+
+    // ---------------- 对外接口 ----------------
+
+    bool takeCarControl(float &outSpeed, float &outServo) {
+        lock_guard lk(mtx);
+        if (!do_car_control)
             return false;
         outSpeed = speed;
         outServo = servo;
-        uartSend = false;
         return true;
     }
 
     bool takeBuzzer() {
-        lock_guard<mutex> lk(mtx);
-        if (!buzzer)
-            return false;
-        buzzer = false;
-        return true;
+        lock_guard lk(mtx);
+        return do_buzzer;
     }
 
     bool takeSampleOnce() {
-        lock_guard<mutex> lk(mtx);
-        if (!sampleOnce)
-            return false;
-        sampleOnce = false;
-        return true;
+        lock_guard lk(mtx);
+        return do_sample_once;
     }
-
-    bool isSampleMore() {
-        lock_guard<mutex> lk(mtx);
-        return sampleMore;
+    void waitEvent() {
+        unique_lock lk(mtx);
+        cv.wait(lk, [this]() {
+            return do_sample_once || do_car_control || do_buzzer;
+        });
     }
 
     void requestSampleOnce() {
-        lock_guard<mutex> lk(mtx);
-        sampleOnce = true;
+        bool old_do_sample_once;
+        {
+            lock_guard lk(mtx);
+            old_do_sample_once = do_sample_once;
+            do_sample_once = true;
+        }
+        if (!old_do_sample_once)
+            cv.notify_one();
     }
-    static shared_ptr<JoyStick> create() {
-        auto joystick = shared_ptr<JoyStick>(new JoyStick);
 
-        joystick->jsDesc = open("/dev/input/js0", O_RDONLY);
-        if (joystick->jsDesc < 0) {
-            cerr << "Failed to access /dev/input/js0." << endl;
-            return nullptr;
+  private:
+    int joystick_fd = -1;
+    struct libevdev *dev = nullptr;
+    unique_ptr<thread> recv_thread;
+    atomic<bool> thread_stop{false};
+
+    // ---------------- 共享状态 ----------------
+    bool do_sample_once = false;
+    bool do_car_control = false;
+    bool do_buzzer = false;
+    float speed = 0;           // 车速：m/s
+    float servo = PWMSERVOMID; // 打舵：PWM
+    mutex mtx;
+    condition_variable cv;
+
+    bool forward = true; // 车辆速度方向：默认向前
+
+    JoyStick() {}
+
+    void requestCarControl(float newSpeed, float newServo) {
+        bool old_do_car_control;
+        {
+            lock_guard lk(mtx);
+            old_do_car_control = do_car_control;
+            speed = newSpeed;
+            servo = newServo;
+            do_car_control = true;
         }
-        auto mode = getJoyStickMode();
-        if (!mode) {
-            cerr << "Failed to obtain information about the joystick device."
-                 << endl;
-            close(joystick->jsDesc);
-            return nullptr;
+        if (!old_do_car_control)
+            cv.notify_one();
+    }
+    void requestBuzzer() {
+        bool old_do_buzzer;
+        {
+            lock_guard lk(mtx);
+            old_do_buzzer = do_buzzer;
+            do_buzzer = true;
         }
-        joystick->mode = *mode;
+        if (!old_do_buzzer)
+            cv.notify_one();
+    }
+    void clearBuzzer() {
+        lock_guard lk(mtx);
+        do_buzzer = false;
+    }
+    void clearSampleOnce() {
+        lock_guard lk(mtx);
+        do_sample_once = false;
+    }
 
-        joystick->jsEventThread = make_unique<thread>([joystick]() {
-            while (1) {
-                js_event event;
-                if (read(joystick->jsDesc, &event, sizeof(event)) !=
-                    sizeof(event))
-                    continue;
-
-                switch (joystick->mode) {
-                case JoyStickMode::BD4A:
-                case JoyStickMode::SW02:
-                    joystick->sw02(event);
+    // ---------------- 事件处理 ----------------
+    void processEvent(const input_event &ev) {
+        optional<float> new_servo = nullopt;
+        optional<float> new_speed = nullopt;
+        optional<bool> new_do_sample_once = nullopt;
+        optional<bool> new_do_buzzer = nullopt;
+        if (ev.type == EV_ABS) {
+            switch (ev.code) {
+            case ABS_X: { // 方向控制
+                const struct input_absinfo *abs =
+                    libevdev_get_abs_info(dev, ev.code);
+                if (!abs)
                     break;
-                case JoyStickMode::GR01:
-                    joystick->gr01(event);
-                    break;
-                case JoyStickMode::BD2A:
-                    joystick->bd2a(event);
-                    break;
-                }
+                // v [-1, 1]
+                auto v = (double)(ev.value - abs->minimum) /
+                             (abs->maximum - abs->minimum) * 2 -
+                         1;
+                new_servo = PWMSERVOMID + v * (PWMSERVOMID - PWMSERVOMIN);
+                break;
             }
-        });
+            case ABS_RZ: {
+                const struct input_absinfo *abs =
+                    libevdev_get_abs_info(dev, ev.code);
+                if (!abs)
+                    break;
+                // v [0, 1]
+                auto v = (double)(ev.value - abs->minimum) /
+                         (abs->maximum - abs->minimum);
+                new_speed = (forward ? 1 : -1) * v;
+                break;
+            }
+            default:
+                break;
+            }
+        } else {
+            switch (ev.code) {
+            case BTN_WEST: // 单次采图 (X)
+                if (ev.value == 1) {
+                    new_do_buzzer = true;
+                    new_do_sample_once = true;
+                }
+                break;
 
-        return joystick;
+            case BTN_NORTH: // 连续采图 (Y)
+                if (ev.value == 1) {
+                    new_do_buzzer = true;
+                    // sampleMore = true;
+                }
+                break;
+
+            case BTN_SOUTH: // 停止采图 (A)
+                if (ev.value == 1) {
+                    // sampleMore = false;
+                    new_do_sample_once = false;
+                    new_do_buzzer = true;
+                }
+                break;
+
+            case BTN_START: // 向前
+                if (ev.value == 1) {
+                    forward = true;
+                    new_speed = -fabs(speed);
+                    new_do_buzzer = true;
+                }
+                break;
+
+            case BTN_SELECT: // 向后
+                if (ev.value == 1) {
+                    forward = false;
+                    new_speed = -fabs(speed);
+                    new_do_buzzer = true;
+                }
+                break;
+
+            default:
+                new_speed = 0;
+                break;
+            }
+        }
+        if (new_speed || new_servo) {
+            float speed, servo;
+            if (new_speed)
+                speed = *new_speed;
+            else {
+                lock_guard lk(mtx);
+                speed = this->speed;
+            }
+            if (new_servo)
+                servo = *new_servo;
+            else {
+                lock_guard lk(mtx);
+                servo = this->servo;
+            }
+            requestCarControl(speed, servo);
+        }
+        if (new_do_buzzer) {
+            if (*new_do_buzzer)
+                requestBuzzer();
+            else
+                clearBuzzer();
+        }
+        if (new_do_sample_once) {
+            if (*new_do_sample_once)
+                requestSampleOnce();
+            else
+                clearSampleOnce();
+        }
+    }
+
+    void recv_thread_main() {
+        struct input_event ev;
+        struct pollfd pfd{joystick_fd, POLLIN, 0};
+
+        while (!thread_stop.load(memory_order_relaxed)) {
+            int pr = poll(&pfd, 1, 100); // 100ms 超时
+            if (pr < 0) {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            if (pr == 0)
+                continue; // 超时，回到循环顶检查 thread_stop
+
+            while (true) {
+                auto rc =
+                    libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL, &ev);
+                // 成功
+                if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
+                    processEvent(ev);
+                    continue;
+                }
+
+                // ---- 失败 ----
+                if (rc == LIBEVDEV_READ_STATUS_SYNC) {
+                    // 出现 SYN_DROPPED
+                    continue;
+                }
+
+                if (rc == -EAGAIN)
+                    break;
+
+                // 其他负值：设备错误/被拔掉
+                return;
+            }
+        }
     }
 };
 
 int main(int argc, char const *argv[]) {
     auto js = JoyStick::create(); // 遥控手柄类
-    if (!js)
+    if (!js) {
+        cerr << "Failed to initialize joystick." << endl;
         return 1;
+    }
 
     // 通信
-    auto client = Uart::create("/dev/ttyUSB0");
-    if (!client) {
+    auto car = CarControl::create();
+    if (!car) {
         cerr << "Failed to initialize uart!\n";
         return 1;
     }
 
-    client->buzzerSound(Buzzer::start);
+    thread carControlThread([car, js]() {
+        while (true) {
+            js->waitEvent();
+            float speed, servo;
+            if (js->takeCarControl(speed, servo)) {
+                car->carControl(speed, servo); // 运动
+            }
+
+            if (js->takeBuzzer()) {
+                car->buzzerSound(Buzzer::ding);
+            }
+        }
+    });
+
+    car->buzzerSound(Buzzer::start);
 
     // 摄像头初始化
     VideoCapture capture("/dev/video0");
@@ -475,11 +423,6 @@ int main(int argc, char const *argv[]) {
 
     uint32_t index = 0;
     while (1) {
-        float speed, servo;
-        if (js->takeUartControl(speed, servo)) {
-            client->carControl(speed, servo); // 运动
-        }
-
         // 读取图像
         Mat img;
         if (!capture.read(img))
@@ -489,7 +432,7 @@ int main(int argc, char const *argv[]) {
         predeal->correction(img); // 图像矫正
 
         // 图像采集
-        if (js->isSampleMore() || js->takeSampleOnce()) {
+        if (js->takeSampleOnce()) {
             // 保存到本地
             index++;
 
@@ -500,10 +443,6 @@ int main(int argc, char const *argv[]) {
 
             imwrite(imgPath + imgName, img);
             cout << "Saved image: " << imgName << endl;
-        }
-
-        if (js->takeBuzzer()) {
-            client->buzzerSound(Buzzer::ding);
         }
 
         putText(img, to_string(index), Point(10, 30), cv::FONT_HERSHEY_TRIPLEX,

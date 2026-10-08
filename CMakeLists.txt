@@ -12,7 +12,7 @@ find_package(PkgConfig)
 
 add_subdirectory(third_party/nlohmann_json)
 
-add_subdirectory(src/uart)
+add_subdirectory(src/control)
 add_subdirectory(src/predeal)
 add_subdirectory(src/tools)
 add_subdirectory(src/detection)
@@ -40,7 +40,9 @@ target_link_libraries(detection_tool PRIVATE predeal detection)
 
 # 图像采集
 add_executable(collection src/tool/collection.cpp)
-target_link_libraries(collection PRIVATE uart predeal tools pthread ${OpenCV_LIBRARIES})
+pkg_search_module(evdev REQUIRED IMPORTED_TARGET libevdev)
+pkg_search_module(udev REQUIRED IMPORTED_TARGET libudev)
+target_link_libraries(collection PRIVATE control predeal tools pthread PkgConfig::evdev PkgConfig::udev ${OpenCV_LIBRARIES})
 
 # 主程序
 add_subdirectory(src/icar)

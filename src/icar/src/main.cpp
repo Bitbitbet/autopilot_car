@@ -1,4 +1,5 @@
 #include "center.hpp"
+#include "control.hpp"
 #include "detection.hpp"
 #include "fsm/busy.hpp"
 #include "fsm/cross.hpp"
@@ -12,7 +13,6 @@
 #include "motion.hpp"
 #include "predeal.hpp"
 #include "show.hpp"
-#include "uart.hpp"
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -56,7 +56,7 @@ class Icar {
     shared_ptr<Show> show;       // 初始化UI显示窗口
     shared_ptr<cv::VideoCapture> capture; // Opencv相机类
     shared_ptr<Detection> detection;      // 目标检测类
-    shared_ptr<Uart> uart;                // UART通信类
+    shared_ptr<CarControl> uart;          // UART通信类
     shared_ptr<Params> params;            // 车辆状态参数（FSM共享传递）
     shared_ptr<Loops> loops;              // 子线程循环
     shared_ptr<Center> center;            // 控制中心处理类
@@ -197,7 +197,7 @@ class Icar {
                                    params->config.score); // AI模型初始化
 
         // 初始化TCP通信客户端
-        uart = Uart::create("/dev/ttyUSB0");
+        uart = CarControl::create();
         if (!uart) {
             exit(-1);
         }

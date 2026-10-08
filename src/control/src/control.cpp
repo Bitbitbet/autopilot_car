@@ -1,21 +1,24 @@
-#include "uart.hpp"
+#include "control.hpp"
+#include <array>
 #include <iostream>
+#include <libserial/SerialPort.h>
 #include <memory>
 #include <string>
 
+using namespace LibSerial;
 using std::cerr;
 using std::endl;
 using std::shared_ptr;
 using std::string;
 
-Uart::Uart() = default;
-Uart::Uart(Uart &&) = default;
+CarControl::CarControl() = default;
+CarControl::CarControl(CarControl &&) = default;
 
-shared_ptr<Uart> Uart::create(string portName) {
-    auto uart = std::shared_ptr<Uart>(new Uart());
+shared_ptr<CarControl> CarControl::create() {
+    auto uart = std::shared_ptr<CarControl>(new CarControl());
 
     auto serialPort = std::make_unique<SerialPort>();
-    // try检测语句块有没有异常
+    const char *portName = "/dev/ttyUSB0";
     try {
         serialPort->Open(portName);                               // 打开串口
         serialPort->SetBaudRate(BaudRate::BAUD_115200);           // 设置波特率
@@ -81,12 +84,12 @@ shared_ptr<Uart> Uart::create(string portName) {
     return uart;
 }
 
-Uart::~Uart() {
+CarControl::~CarControl() {
     carControl(0, PWMSERVOMID);
     threadRecv->join();
     serialPort->Close();
 };
-void Uart::translateBuffer(
+void CarControl::translateBuffer(
     const std::array<uint8_t, USB_FRAME_LENMAX> &buffer) {
     /* DEBUG 打印接收的帧 */
     printf("USB Frame Received: [");
@@ -139,7 +142,7 @@ void Uart::translateBuffer(
         break;
     }
 }
-void Uart::carControl(float speed, uint16_t servo) {
+void CarControl::carControl(float speed, uint16_t servo) {
     uint8_t buff[11];  // 多发送一个字节
     uint8_t check = 0; // 校验位
     Bit32Union bit32U;
@@ -169,7 +172,7 @@ void Uart::carControl(float speed, uint16_t servo) {
  *
  * @param sound
  */
-void Uart::buzzerSound(Buzzer sound) {
+void CarControl::buzzerSound(Buzzer sound) {
     uint8_t buff[6];   // 多发送一个字节
     uint8_t check = 0; // 校验位
 
@@ -200,7 +203,7 @@ void Uart::buzzerSound(Buzzer sound) {
 
     writeBuffer(buff, 6);
 }
-void Uart::writeBuffer(void *buffer, size_t len) {
+void CarControl::writeBuffer(void *buffer, size_t len) {
     for (size_t i = 0; i < len; ++i)
         serialPort->WriteByte(((uint8_t *)buffer)[i]);
     serialPort->DrainWriteBuffer();
@@ -210,7 +213,7 @@ void Uart::writeBuffer(void *buffer, size_t len) {
  * @brief 发送心跳信号
  *
  */
-void Uart::sendHeart() {
+void CarControl::sendHeart() {
     uint8_t buff[5];   // 多发送一个字节
     uint8_t check = 0; // 校验位
 

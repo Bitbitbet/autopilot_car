@@ -1,17 +1,9 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
-#include <cstdio>
-#include <libserial/SerialPort.h> // 串口通信
-#include <libserial/SerialPortConstants.h>
-#include <math.h> // 数学函数类
-#include <memory>
-#include <stdint.h> // 整型数据类
-#include <string.h>
+#include <libserial/SerialPort.h>
 #include <thread>
 
-using namespace LibSerial;
 // USB通信帧
 #define USB_FRAME_HEAD 0x42 // USB通信帧头
 #define USB_FRAME_LENMIN 4  // USB通信帧最短字节长度
@@ -57,11 +49,11 @@ enum class Buzzer : uint8_t {
     start,   // 开机
 };
 
-class Uart {
+class CarControl {
   private:
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
-    std::unique_ptr<SerialPort> serialPort;
-    Uart();
+    std::unique_ptr<LibSerial::SerialPort> serialPort;
+    CarControl();
 
     /**
      * @brief 串口通信协议数据转换
@@ -69,10 +61,10 @@ class Uart {
     void translateBuffer(const std::array<uint8_t, USB_FRAME_LENMAX> &buffer);
 
   public:
-    Uart(Uart &&);
-    ~Uart();
+    CarControl(CarControl &&);
+    ~CarControl();
 
-    static std::shared_ptr<Uart> create(std::string portName);
+    static std::shared_ptr<CarControl> create();
 
     bool keypress = false; // 按键
     bool killAll = false;  // 杀进程

@@ -1,0 +1,5 @@
+pkg_search_module(serial REQUIRED IMPORTED_TARGET libserial)
+
+add_library(control STATIC src/control.cpp)
+target_include_directories(control PUBLIC include)
+target_link_libraries(control PRIVATE PkgConfig::serial)
