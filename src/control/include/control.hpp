@@ -52,7 +52,8 @@ enum class Buzzer : uint8_t {
 class CarControl {
   private:
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
-    std::unique_ptr<LibSerial::SerialPort> serialPort;
+    LibSerial::SerialPort serialPort;
+    std::atomic_bool recvThreadStop;
     CarControl();
 
     /**
@@ -60,8 +61,9 @@ class CarControl {
      */
     void translateBuffer(const std::array<uint8_t, USB_FRAME_LENMAX> &buffer);
 
+    void recvThreadMain();
+
   public:
-    CarControl(CarControl &&);
     ~CarControl();
 
     static std::shared_ptr<CarControl> create();

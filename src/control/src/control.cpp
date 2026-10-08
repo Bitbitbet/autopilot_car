@@ -1,5 +1,6 @@
 #include "control.hpp"
 #include <array>
+#include <atomic>
 #include <iostream>
 #include <libserial/SerialPort.h>
 #include <memory>
@@ -8,24 +9,27 @@
 using namespace LibSerial;
 using std::cerr;
 using std::endl;
+using std::make_unique;
+using std::memory_order_relaxed;
 using std::shared_ptr;
 using std::string;
+using std::thread;
 
 CarControl::CarControl() = default;
-CarControl::CarControl(CarControl &&) = default;
 
 shared_ptr<CarControl> CarControl::create() {
-    auto uart = std::shared_ptr<CarControl>(new CarControl());
+    auto carControl = shared_ptr<CarControl>(new CarControl);
 
-    auto serialPort = std::make_unique<SerialPort>();
     const char *portName = "/dev/ttyUSB0";
     try {
-        serialPort->Open(portName);                               // 打开串口
-        serialPort->SetBaudRate(BaudRate::BAUD_115200);           // 设置波特率
-        serialPort->SetCharacterSize(CharacterSize::CHAR_SIZE_8); // 8位数据位
-        serialPort->SetFlowControl(FlowControl::FLOW_CONTROL_NONE); // 设置流控
-        serialPort->SetParity(Parity::PARITY_NONE);                 // 无校验
-        serialPort->SetStopBits(StopBits::STOP_BITS_1);             // 1个停止位
+        carControl->serialPort.Open(portName);                     // 打开串口
+        carControl->serialPort.SetBaudRate(BaudRate::BAUD_115200); // 设置波特率
+        carControl->serialPort.SetCharacterSize(
+            CharacterSize::CHAR_SIZE_8); // 8位数据位
+        carControl->serialPort.SetFlowControl(
+            FlowControl::FLOW_CONTROL_NONE);                       // 设置流控
+        carControl->serialPort.SetParity(Parity::PARITY_NONE);     // 无校验
+        carControl->serialPort.SetStopBits(StopBits::STOP_BITS_1); // 1个停止位
     } catch (const OpenFailed &) {
         cerr << "Serial port: " << portName << "open failed ..." << endl;
         // error = -2;
@@ -40,54 +44,60 @@ shared_ptr<CarControl> CarControl::create() {
         // error = -4;
         return nullptr;
     }
-    uart->serialPort = std::move(serialPort);
 
-    auto threadRecv = std::make_unique<std::thread>([uart]() {
-        size_t index = 0;
-        std::array<uint8_t, USB_FRAME_LENMAX> buffer; // 临时缓冲数据
-        while (1) {
-            uint8_t byte;
-            uart->serialPort->ReadByte(byte, 0);
+    carControl->recvThreadStop.store(false, memory_order_relaxed);
+    auto raw = carControl.get();
 
-            /* 起始帧不是USB_FRAME_HEAD就不开始接收 */
-            if (index == 0 && byte != USB_FRAME_HEAD) {
-                continue;
-            }
-            /* 长度过小或过大，重新接收 */
-            if (index == 2 &&
-                (byte > USB_FRAME_LENMAX || byte < USB_FRAME_LENMIN)) {
-                index = 0;
-                continue;
-            }
-            /* 接收完毕，计算校验、提交后重置 */
-            if (index >= 3 && index == buffer[2] - 1) {
-
-                uint8_t check = 0;
-                for (size_t i = 0; i < index; ++i)
-                    check += buffer[i];
-
-                if (check == byte) {
-                    buffer[index] = byte;
-                    uart->translateBuffer(buffer);
-                }
-                index = 0;
-                continue;
-            }
-
-            buffer[index] = byte;
-            ++index;
-        }
-    });
-    uart->threadRecv = std::move(threadRecv);
+    carControl->threadRecv =
+        make_unique<thread>([raw]() { raw->recvThreadMain(); });
 
     // error = 0;
-    return uart;
+    return carControl;
+}
+
+void CarControl::recvThreadMain() {
+    size_t index = 0;
+    std::array<uint8_t, USB_FRAME_LENMAX> buffer; // 临时缓冲数据
+    while (!recvThreadStop.load(memory_order_relaxed)) {
+        uint8_t byte;
+        serialPort.ReadByte(byte, 0);
+
+        /* 起始帧不是USB_FRAME_HEAD就不开始接收 */
+        if (index == 0 && byte != USB_FRAME_HEAD) {
+            continue;
+        }
+        /* 长度过小或过大，重新接收 */
+        if (index == 2 &&
+            (byte > USB_FRAME_LENMAX || byte < USB_FRAME_LENMIN)) {
+            index = 0;
+            continue;
+        }
+        /* 接收完毕，计算校验、提交后重置 */
+        if (index >= 3 && index == buffer[2] - 1) {
+
+            uint8_t check = 0;
+            for (size_t i = 0; i < index; ++i)
+                check += buffer[i];
+
+            if (check == byte) {
+                buffer[index] = byte;
+                translateBuffer(buffer);
+            }
+            index = 0;
+            continue;
+        }
+
+        buffer[index] = byte;
+        ++index;
+    }
 }
 
 CarControl::~CarControl() {
     carControl(0, PWMSERVOMID);
+    recvThreadStop.store(true, memory_order_relaxed);
     threadRecv->join();
-    serialPort->Close();
+    carControl(0, PWMSERVOMID);
+    serialPort.Close();
 };
 void CarControl::translateBuffer(
     const std::array<uint8_t, USB_FRAME_LENMAX> &buffer) {
@@ -205,8 +215,8 @@ void CarControl::buzzerSound(Buzzer sound) {
 }
 void CarControl::writeBuffer(void *buffer, size_t len) {
     for (size_t i = 0; i < len; ++i)
-        serialPort->WriteByte(((uint8_t *)buffer)[i]);
-    serialPort->DrainWriteBuffer();
+        serialPort.WriteByte(((uint8_t *)buffer)[i]);
+    serialPort.DrainWriteBuffer();
 }
 
 /**

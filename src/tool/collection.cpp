@@ -108,7 +108,7 @@ class JoyStick {
             return nullptr;
         }
 
-        int joystick_fd = open(joystick_path.c_str(), O_RDONLY);
+        int joystick_fd = open(joystick_path.c_str(), O_RDONLY | O_NONBLOCK);
         if (joystick_fd < 0) {
             cerr << "Failed to open joystick device " << joystick_path << "."
                  << endl;
@@ -135,33 +135,35 @@ class JoyStick {
 
     ~JoyStick() {
         thread_stop.store(true, memory_order_relaxed);
-        if (recv_thread && recv_thread->joinable())
-            recv_thread->join();
-        if (dev)
-            libevdev_free(dev);
-        if (joystick_fd >= 0)
-            close(joystick_fd);
+        recv_thread->join();
+        libevdev_free(dev);
+        close(joystick_fd);
     }
 
     // ---------------- 对外接口 ----------------
 
-    bool takeCarControl(float &outSpeed, float &outServo) {
+    bool takeCarControl(float &outSpeed, uint16_t &outServo) {
         lock_guard lk(mtx);
         if (!do_car_control)
             return false;
         outSpeed = speed;
         outServo = servo;
+        do_car_control = false;
         return true;
     }
 
     bool takeBuzzer() {
         lock_guard lk(mtx);
-        return do_buzzer;
+        auto rst = do_buzzer;
+        do_buzzer = false;
+        return rst;
     }
 
     bool takeSampleOnce() {
         lock_guard lk(mtx);
-        return do_sample_once;
+        auto rst = do_sample_once;
+        do_sample_once = false;
+        return rst;
     }
     void waitEvent() {
         unique_lock lk(mtx);
@@ -191,8 +193,8 @@ class JoyStick {
     bool do_sample_once = false;
     bool do_car_control = false;
     bool do_buzzer = false;
-    float speed = 0;           // 车速：m/s
-    float servo = PWMSERVOMID; // 打舵：PWM
+    float speed = 0;              // 车速：m/s
+    uint16_t servo = PWMSERVOMID; // 打舵：PWM
     mutex mtx;
     condition_variable cv;
 
@@ -200,7 +202,7 @@ class JoyStick {
 
     JoyStick() {}
 
-    void requestCarControl(float newSpeed, float newServo) {
+    void requestCarControl(float newSpeed, uint16_t newServo) {
         bool old_do_car_control;
         {
             lock_guard lk(mtx);
@@ -233,10 +235,12 @@ class JoyStick {
 
     // ---------------- 事件处理 ----------------
     void processEvent(const input_event &ev) {
-        optional<float> new_servo = nullopt;
+        optional<bool> force_speed_forward = nullopt;
         optional<float> new_speed = nullopt;
+        optional<uint16_t> new_servo = nullopt;
         optional<bool> new_do_sample_once = nullopt;
         optional<bool> new_do_buzzer = nullopt;
+
         if (ev.type == EV_ABS) {
             switch (ev.code) {
             case ABS_X: { // 方向控制
@@ -251,7 +255,7 @@ class JoyStick {
                 new_servo = PWMSERVOMID + v * (PWMSERVOMID - PWMSERVOMIN);
                 break;
             }
-            case ABS_RZ: {
+            case ABS_RZ: { // 右扳机，油门控制
                 const struct input_absinfo *abs =
                     libevdev_get_abs_info(dev, ev.code);
                 if (!abs)
@@ -259,7 +263,7 @@ class JoyStick {
                 // v [0, 1]
                 auto v = (double)(ev.value - abs->minimum) /
                          (abs->maximum - abs->minimum);
-                new_speed = (forward ? 1 : -1) * v;
+                new_speed = (forward ? 1 : -1) * v * 0.5;
                 break;
             }
             default:
@@ -291,32 +295,34 @@ class JoyStick {
 
             case BTN_START: // 向前
                 if (ev.value == 1) {
-                    forward = true;
-                    new_speed = -fabs(speed);
+                    force_speed_forward = true;
                     new_do_buzzer = true;
                 }
                 break;
 
             case BTN_SELECT: // 向后
                 if (ev.value == 1) {
-                    forward = false;
-                    new_speed = -fabs(speed);
+                    force_speed_forward = false;
                     new_do_buzzer = true;
                 }
                 break;
 
             default:
-                new_speed = 0;
+                // new_speed = 0;
                 break;
             }
         }
         if (new_speed || new_servo) {
-            float speed, servo;
+            float speed;
+            uint16_t servo;
             if (new_speed)
                 speed = *new_speed;
             else {
                 lock_guard lk(mtx);
                 speed = this->speed;
+            }
+            if (force_speed_forward) {
+                speed = (*force_speed_forward ? 1 : -1) * fabs(speed);
             }
             if (new_servo)
                 servo = *new_servo;
@@ -325,6 +331,18 @@ class JoyStick {
                 servo = this->servo;
             }
             requestCarControl(speed, servo);
+        }
+        if (force_speed_forward) {
+            float speed;
+            uint16_t servo;
+            {
+                lock_guard lk(mtx);
+                speed = this->speed;
+                servo = this->servo;
+            }
+            speed = (*force_speed_forward ? 1 : -1) * fabs(speed);
+            requestCarControl(speed, servo);
+            forward = *force_speed_forward;
         }
         if (new_do_buzzer) {
             if (*new_do_buzzer)
@@ -396,8 +414,10 @@ int main(int argc, char const *argv[]) {
     thread carControlThread([car, js]() {
         while (true) {
             js->waitEvent();
-            float speed, servo;
+            float speed;
+            uint16_t servo;
             if (js->takeCarControl(speed, servo)) {
+                // cout << "Speed: " << speed << ", Servo: " << servo << endl;
                 car->carControl(speed, servo); // 运动
             }
 
