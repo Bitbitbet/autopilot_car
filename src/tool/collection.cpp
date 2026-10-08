@@ -269,7 +269,7 @@ class JoyStick {
             default:
                 break;
             }
-        } else {
+        } else if (ev.type == EV_KEY) {
             switch (ev.code) {
             case BTN_WEST: // 单次采图 (X)
                 if (ev.value == 1) {
@@ -308,7 +308,7 @@ class JoyStick {
                 break;
 
             default:
-                // new_speed = 0;
+                new_speed = 0;
                 break;
             }
         }
@@ -322,7 +322,8 @@ class JoyStick {
                 speed = this->speed;
             }
             if (force_speed_forward) {
-                speed = (*force_speed_forward ? 1 : -1) * fabs(speed);
+                forward = *force_speed_forward;
+                speed = (forward ? 1 : -1) * fabs(speed);
             }
             if (new_servo)
                 servo = *new_servo;
@@ -331,8 +332,8 @@ class JoyStick {
                 servo = this->servo;
             }
             requestCarControl(speed, servo);
-        }
-        if (force_speed_forward) {
+        } else if (force_speed_forward) {
+            forward = *force_speed_forward;
             float speed;
             uint16_t servo;
             {
@@ -340,9 +341,8 @@ class JoyStick {
                 speed = this->speed;
                 servo = this->servo;
             }
-            speed = (*force_speed_forward ? 1 : -1) * fabs(speed);
+            speed = (forward ? 1 : -1) * fabs(speed);
             requestCarControl(speed, servo);
-            forward = *force_speed_forward;
         }
         if (new_do_buzzer) {
             if (*new_do_buzzer)
