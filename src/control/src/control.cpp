@@ -67,7 +67,7 @@ void CarControl::recvThreadMain() {
         } catch (const std::exception &e) {
             cerr << "[Error]: Serial receive failed: " << e.what() << endl;
             killAll = true;
-            stop();
+            halt();
             break;
         }
 
@@ -127,6 +127,11 @@ void CarControl::stop() noexcept {
         cerr << "[Error]: Stop transmission failed." << endl;
     }
 }
+
+void CarControl::halt() noexcept {
+    halted = true;
+    stop();
+}
 void CarControl::translateBuffer(
     const std::array<uint8_t, USB_FRAME_LENMAX> &buffer) {
     /* DEBUG 打印接收的帧 */
@@ -182,7 +187,7 @@ void CarControl::translateBuffer(
 }
 void CarControl::carControl(float speed, uint16_t servo) {
     std::lock_guard<std::mutex> lock(writeMutex);
-    if (killAll || exitBoot) { // 接收线程请求停车后不得发送新的行驶指令
+    if (halted || killAll || exitBoot) { // 停车后不得发送新的行驶指令
         speed = 0;
         servo = PWMSERVOMID;
     }

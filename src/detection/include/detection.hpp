@@ -39,6 +39,7 @@ class Detection {
     NDTensor get_output(int index);
 
     void drawBox(Mat &img);
+    void drawBox(Mat &img, const std::vector<PredictResult> &snapshot);
 
     /**
      * @brief 获取Opencv颜色

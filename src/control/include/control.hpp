@@ -58,6 +58,7 @@ class CarControl {
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
     LibSerial::SerialPort serialPort;
     std::atomic_bool recvThreadStop{true};
+    std::atomic_bool halted{false};
     std::mutex writeMutex;
     CarControl();
 
@@ -80,6 +81,7 @@ class CarControl {
 
     // Best-effort stop; successful transmission is not a hardware acknowledgement.
     void stop() noexcept;
+    void halt() noexcept; // 本次会话永久停车，防止并发线程重新发送行驶指令
 
     /**
      * @brief 速度+方向控制

@@ -10,3 +10,13 @@ add_executable(stop_regression stop_regression.cpp
 target_include_directories(stop_regression PRIVATE ../src/icar/src)
 target_link_libraries(stop_regression PRIVATE tools nlohmann_json)
 target_compile_options(stop_regression PRIVATE -UNDEBUG -D_DEBUG)
+
+add_executable(joystick_regression joystick_regression.cpp ../src/control/src/control.cpp)
+target_include_directories(joystick_regression BEFORE PRIVATE mock ../src/control/include ../src/tool)
+target_link_libraries(joystick_regression PRIVATE pthread PkgConfig::udev)
+target_compile_options(joystick_regression PRIVATE -UNDEBUG)
+
+add_executable(result_regression result_regression.cpp)
+target_include_directories(result_regression PRIVATE ../src/icar/src)
+target_link_libraries(result_regression PRIVATE pthread)
+target_compile_options(result_regression PRIVATE -UNDEBUG)

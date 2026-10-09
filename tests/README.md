@@ -26,6 +26,21 @@ OpenCV access stay enabled in these tests even for Release builds.
 - `stop_regression`: after 21 consecutive lost-track frames, request shutdown
   without calling `exit`; give zero speed priority; the alternate outline check
   also requests cleanup instead of directly terminating.
+- `joystick_regression`: real FIFO and `poll()` with mocked libevdev and serial;
+  disconnect stop, rejection of stale drive commands, SIGINT while waiting,
+  camera exception, write exception, and joined threads. Links libudev but never
+  opens a physical input or serial device.
+- `result_regression`: a stalled inference producer cannot block the consumer;
+  completed snapshots replace older pending results; model exceptions propagate.
+
+The last two tests are also CMake targets enabled by
+`CAR_BUILD_REGRESSION_TESTS`. To run the result test with a native compiler:
+
+```sh
+g++ -std=c++20 -pthread -UNDEBUG -Isrc/icar/src \
+    tests/result_regression.cpp -o /tmp/result_regression
+timeout 5 /tmp/result_regression
+```
 
 The existing extra serial byte is retained and initialized to zero. Actual
 lower-controller compatibility and motor stopping require separate hardware

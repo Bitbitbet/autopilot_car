@@ -13,6 +13,8 @@
 #include "motion.hpp"
 #include "predeal.hpp"
 #include "show.hpp"
+#include "latest_result.hpp"
+#include "stop_signal.hpp"
 #include <condition_variable>
 #include <csignal>
 #include <exception>
@@ -36,8 +38,7 @@ namespace this_thread = std::this_thread;
 namespace chrono = std::chrono;
 
 namespace {
-volatile std::sig_atomic_t stopRequested = 0;
-void requestStop(int) { stopRequested = 1; }
+auto &stopRequested = car_signal::requested;
 }
 
 class Icar {
@@ -75,11 +76,8 @@ class Icar {
     mutex mtxImg;
     condition_variable cvImg;
     atomic<bool> readyImg{false};
-    mutex mtxRes;
-    atomic<bool> readyRes{false};
     atomic<bool> shuttingDown{false};
-    std::vector<PredictResult> pendingResults;
-    std::exception_ptr modelError;
+    LatestResult<std::vector<PredictResult>> modelResults;
 
     /**
      * @brief 鼠标的事件回调函数
@@ -119,25 +117,23 @@ class Icar {
      *
      */
     void runModel() {
-        std::unique_lock<std::mutex> lock(mtxImg);
-        cvImg.wait_for(lock, chrono::milliseconds(50),
-                       [this] { return shuttingDown.load() || readyImg.load(); });
-        if (shuttingDown || !readyImg)
-            return;
-        cv::Mat img = imgShare.clone(); // 图像拷贝出来再释放锁
-        readyImg = false;
-        lock.unlock();
-
-        // 启动AI推理
-        std::lock_guard<std::mutex> lock_result(mtxRes);
         try {
+            std::unique_lock<std::mutex> lock(mtxImg);
+            cvImg.wait_for(lock, chrono::milliseconds(50),
+                           [this] { return shuttingDown.load() || readyImg.load(); });
+            if (shuttingDown || !readyImg)
+                return;
+            cv::Mat img = imgShare.clone(); // 图像拷贝出来再释放锁
+            readyImg = false;
+            lock.unlock();
+
+            // 启动AI推理
             detection->inference(img);
-            pendingResults = detection->results;
-            readyRes = true;
+            modelResults.publish(detection->results);
         } catch (...) {
-            modelError = std::current_exception();
             shuttingDown = true;
-            uart->stop();
+            uart->halt();
+            modelResults.fail(std::current_exception());
         }
     }
 
@@ -279,7 +275,7 @@ class Icar {
 
     void stop() noexcept {
         if (uart)
-            uart->stop();
+            uart->halt();
     }
 
     bool finished() const { return params->quit; }
@@ -294,13 +290,7 @@ class Icar {
             stop();
             return;
         }
-        {
-            lock_guard<std::mutex> lock(mtxRes);
-            if (modelError)
-                std::rethrow_exception(modelError);
-            if (readyRes.exchange(false))
-                params->results = pendingResults; // FSM共享结果仅由主线程写入
-        }
+        modelResults.take(params->results); // FSM与绘图只读取主线程的结果快照
         //[01] 视频源读取
         cv::Mat img;
         if (params->config.debug) {               // 综合显示调试UI窗口
@@ -384,10 +374,7 @@ class Icar {
 
         //[08] 综合显示调试UI窗口
         if (params->config.debug) {
-            {
-                lock_guard<std::mutex> lock(mtxRes);
-                detection->drawBox(img); // 与模型更新结果互斥
-            }
+            detection->drawBox(img, params->results);
             center->drawImage(params, img); // 图像绘制控制路径
             motion->drawImage(params, img); // 图像绘制速度
             show->setNewWindow(3, "Ctrl", img);
@@ -405,7 +392,6 @@ class Icar {
             show->setNewWindow(4, "FSM", imgRes);
         } else // 实车控制
         {
-            lock_guard<std::mutex> lock(mtxRes); // 与推理异常停车互斥
             if (stopRequested || shuttingDown || uart->killAll || uart->exitBoot) {
                 params->quit = true;
                 stop();
@@ -428,9 +414,7 @@ class Icar {
 };
 
 int main() {
-    std::signal(SIGINT, requestStop);
-    std::signal(SIGTERM, requestStop);
-    std::signal(SIGHUP, requestStop);
+    car_signal::install();
     try {
         Icar icar;
 

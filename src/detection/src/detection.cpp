@@ -245,8 +245,12 @@ void Detection::render() {
 }
 
 void Detection::drawBox(Mat &img) {
-    for (int i = 0; i < results.size(); i++) {
-        PredictResult result = results[i];
+    drawBox(img, results);
+}
+
+void Detection::drawBox(Mat &img, const std::vector<PredictResult> &snapshot) {
+    for (const auto &item : snapshot) {
+        PredictResult result = item;
 
         if (find(drawSkipLabels.begin(), drawSkipLabels.end(), result.type) !=
             drawSkipLabels.end())

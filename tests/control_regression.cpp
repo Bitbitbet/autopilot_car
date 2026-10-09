@@ -48,6 +48,14 @@ int main() {
         assert(speed == 0.0f);
     }
     LibSerial::failRead = false;
+    control->killAll = false; // Clearing the flag must not clear the halt latch.
+    control->carControl(0.5f, 1800);
+    {
+        std::lock_guard<std::mutex> lock(LibSerial::outputMutex);
+        float speed;
+        std::memcpy(&speed, LibSerial::frames.back().data() + 3, sizeof speed);
+        assert(speed == 0);
+    }
     auto start = std::chrono::steady_clock::now();
     control.reset();
     assert(std::chrono::steady_clock::now() - start < std::chrono::seconds(1));
