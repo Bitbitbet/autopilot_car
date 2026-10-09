@@ -1,7 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <atomic>
+#include <memory>
 #include <libserial/SerialPort.h>
+#include <mutex>
 #include <thread>
 
 // USB通信帧
@@ -53,7 +57,8 @@ class CarControl {
   private:
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
     LibSerial::SerialPort serialPort;
-    std::atomic_bool recvThreadStop;
+    std::atomic_bool recvThreadStop{true};
+    std::mutex writeMutex;
     CarControl();
 
     /**
@@ -62,15 +67,19 @@ class CarControl {
     void translateBuffer(const std::array<uint8_t, USB_FRAME_LENMAX> &buffer);
 
     void recvThreadMain();
+    void writeBufferUnlocked(void *buffer, size_t len);
 
   public:
     ~CarControl();
 
     static std::shared_ptr<CarControl> create();
 
-    bool keypress = false; // 按键
-    bool killAll = false;  // 杀进程
-    bool exitBoot = false; // 退出boot
+    std::atomic_bool keypress{false}; // 按键
+    std::atomic_bool killAll{false};  // 杀进程
+    std::atomic_bool exitBoot{false}; // 退出boot
+
+    // Best-effort stop; successful transmission is not a hardware acknowledgement.
+    void stop() noexcept;
 
     /**
      * @brief 速度+方向控制

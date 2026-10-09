@@ -29,7 +29,6 @@ class Loops {
         } else {
             _thread = std::thread(&Loops::loop, this);
         }
-        _thread.detach();
     }
 
     void shutdown() {

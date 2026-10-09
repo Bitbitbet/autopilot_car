@@ -104,7 +104,7 @@ void Motion::outlineCheck(std::shared_ptr<Params> &params) {
         if (countRes > 15) {
             std::cout << "-----> [Stop] Game over, system exit!!! <-----"
                       << std::endl;
-            std::exit(0); // 程序退出
+            params->quit = true; // 主循环统一停车并退出
         }
     } else { // 出线检测
         if (params->track->pointsEdgeLeft.size() < 30 &&

@@ -46,3 +46,8 @@ target_link_libraries(collection PRIVATE control predeal tools pthread PkgConfig
 
 # 主程序
 add_subdirectory(src/icar)
+
+option(CAR_BUILD_REGRESSION_TESTS "Build hardware-free regression checks" OFF)
+if(CAR_BUILD_REGRESSION_TESTS)
+    add_subdirectory(tests)
+endif()

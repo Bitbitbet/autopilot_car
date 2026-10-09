@@ -250,9 +250,12 @@ void Center::fitting(shared_ptr<Params> &params) {
         sigmaCenter = 1000;
 
     // 车辆冲出赛道检测
-    if (!params->ctrl.parking)
+    if (!params->ctrl.parking &&
         derailmentCheck(params->track->pointsEdgeLeft,
-                        params->track->pointsEdgeRight);
+                        params->track->pointsEdgeRight)) {
+        params->ctrl.stop = true;
+        params->quit = true; // 主循环统一停车并退出
+    }
 }
 
 /**
@@ -570,7 +573,7 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft,
  * @return true
  * @return false
  */
-void Center::derailmentCheck(vector<PointX> pointsEdgeLeft,
+bool Center::derailmentCheck(vector<PointX> pointsEdgeLeft,
                              vector<PointX> pointsEdgeRight) {
     if (pointsEdgeLeft.size() < 30 &&
         pointsEdgeRight.size() < 30) // 防止车辆冲出赛道
@@ -579,7 +582,7 @@ void Center::derailmentCheck(vector<PointX> pointsEdgeLeft,
         timeout = 0;
         if (countOut > 20) {
             printf("-----> ICAR Outline!!! <-----\n");
-            exit(0); // 程序退出
+            return true;
         }
     } else {
         timeout++;
@@ -588,4 +591,5 @@ void Center::derailmentCheck(vector<PointX> pointsEdgeLeft,
             timeout = 50;
         }
     }
+    return false;
 }

@@ -1,4 +1,5 @@
 #include "params.hpp"
+#include <stdexcept>
 
 using std::cerr;
 using std::endl;
@@ -11,7 +12,7 @@ Params::Params() {
     std::ifstream fileStr(path);
     if (!fileStr.good()) {
         cerr << "Error: Params file path:[" << path << "] not find !!!" << endl;
-        exit(-1);
+        throw std::runtime_error("Cannot open vehicle configuration");
     }
     nlohmann::json configs;
     fileStr >> configs;
@@ -19,7 +20,7 @@ Params::Params() {
         config = configs.get<Config>();
     } catch (const nlohmann::detail::exception &e) {
         cerr << "Json Params Parse failed :" << e.what() << endl;
-        exit(-1);
+        throw;
     }
 
     mode = FsmMode::normal;                    // 初始化控制模式

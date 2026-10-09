@@ -1,6 +1,7 @@
 #include "predeal.hpp"
 #include "tools.hpp"
 #include <iostream>
+#include <memory>
 
 using namespace cv;
 
