@@ -6,9 +6,9 @@ class Predeal {
   public:
     Predeal(int bin);
     ~Predeal() {};
-    cv::Mat binaryzation(cv::Mat &img);
-    void correction(cv::Mat &img);
-    void imgCutting(cv::Mat &img);
+    cv::Mat binarize(cv::Mat &img);
+    void correct(cv::Mat &img);
+    void cutImage(cv::Mat &img);
     int binary = -1; // 图像二值化阈值：<0 默认使用大津法
 
   private:

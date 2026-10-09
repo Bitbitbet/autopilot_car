@@ -449,7 +449,7 @@ int main(int argc, char const *argv[]) {
             continue;
 
         // 图像预处理
-        predeal->correction(img); // 图像矫正
+        predeal->correct(img); // 图像矫正
 
         // 图像采集
         if (js->takeSampleOnce()) {

@@ -64,7 +64,7 @@ int main(int argc, char const *argv[]) {
         }
 
         // 图像预处理
-        predeal->correction(img); // 图像矫正
+        predeal->correct(img); // 图像矫正
 
         // 启动AI推理
         auto preTime = chrono::duration_cast<chrono::milliseconds>(

@@ -17,7 +17,7 @@ Predeal::Predeal(int bin) : binary(bin) {
     cameraMatrix = cv::Mat(3, 3, CV_32FC1, Scalar::all(0)); // 摄像机内参矩阵
     distCoeffs = cv::Mat(1, 5, CV_32FC1, Scalar::all(0));   // 相机的畸变矩阵
     FileStorage file;
-    if (file.open("../res/calibration/valid/calibration.xml",
+    if (file.open("../res/calibration/calibration.xml",
                   FileStorage::READ)) // 读取本地保存的标定文件
     {
         file["cameraMatrix"] >> cameraMatrix;
@@ -36,7 +36,7 @@ Predeal::Predeal(int bin) : binary(bin) {
  * @param img  输入图像
  * @return cv::Mat 二值化图像
  */
-cv::Mat Predeal::binaryzation(cv::Mat &img) {
+cv::Mat Predeal::binarize(cv::Mat &img) {
     cv::Mat imgGray, imgBin;
     cvtColor(img, imgGray, COLOR_BGR2GRAY); // RGB转灰度图
 
@@ -61,7 +61,7 @@ cv::Mat Predeal::binaryzation(cv::Mat &img) {
  * @param img 输入图像
  * @return cv::Mat 输出图像
  */
-void Predeal::correction(cv::Mat &img) {
+void Predeal::correct(cv::Mat &img) {
     if (enable) {
         Size sizeImage; // 图像的尺寸
         sizeImage.width = img.cols;
@@ -86,7 +86,7 @@ void Predeal::correction(cv::Mat &img) {
  *
  * @param img
  */
-void Predeal::imgCutting(cv::Mat &img) {
+void Predeal::cutImage(cv::Mat &img) {
     // 图像裁剪
     // 提取 55~175 行，列方向为 30~310
     cv::Rect roi(40, 55, 260, 120); // (x, y, width, height)

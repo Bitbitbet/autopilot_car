@@ -284,14 +284,14 @@ class Icar {
 
         //[03] 图像预处理
         cv::Mat imgBin;
-        predeal->correction(img); // 图像矫正
+        predeal->correct(img); // 图像矫正
         /*---------------子线程共享数据，避免浅拷贝-----------------*/
-        lock_guard<std::mutex> lock(mtxImg);
+        lock_guard lock(mtxImg);
         imgShare = img.clone();
         readyImg = true;
         cvImg.notify_one();
         /*-------------------------------------------------------*/
-        imgBin = predeal->binaryzation(img); // 图像二值化
+        imgBin = predeal->binarize(img); // 图像二值化
 
         //[04] 赛道识别
         params->track->handle(imgBin);

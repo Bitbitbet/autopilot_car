@@ -37,11 +37,11 @@ int main(int argc, char const *argv[]) {
         }
 
         //[02] 图像预处理
-        predeal->correction(img); // 图像矫正
+        predeal->correct(img); // 图像矫正
         imshow("imgCor", img);
         // predeal->imgCutting(img); // 图像裁剪
         // imshow("imgCut", img);
-        cv::Mat imgBin = predeal->binaryzation(img); // 图像二值化
+        cv::Mat imgBin = predeal->binarize(img); // 图像二值化
         //[03] 透视变换
         cv::Mat imgIpm;
         ipm.homography(img, imgIpm);
