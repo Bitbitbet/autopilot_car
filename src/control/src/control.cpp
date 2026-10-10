@@ -7,6 +7,7 @@
 #include <string>
 
 using namespace LibSerial;
+using std::array;
 using std::cerr;
 using std::endl;
 using std::make_unique;
@@ -44,6 +45,7 @@ shared_ptr<CarControl> CarControl::create() {
         // error = -4;
         return nullptr;
     }
+    carControl->resetVelocity();
 
     carControl->recvThreadStop.store(false, memory_order_relaxed);
     auto raw = carControl.get();
@@ -66,9 +68,7 @@ void CarControl::recvThreadMain() {
             continue;
         } catch (const std::exception &e) {
             cerr << "[Error]: Serial receive failed: " << e.what() << endl;
-            killAll = true;
-            halt();
-            break;
+            exit(2);
         }
 
         /* 起始帧不是USB_FRAME_HEAD就不开始接收 */
@@ -83,7 +83,6 @@ void CarControl::recvThreadMain() {
         }
         /* 接收完毕，计算校验、提交后重置 */
         if (index >= 3 && index == buffer[2] - 1) {
-
             uint8_t check = 0;
             for (size_t i = 0; i < index; ++i)
                 check += buffer[i];
@@ -102,97 +101,32 @@ void CarControl::recvThreadMain() {
 }
 
 CarControl::~CarControl() {
-    stop();
+    resetVelocity();
     recvThreadStop.store(true, memory_order_relaxed);
     if (threadRecv && threadRecv->joinable())
         threadRecv->join();
-    try {
-        if (serialPort.IsOpen())
-            serialPort.Close();
-    } catch (const std::exception &e) {
-        cerr << "[Error]: Serial close failed: " << e.what() << endl;
-    }
+    resetVelocity();
+    serialPort.Close();
 };
 
-void CarControl::stop() noexcept {
-    try {
-        if (serialPort.IsOpen()) {
-            carControl(0, PWMSERVOMID);
-            cerr << "[STOP] Zero-speed command sent (no hardware acknowledgement)."
-                 << endl;
-        }
-    } catch (const std::exception &e) {
-        cerr << "[Error]: Stop transmission failed: " << e.what() << endl;
-    } catch (...) {
-        cerr << "[Error]: Stop transmission failed." << endl;
-    }
-}
-
-void CarControl::halt() noexcept {
-    halted = true;
-    stop();
-}
 void CarControl::translateBuffer(
-    const std::array<uint8_t, USB_FRAME_LENMAX> &buffer) {
+    const array<uint8_t, USB_FRAME_LENMAX> &buffer) {
     /* DEBUG 打印接收的帧 */
-    printf("USB Frame Received: [");
+    cerr << "USB Frame Received: [";
     bool first = true;
     for (size_t i = 0; i < buffer[2]; ++i) {
         if (first) {
             first = false;
         } else {
-            printf(", ");
+            cerr << ", ";
         }
-        printf("%d", buffer[i]);
+        cerr << buffer[i];
     }
-    printf("]\n");
-
-    switch (buffer[1]) {
-    case USB_ADDR_KEY: // 接收按键信息
-        if (buffer[3] == 1) {
-            keypress = true;
-            killAll = false;
-            exitBoot = false;
-        } else if (buffer[3] == 2) {
-            keypress = false;
-            killAll = true;
-            exitBoot = false;
-        } else if (buffer[3] == 3) {
-            keypress = false;
-            killAll = false;
-            exitBoot = true;
-        }
-
-        break;
-    case 6: // 接收按键信息
-        if (buffer[3] == 1 || (buffer[3] > 100 && buffer[3] < 2000)) // 发车
-        {
-            keypress = true;
-            killAll = false;
-            exitBoot = false;
-        } else if (buffer[3] == 2 || (buffer[3] > 2000 && buffer[3] < 5000)) {
-            keypress = false;
-            killAll = true;
-            exitBoot = false;
-        } else if (buffer[3] == 3 || buffer[3] > 5000) {
-            keypress = false;
-            killAll = false;
-            exitBoot = true;
-        }
-        break;
-
-    default:
-        break;
-    }
+    cerr << "]" << endl;
 }
 void CarControl::carControl(float speed, uint16_t servo) {
-    std::lock_guard<std::mutex> lock(writeMutex);
-    if (halted || killAll || exitBoot) { // 停车后不得发送新的行驶指令
-        speed = 0;
-        servo = PWMSERVOMID;
-    }
     uint8_t buff[11]{}; // 保留额外字节，固定为零
-    uint8_t check = 0; // 校验位
+    uint8_t check = 0;  // 校验位
     Bit32Union bit32U;
     Bit16Union bit16U;
 
@@ -212,7 +146,7 @@ void CarControl::carControl(float speed, uint16_t servo) {
         check += buff[i];
     buff[9] = check; // 校验位
 
-    writeBufferUnlocked(buff, 11);
+    writeBuffer(buff, 11);
 }
 
 /**
@@ -252,11 +186,6 @@ void CarControl::buzzerSound(Buzzer sound) {
     writeBuffer(buff, 6);
 }
 void CarControl::writeBuffer(void *buffer, size_t len) {
-    std::lock_guard<std::mutex> lock(writeMutex); // 防止完整帧交叉发送
-    writeBufferUnlocked(buffer, len);
-}
-
-void CarControl::writeBufferUnlocked(void *buffer, size_t len) {
     for (size_t i = 0; i < len; ++i)
         serialPort.WriteByte(((uint8_t *)buffer)[i]);
     serialPort.DrainWriteBuffer();

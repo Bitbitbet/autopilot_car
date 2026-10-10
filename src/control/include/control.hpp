@@ -1,11 +1,10 @@
 #pragma once
 
-#include <cstdint>
 #include <array>
 #include <atomic>
-#include <memory>
+#include <cstdint>
 #include <libserial/SerialPort.h>
-#include <mutex>
+#include <memory>
 #include <thread>
 
 // USB通信帧
@@ -58,8 +57,7 @@ class CarControl {
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
     LibSerial::SerialPort serialPort;
     std::atomic_bool recvThreadStop{true};
-    std::atomic_bool halted{false};
-    std::mutex writeMutex;
+
     CarControl();
 
     /**
@@ -68,20 +66,14 @@ class CarControl {
     void translateBuffer(const std::array<uint8_t, USB_FRAME_LENMAX> &buffer);
 
     void recvThreadMain();
-    void writeBufferUnlocked(void *buffer, size_t len);
 
   public:
     ~CarControl();
 
+    bool exitBoot = false;
+    bool keypress = false;
+
     static std::shared_ptr<CarControl> create();
-
-    std::atomic_bool keypress{false}; // 按键
-    std::atomic_bool killAll{false};  // 杀进程
-    std::atomic_bool exitBoot{false}; // 退出boot
-
-    // Best-effort stop; successful transmission is not a hardware acknowledgement.
-    void stop() noexcept;
-    void halt() noexcept; // 本次会话永久停车，防止并发线程重新发送行驶指令
 
     /**
      * @brief 速度+方向控制
@@ -90,6 +82,8 @@ class CarControl {
      * @param servo 方向：PWM（500~2500）
      */
     void carControl(float speed, uint16_t servo);
+
+    void resetVelocity() { carControl(0, PWMSERVOMID); }
 
     /**
      * @brief 蜂鸣器音效控制

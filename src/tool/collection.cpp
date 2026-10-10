@@ -1,52 +1,31 @@
 #include "collection_session.hpp"
-#include "stop_signal.hpp"
 #include "control.hpp"
 #include "predeal.hpp"
+#include "stop_signal.hpp"
 #include "tools.hpp"
-#include <atomic>
-#include <cmath>
-#include <condition_variable>
 #include <fcntl.h>
 #include <filesystem>
-#include <fstream>  // 文件操作类
 #include <iostream> // 输入输出类
 #include <libevdev/libevdev.h>
 #include <libudev.h>
 #include <linux/input.h>
 #include <linux/joystick.h>
 #include <memory>
-#include <mutex>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp> // OpenCV终端部署
-#include <optional>
 #include <poll.h>
 #include <string>      // 字符串类
 #include <sys/stat.h>  // 获取文件属性
 #include <sys/types.h> // 基本系统数据类型
-#include <thread>      // 线程类
 #include <unistd.h>
 
-using std::atomic;
-using std::atomic_bool;
-using std::atomic_uint8_t;
 using std::cerr;
-using std::condition_variable;
 using std::cout;
 using std::endl;
-using std::ifstream;
-using std::lock_guard;
 using std::make_shared;
-using std::make_unique;
-using std::memory_order_relaxed;
-using std::mutex;
-using std::nullopt;
-using std::optional;
 using std::shared_ptr;
 using std::string;
-using std::thread;
 using std::to_string;
-using std::unique_lock;
-using std::unique_ptr;
 
 using namespace cv;
 namespace fs = std::filesystem;
@@ -60,10 +39,9 @@ int main(int argc, char const *argv[]) {
             cerr << "Failed to initialize uart!\n";
             return 1;
         }
-        car->stop();
-        auto js = JoyStick::create([car] { car->halt(); });
+        car->resetVelocity();
+        auto js = JoyStick::create([car] { car->resetVelocity(); });
         if (!js) {
-            car->halt();
             cerr << "Failed to initialize joystick." << endl;
             return 1;
         }
@@ -110,8 +88,9 @@ int main(int argc, char const *argv[]) {
                 cout << "Saved image: " << imgName << endl;
             }
 
-            putText(img, to_string(index), Point(10, 30), cv::FONT_HERSHEY_TRIPLEX,
-                    1, cv::Scalar(0, 0, 254), 1, CV_AA); // 显示图片保存序号
+            putText(img, to_string(index), Point(10, 30),
+                    cv::FONT_HERSHEY_TRIPLEX, 1, cv::Scalar(0, 0, 254), 1,
+                    CV_AA); // 显示图片保存序号
             imshow("img", img);
             int key = waitKey(10);
             if (key == 32) // 空格采图

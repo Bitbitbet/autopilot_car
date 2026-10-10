@@ -9,18 +9,17 @@
 #include "fsm/slow.hpp"
 #include "fsm/stop.hpp"
 #include "fsm/yfork.hpp"
+#include "latest_result.hpp"
 #include "loop.hpp"
 #include "motion.hpp"
 #include "predeal.hpp"
 #include "show.hpp"
-#include "latest_result.hpp"
 #include "stop_signal.hpp"
 #include <condition_variable>
-#include <csignal>
 #include <exception>
-#include <stdexcept>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -65,7 +64,7 @@ class Icar {
     shared_ptr<Show> show;       // 初始化UI显示窗口
     shared_ptr<cv::VideoCapture> capture; // Opencv相机类
     shared_ptr<Detection> detection;      // 目标检测类
-    shared_ptr<CarControl> uart;          // UART通信类
+    shared_ptr<CarControl> control;       // UART通信类
     shared_ptr<Params> params;            // 车辆状态参数（FSM共享传递）
     shared_ptr<Loops> loops;              // 子线程循环
     shared_ptr<Center> center;            // 控制中心处理类
@@ -119,8 +118,9 @@ class Icar {
     void runModel() {
         try {
             std::unique_lock<std::mutex> lock(mtxImg);
-            cvImg.wait_for(lock, chrono::milliseconds(50),
-                           [this] { return shuttingDown.load() || readyImg.load(); });
+            cvImg.wait_for(lock, chrono::milliseconds(50), [this] {
+                return shuttingDown.load() || readyImg.load();
+            });
             if (shuttingDown || !readyImg)
                 return;
             cv::Mat img = imgShare.clone(); // 图像拷贝出来再释放锁
@@ -132,7 +132,7 @@ class Icar {
             modelResults.publish(detection->results);
         } catch (...) {
             shuttingDown = true;
-            uart->halt();
+            control->resetVelocity();
             modelResults.fail(std::current_exception());
         }
     }
@@ -192,7 +192,7 @@ class Icar {
         }
 
         if (params->mode != params->modeLast) {
-            uart->buzzerSound(Buzzer::ding); // 提示音效
+            control->buzzerSound(Buzzer::ding); // 提示音效
             params->modeLast = params->mode;
         }
     }
@@ -204,19 +204,19 @@ class Icar {
      *
      */
     Icar() {
-        uart = CarControl::create();
-        if (!uart)
+        control = CarControl::create();
+        if (!control)
             throw std::runtime_error("Cannot open car serial port");
-        uart->stop(); // 在配置和模型初始化之前清除残留速度
-        params = make_shared<Params>();                        // 初始化参数
-        center = make_shared<Center>();                        // 控制中心处理类
-        motion = make_shared<Motion>();                        // 运动控制器
+        control->resetVelocity();       // 在配置和模型初始化之前清除残留速度
+        params = make_shared<Params>(); // 初始化参数
+        center = make_shared<Center>(); // 控制中心处理类
+        motion = make_shared<Motion>(); // 运动控制器
         predeal = make_shared<Predeal>(params->config.binary); // 图像预处理类
         detection =
             make_shared<Detection>(params->config.model,
                                    params->config.score); // AI模型初始化
 
-        uart->buzzerSound(Buzzer::ok); // 提示音效
+        control->buzzerSound(Buzzer::ok); // 提示音效
 
         // 相机初始化
         // USB摄像头初始化
@@ -274,8 +274,8 @@ class Icar {
     }
 
     void stop() noexcept {
-        if (uart)
-            uart->halt();
+        if (control)
+            control->resetVelocity();
     }
 
     bool finished() const { return params->quit; }
@@ -285,7 +285,7 @@ class Icar {
      *
      */
     void mainLoop() {
-        if (stopRequested || uart->killAll || uart->exitBoot) {
+        if (stopRequested) {
             params->quit = true;
             stop();
             return;
@@ -295,16 +295,16 @@ class Icar {
         cv::Mat img;
         if (params->config.debug) {               // 综合显示调试UI窗口
             if (show->indexLast == show->index) { // 图像帧未更新
-                if (uart->keypress) {
-                    uart->buzzerSound(Buzzer::finish); // 祖传提示音效
+                if (control->keypress) {
+                    control->buzzerSound(Buzzer::finish); // 祖传提示音效
                     cout << "-----> System Exit!!! <-----" << endl;
                     params->quit = true;
                     stop();
                     return;
                 }
-                show->show();      // 显示综合绘图
-                uart->sendHeart(); // 发送给服务器在线心跳
-                usleep(10 * 1000); // us延迟
+                show->show();         // 显示综合绘图
+                control->sendHeart(); // 发送给服务器在线心跳
+                usleep(10 * 1000);    // us延迟
                 return;
             }
 
@@ -392,20 +392,20 @@ class Icar {
             show->setNewWindow(4, "FSM", imgRes);
         } else // 实车控制
         {
-            if (stopRequested || shuttingDown || uart->killAll || uart->exitBoot) {
+            if (stopRequested || shuttingDown || control->exitBoot) {
                 params->quit = true;
                 stop();
                 return;
             }
-            uart->carControl(params->ctrl.speed,
-                             params->ctrl.servo); // 串口通信控制车辆
+            control->carControl(params->ctrl.speed,
+                                params->ctrl.servo); // 串口通信控制车辆
         }
 
         if (params->quit) // 停标触发退出：先舵机归中再退出进程
         {
-            params->ctrl.servo = PWMSERVOMID; // 舵机归中
-            params->ctrl.speed = 0;           // 停车
-            uart->carControl(0, PWMSERVOMID); // 发送归中+停车指令
+            params->ctrl.servo = PWMSERVOMID;    // 舵机归中
+            params->ctrl.speed = 0;              // 停车
+            control->carControl(0, PWMSERVOMID); // 发送归中+停车指令
             cout << "-----> System Exit (servo centered)! <-----" << endl;
             params->quit = true;
             return;
@@ -428,11 +428,12 @@ int main() {
 
             // 计算处理耗时
             auto timeEnd = chrono::high_resolution_clock::now();
-            auto elapsed =
-                chrono::duration_cast<chrono::milliseconds>(timeEnd - timeStart);
-            // printf(">> FrameTime: %ldms | %.2ffps \n", elapsed.count(), 1000.0 /
-            // elapsed.count());
-            icar.fpsDisplay = elapsed.count() > 0 ? 1000.0 / elapsed.count() : 0.0;
+            auto elapsed = chrono::duration_cast<chrono::milliseconds>(
+                timeEnd - timeStart);
+            // printf(">> FrameTime: %ldms | %.2ffps \n", elapsed.count(),
+            // 1000.0 / elapsed.count());
+            icar.fpsDisplay =
+                elapsed.count() > 0 ? 1000.0 / elapsed.count() : 0.0;
 
             // 睡眠等待
             if (elapsed < durations)

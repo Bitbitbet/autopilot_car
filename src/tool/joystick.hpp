@@ -88,8 +88,9 @@ inline string get_joystick_device_path() {
 class JoyStick {
   public:
     static shared_ptr<JoyStick> create(std::function<void()> onDisconnect,
-                                      const string &devicePath = "") {
-        auto joystick_path = devicePath.empty() ? get_joystick_device_path() : devicePath;
+                                       const string &devicePath = "") {
+        auto joystick_path =
+            devicePath.empty() ? get_joystick_device_path() : devicePath;
         if (joystick_path.empty()) {
             cerr << "Failed to find joystick device." << endl;
             return nullptr;

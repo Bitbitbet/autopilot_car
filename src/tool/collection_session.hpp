@@ -1,6 +1,5 @@
 #pragma once
 #include "joystick.hpp"
-#include <stdexcept>
 
 // 控制线程先停车、再退出；即使相机初始化或采图抛异常，也会完成回收。
 class CollectionSession {
@@ -29,24 +28,25 @@ class CollectionSession {
                           this->car->buzzerSound(Buzzer::ding);
                   }
               } catch (const std::exception &e) {
-                  cerr << "[Error]: Gamepad control failed: " << e.what() << endl;
+                  cerr << "[Error]: Gamepad control failed: " << e.what()
+                       << endl;
                   failed = true;
               } catch (...) {
-                  cerr << "[Error]: Unexpected gamepad control failure." << endl;
+                  cerr << "[Error]: Unexpected gamepad control failure."
+                       << endl;
                   failed = true;
               }
-              this->car->halt();
+              this->car->resetVelocity();
               this->joystick->requestShutdown();
           }) {}
 
     bool running() const {
-        return !signal.load() && !failed.load() && !joystick->isStopped() &&
-               !car->killAll.load() && !car->exitBoot.load();
+        return !signal.load() && !failed.load() && !joystick->isStopped();
     }
     bool hasFailed() const { return failed.load(); }
     void shutdown() noexcept {
         worker.request_stop();
-        car->halt();
+        car->resetVelocity();
         joystick->requestShutdown();
         if (worker.joinable())
             worker.join();
