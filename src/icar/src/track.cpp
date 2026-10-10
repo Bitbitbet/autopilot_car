@@ -1,6 +1,7 @@
 #include "track.hpp"
 #include <algorithm>
 #include <numeric>
+#include <stdexcept>
 
 using namespace cv;
 using std::begin;
@@ -27,8 +28,8 @@ void Track::handle(Mat img) {
 void Track::handle(bool isResearch, uint16_t rowStart) {
     bool flagStartBlock = true; // 搜索到色块起始行的标志（行）
     int counterSearchRows = pointsEdgeLeft.size(); // 搜索行计数
-    int startBlock[30];                            // 色块起点（行）
-    int endBlock[30];                              // 色块终点（行）
+    int startBlock[30]{};                          // 色块起点（行）
+    int endBlock[30]{};                            // 色块终点（行）
     int counterBlock = 0;                          // 色块计数器（行）
     PointX pointSpurroad;                          // 岔路坐标
     int counterSpurroad = 0;                       // 岔路识别标志
@@ -47,7 +48,7 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
         validRowsLeft = 0;       // 边缘有效行数（左）
         validRowsRight = 0;      // 边缘有效行数（右）
         flagStartBlock = true;   // 搜索到色块起始行的标志（行）
-        rowStart = ROWSIMAGE;
+        rowStart = ROWSIMAGE - 1;
     } else {
         if (pointsEdgeLeft.size() > rowStart)
             pointsEdgeLeft.resize(rowStart);
@@ -61,6 +62,11 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
 
         flagStartBlock = false; // 搜索到色块起始行的标志（行）
     }
+
+    if (imgShare.empty() || imgShare.type() != CV_8UC1 ||
+        imgShare.rows != ROWSIMAGE || imgShare.cols != COLSIMAGE)
+        throw std::invalid_argument("Track requires a 320x240 binary image");
+    rowStart = std::min<int>(rowStart, imgShare.rows - 1);
 
     //  开始识别赛道左右边缘
     for (int row = rowStart; row > rowCutUp; row -= 2) // 有效行：10~220
@@ -89,6 +95,8 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
                 endBlock[counterBlock++] = COLSIMAGE - 1;
         }
 
+        if (counterBlock == 0) // 空白行没有可读取的色块
+            continue;
         int widthBlocks = endBlock[0] - startBlock[0]; // 色块宽度临时变量
         int indexWidestBlock = 0;                      // 最宽色块的序号
         if (flagStartBlock)                            // 起始行做特殊处理

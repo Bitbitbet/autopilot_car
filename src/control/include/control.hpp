@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <libserial/SerialPort.h>
+#include <memory>
 #include <thread>
 
 // USB通信帧
@@ -53,7 +56,8 @@ class CarControl {
   private:
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
     LibSerial::SerialPort serialPort;
-    std::atomic_bool recvThreadStop;
+    std::atomic_bool recvThreadStop{true};
+
     CarControl();
 
     /**
@@ -66,11 +70,10 @@ class CarControl {
   public:
     ~CarControl();
 
-    static std::shared_ptr<CarControl> create();
+    bool exitBoot = false;
+    bool keypress = false;
 
-    bool keypress = false; // 按键
-    bool killAll = false;  // 杀进程
-    bool exitBoot = false; // 退出boot
+    static std::shared_ptr<CarControl> create();
 
     /**
      * @brief 速度+方向控制
@@ -79,6 +82,8 @@ class CarControl {
      * @param servo 方向：PWM（500~2500）
      */
     void carControl(float speed, uint16_t servo);
+
+    void resetVelocity() { carControl(0, PWMSERVOMID); }
 
     /**
      * @brief 蜂鸣器音效控制

@@ -34,6 +34,6 @@ class Center {
     std::vector<PointX> centerCompute(std::vector<PointX> pointsEdge, int side);
     void validRowsCal(std::vector<PointX> pointsEdgeLeft,
                       std::vector<PointX> pointsEdgeRight);
-    void derailmentCheck(std::vector<PointX> pointsEdgeLeft,
+    bool derailmentCheck(std::vector<PointX> pointsEdgeLeft,
                          std::vector<PointX> pointsEdgeRight);
 };

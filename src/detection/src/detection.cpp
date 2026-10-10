@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <stdexcept>
 #include <onnxruntime_cxx_api.h>
 #include <ppnc/predictor_api.h>
 #include <stdlib.h>
@@ -41,14 +42,14 @@ void buildNms(const string &model_dir) {
     sys_status = system(untar_cmd.c_str());
     if (sys_status) {
         cerr << "Error: cannot untar file " << model_file << endl;
-        exit(-1);
+        throw std::runtime_error("Cannot unpack NMS model: " + model_file);
     }
 
     // create shared
     sys_status = system(cc_cmd.c_str());
     if (sys_status) {
         cerr << "Error: compile for " << model_file << endl;
-        exit(-1);
+        throw std::runtime_error("Cannot build NMS model: " + model_file);
     }
     cout << "compile done." << endl;
 }
@@ -244,8 +245,12 @@ void Detection::render() {
 }
 
 void Detection::drawBox(Mat &img) {
-    for (int i = 0; i < results.size(); i++) {
-        PredictResult result = results[i];
+    drawBox(img, results);
+}
+
+void Detection::drawBox(Mat &img, const std::vector<PredictResult> &snapshot) {
+    for (const auto &item : snapshot) {
+        PredictResult result = item;
 
         if (find(drawSkipLabels.begin(), drawSkipLabels.end(), result.type) !=
             drawSkipLabels.end())
