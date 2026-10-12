@@ -10,9 +10,9 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
-#include <stdexcept>
 #include <onnxruntime_cxx_api.h>
 #include <ppnc/predictor_api.h>
+#include <stdexcept>
 #include <stdlib.h>
 #include <string>
 #include <sys/time.h>
@@ -51,7 +51,7 @@ void buildNms(const string &model_dir) {
         cerr << "Error: compile for " << model_file << endl;
         throw std::runtime_error("Cannot build NMS model: " + model_file);
     }
-    cout << "compile done." << endl;
+    cout << "nms模型编译完成。" << endl;
 }
 
 Detection::Detection(const string pathModel, float score_nms) {
@@ -244,9 +244,7 @@ void Detection::render() {
     }
 }
 
-void Detection::drawBox(Mat &img) {
-    drawBox(img, results);
-}
+void Detection::drawBox(Mat &img) { drawBox(img, results); }
 
 void Detection::drawBox(Mat &img, const std::vector<PredictResult> &snapshot) {
     for (const auto &item : snapshot) {

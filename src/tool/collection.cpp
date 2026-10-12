@@ -1,7 +1,7 @@
-#include "collection_session.hpp"
 #include "control.hpp"
+#include "joystick.hpp"
+#include "joystick_car_control.hpp"
 #include "predeal.hpp"
-#include "stop_signal.hpp"
 #include "tools.hpp"
 #include <fcntl.h>
 #include <filesystem>
@@ -31,7 +31,6 @@ using namespace cv;
 namespace fs = std::filesystem;
 
 int main(int argc, char const *argv[]) {
-    car_signal::install();
     try {
         // 通信
         auto car = CarControl::create();
@@ -46,7 +45,7 @@ int main(int argc, char const *argv[]) {
             return 1;
         }
         VideoCapture capture;
-        CollectionSession session(car, js, car_signal::requested);
+        auto controlThread = startJoystickControlThread(car, js);
 
         car->buzzerSound(Buzzer::start);
 
@@ -56,23 +55,21 @@ int main(int argc, char const *argv[]) {
             cerr << "Failed to open video device!" << endl;
             return 2;
         }
-        capture.set(CAP_PROP_FRAME_WIDTH, COLSIMAGE);  // 设置图像的列
-        capture.set(CAP_PROP_FRAME_HEIGHT, ROWSIMAGE); // 设置图像的行
+        capture.set(CAP_PROP_FRAME_WIDTH, IMAGE_COL);  // 设置图像的列
+        capture.set(CAP_PROP_FRAME_HEIGHT, IMAGE_ROW); // 设置图像的行
 
         // 读取xml中的相机标定参数
-        shared_ptr<Predeal> predeal = make_shared<Predeal>(-1); // 图像预处理类
+        shared_ptr<Predeal> predeal = make_shared<Predeal>(); // 图像预处理类
 
         uint32_t index = 0;
-        while (session.running()) {
+        while (true) {
             // 读取图像
             Mat img;
             if (!capture.read(img) || img.empty())
                 throw std::runtime_error("Camera frame unavailable; stopping.");
-            if (!session.running())
-                break;
 
-        // 图像预处理
-        predeal->correct(img); // 图像矫正
+            // 图像预处理
+            predeal->correct(img); // 图像矫正
 
             // 图像采集
             if (js->takeSampleOnce()) {
@@ -97,7 +94,7 @@ int main(int argc, char const *argv[]) {
                 js->requestSampleOnce();
         }
 
-        return session.hasFailed() ? 1 : 0;
+        return 0;
     } catch (const std::exception &e) {
         cerr << "[Error]: " << e.what() << endl;
         return 1;

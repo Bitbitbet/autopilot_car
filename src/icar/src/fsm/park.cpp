@@ -52,7 +52,7 @@ void FsmPark::run(Mat &img) {
             if (params->results[i].type == LABEL_PARK &&
                 params->results[i].height < 100 &&
                 params->results[i].width < 90 &&
-                params->results[i].x > COLSIMAGE / 2) // AI标志：停车场
+                params->results[i].x > IMAGE_COL / 2) // AI标志：停车场
                 countRes++;
         }
 
@@ -102,7 +102,7 @@ void FsmPark::run(Mat &img) {
         if (fork.score > 0) // 检测到AI标志
         {
             countSes = 0; // 定时入库关闭 | 仅依靠AI标志转向
-            if ((fork.y + fork.height / 2) > ROWSIMAGE * 0.3)
+            if ((fork.y + fork.height / 2) > IMAGE_ROW * 0.3)
                 countRes++;
             if (countRes > 1)
                 setStep(Step::FORKIN); // 设置停车场新步骤
@@ -150,7 +150,7 @@ void FsmPark::run(Mat &img) {
                 params->results[i].height < 130) // 搜索AI标志：岔路箭头
             {
                 if ((params->results[i].y + params->results[i].height) >
-                    ROWSIMAGE * 0.4) // 停车距离计算
+                    IMAGE_ROW * 0.4) // 停车距离计算
                 {
                     stopping = true; // 停车等待标志
                     break;
@@ -158,7 +158,7 @@ void FsmPark::run(Mat &img) {
 
                 // 出停车场检测
                 if ((params->results[i].y + params->results[i].height) >
-                        ROWSIMAGE * 0.25 &&
+                        IMAGE_ROW * 0.25 &&
                     spots.checked) // 道闸距离估算
                 {
                     countOut++;
@@ -192,11 +192,11 @@ void FsmPark::run(Mat &img) {
                 direction = spots.forks[0];
 
             PointX start =
-                PointX(ROWSIMAGE - 20, COLSIMAGE / 2); // 补线起点：车头
+                PointX(IMAGE_ROW - 20, IMAGE_COL / 2); // 补线起点：车头
             if (countIn < 50)                          // 起点矫正
             {
-                if (params->track->pointsEdgeLeft.size() > ROWSIMAGE / 5 &&
-                    params->track->pointsEdgeRight.size() > ROWSIMAGE / 5) {
+                if (params->track->pointsEdgeLeft.size() > IMAGE_ROW / 5 &&
+                    params->track->pointsEdgeRight.size() > IMAGE_ROW / 5) {
                     start = {(params->track->pointsEdgeLeft[0].x +
                               params->track->pointsEdgeRight[0].x) /
                                  2,
@@ -220,7 +220,7 @@ void FsmPark::run(Mat &img) {
 
             // 出停车场检测
             if (resLeft.score > 0 &&
-                (resLeft.y + resLeft.height / 2) > ROWSIMAGE * 0.2)
+                (resLeft.y + resLeft.height / 2) > IMAGE_ROW * 0.2)
                 countOut++;
             if (countOut > 3)
                 setStep(Step::TRACKOUT); // 设置停车场新步骤
@@ -243,9 +243,9 @@ void FsmPark::run(Mat &img) {
 
             // 驶入车位编号确认
             if ((spots.forks[0].y + spots.forks[0].height / 2) >
-                    ROWSIMAGE * 0.5 ||
+                    IMAGE_ROW * 0.5 ||
                 (spots.forks[1].y + spots.forks[1].height / 2) >
-                    ROWSIMAGE * 0.5)
+                    IMAGE_ROW * 0.5)
                 spots.countRes++;
             else
                 spots.countRes = 0;
@@ -263,7 +263,7 @@ void FsmPark::run(Mat &img) {
             {
                 if (spots.forks.size() > 0) {
                     if ((spots.forks[0].y + spots.forks[0].height / 2) >
-                        ROWSIMAGE * spotUp) // 入库距离判定
+                        IMAGE_ROW * spotUp) // 入库距离判定
                     {
                         spots.times++;
                         if (spots.times > 1) {
@@ -279,7 +279,7 @@ void FsmPark::run(Mat &img) {
             {
                 if (spots.forks.size() == 2) {
                     if ((spots.forks[1].y + spots.forks[1].height / 2) >
-                        ROWSIMAGE * spotDown) // 入库距离判定
+                        IMAGE_ROW * spotDown) // 入库距离判定
                     {
                         spots.times++;
                         if (spots.times > 1) {
@@ -316,8 +316,8 @@ void FsmPark::run(Mat &img) {
         } else {
             // Track重新捕获正常车道线
             int height = 0;
-            if (params->track->pointsEdgeLeft.size() > COLSIMAGE / 2 &&
-                params->track->pointsEdgeRight.size() > COLSIMAGE / 2) {
+            if (params->track->pointsEdgeLeft.size() > IMAGE_COL / 2 &&
+                params->track->pointsEdgeRight.size() > IMAGE_COL / 2) {
                 for (int i = 1; i <= 10; i++) {
                     height += params->track
                                   ->pointsEdgeLeft
@@ -332,7 +332,7 @@ void FsmPark::run(Mat &img) {
                 height = height / 20;
             }
 
-            if (height > ROWSIMAGE * 0.3) // 入库结束
+            if (height > IMAGE_ROW * 0.3) // 入库结束
             {
                 spots.countRes++;
                 if (spots.countRes > 2)
@@ -344,8 +344,8 @@ void FsmPark::run(Mat &img) {
             params->track->pointsEdgeRight.clear(); // 清空数据
             // 左车道线
             PointX startPoint = PointX(
-                ROWSIMAGE - 30, COLSIMAGE * 0.2); // 入库补线起点:固定左下角
-            PointX endPoint = PointX(50, COLSIMAGE * 0.35); // 入库补线终点
+                IMAGE_ROW - 30, IMAGE_COL * 0.2); // 入库补线起点:固定左下角
+            PointX endPoint = PointX(50, IMAGE_COL * 0.35); // 入库补线终点
             PointX midPoint =
                 PointX((startPoint.x + endPoint.x) * 0.5,
                        (startPoint.y + endPoint.y) * 0.5); // 入库补线中点
@@ -354,9 +354,9 @@ void FsmPark::run(Mat &img) {
                 Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
 
             // 右车道
-            startPoint = PointX(ROWSIMAGE - 30,
-                                COLSIMAGE * 0.8);    // 入库补线起点:固定左下角
-            endPoint = PointX(50, COLSIMAGE * 0.65); // 入库补线终点
+            startPoint = PointX(IMAGE_ROW - 30,
+                                IMAGE_COL * 0.8);    // 入库补线起点:固定左下角
+            endPoint = PointX(50, IMAGE_COL * 0.65); // 入库补线终点
             midPoint =
                 PointX((startPoint.x + endPoint.x) * 0.5,
                        (startPoint.y + endPoint.y) * 0.5); // 入库补线中点
@@ -416,7 +416,7 @@ void FsmPark::run(Mat &img) {
                 timeout = 0; // 超时计数
                 countRes = 0;
                 if ((params->results[i].y + params->results[i].height) >
-                    ROWSIMAGE * 0.4) // 停车距离计算
+                    IMAGE_ROW * 0.4) // 停车距离计算
                 {
                     stopping = true; // 停车等待标志
                     break;
@@ -444,7 +444,7 @@ void FsmPark::run(Mat &img) {
             else
                 direction = spots.forks[0];
             PointX start =
-                PointX(ROWSIMAGE - 20, COLSIMAGE / 2); // 补线起点：车头
+                PointX(IMAGE_ROW - 20, IMAGE_COL / 2); // 补线起点：车头
             PointX end =
                 PointX(direction.y,
                        direction.x + direction.width / 2); // 补线终点：AI标志
@@ -458,7 +458,7 @@ void FsmPark::run(Mat &img) {
                 timeout = 0; // 定时入库关闭 | 仅依靠AI标志转向
 
             if (resLeft.score > 0 &&
-                (resLeft.y + resLeft.height / 2) > ROWSIMAGE * 0.35) {
+                (resLeft.y + resLeft.height / 2) > IMAGE_ROW * 0.35) {
                 countRes++;
             }
         }
@@ -513,7 +513,7 @@ void FsmPark::show(Mat &img) {
     if (params->mode != FsmMode::park)
         return;
 
-    putText(img, "[5] Park", Point(COLSIMAGE / 2 - 50, 20),
+    putText(img, "[5] Park", Point(IMAGE_COL / 2 - 50, 20),
             cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
 
     // 绘制边缘点
@@ -558,7 +558,7 @@ void FsmPark::show(Mat &img) {
         }
 
         // 透视变换视角
-        Mat imgIpm = Mat::zeros(Size(COLSIMAGEIPM, ROWSIMAGEIPM),
+        Mat imgIpm = Mat::zeros(Size(IMAGE_COLIPM, IMAGE_ROWIPM),
                                 CV_8UC3); // 创建全黑图像
         for (int i = 0; i < spots.carsIpm.size(); i++)
             circle(imgIpm, Point(spots.carsIpm[i].x, spots.carsIpm[i].y), 3,
@@ -577,7 +577,7 @@ void FsmPark::show(Mat &img) {
         }
         if (!spots.spotEnable[1] && spots.forks.size() > 0) // 2号车位
         {
-            cv::Rect rect(COLSIMAGE - 61, spots.forks[0].y - 10, 60,
+            cv::Rect rect(IMAGE_COL - 61, spots.forks[0].y - 10, 60,
                           spots.forks[0].height + 20);
             cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
         }
@@ -589,7 +589,7 @@ void FsmPark::show(Mat &img) {
         }
         if (!spots.spotEnable[3] && spots.forks.size() > 1) // 4号车位
         {
-            cv::Rect rect(COLSIMAGE - 61, spots.forks[1].y - 10, 60,
+            cv::Rect rect(IMAGE_COL - 61, spots.forks[1].y - 10, 60,
                           spots.forks[1].height + 20);
             cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
         }
@@ -659,8 +659,8 @@ void FsmPark::replanTracking() {
     params->track->pointsEdgeRight.clear(); // 清空原来数据
 
     // 左车道线
-    PointX startPoint = PointX(ROWSIMAGE - 10, 1); // 入库补线起点:固定左下角
-    PointX endPoint = PointX(ROWSIMAGE / 3, 1);    // 入库补线终点
+    PointX startPoint = PointX(IMAGE_ROW - 10, 1); // 入库补线起点:固定左下角
+    PointX endPoint = PointX(IMAGE_ROW / 3, 1);    // 入库补线终点
     PointX midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                              (startPoint.y + endPoint.y) / 2); // 入库补线中点
     vector<PointX> repairPoints = {startPoint, midPoint, endPoint};
@@ -670,8 +670,8 @@ void FsmPark::replanTracking() {
 
     // 右车道线
     startPoint =
-        PointX(ROWSIMAGE - 10, COLSIMAGE * 0.8); // 入库补线起点:固定左下角
-    endPoint = PointX(ROWSIMAGE / 3, 30);        // 入库补线终点
+        PointX(IMAGE_ROW - 10, IMAGE_COL * 0.8); // 入库补线起点:固定左下角
+    endPoint = PointX(IMAGE_ROW / 3, 30);        // 入库补线终点
     midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                       (startPoint.y + endPoint.y) / 2); // 入库补线中点
     repairPoints = {startPoint, midPoint, endPoint};
@@ -690,8 +690,8 @@ void FsmPark::replanTracking(bool left) {
     if (left) {
         // 左车道线
         PointX startPoint =
-            PointX(ROWSIMAGE - 10, 1);              // 入库补线起点:固定左下角
-        PointX endPoint = PointX(ROWSIMAGE / 3, 1); // 入库补线终点
+            PointX(IMAGE_ROW - 10, 1);              // 入库补线起点:固定左下角
+        PointX endPoint = PointX(IMAGE_ROW / 3, 1); // 入库补线终点
         PointX midPoint =
             PointX((startPoint.x + endPoint.x) * 0.3,
                    (startPoint.y + endPoint.y) / 2); // 入库补线中点
@@ -701,8 +701,8 @@ void FsmPark::replanTracking(bool left) {
         params->track->pointsEdgeLeft = modifyEdge;
         // 右车道线
         startPoint =
-            PointX(ROWSIMAGE - 10, COLSIMAGE * 0.8); // 入库补线起点:固定左下角
-        endPoint = PointX(ROWSIMAGE / 3, 1);         // 入库补线终点
+            PointX(IMAGE_ROW - 10, IMAGE_COL * 0.8); // 入库补线起点:固定左下角
+        endPoint = PointX(IMAGE_ROW / 3, 1);         // 入库补线终点
         midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                           (startPoint.y + endPoint.y) / 2); // 入库补线中点
         repairPoints = {startPoint, midPoint, endPoint};
@@ -711,8 +711,8 @@ void FsmPark::replanTracking(bool left) {
     } else {
         // 左车道线
         PointX startPoint =
-            PointX(ROWSIMAGE - 10, COLSIMAGE * 0.2); // 入库补线起点:固定左下角
-        PointX endPoint = PointX(ROWSIMAGE / 3, COLSIMAGE - 1); // 入库补线终点
+            PointX(IMAGE_ROW - 10, IMAGE_COL * 0.2); // 入库补线起点:固定左下角
+        PointX endPoint = PointX(IMAGE_ROW / 3, IMAGE_COL - 1); // 入库补线终点
         PointX midPoint =
             PointX((startPoint.x + endPoint.x) * 0.3,
                    (startPoint.y + endPoint.y) / 2); // 入库补线中点
@@ -722,8 +722,8 @@ void FsmPark::replanTracking(bool left) {
         params->track->pointsEdgeLeft = modifyEdge;
         // 右车道线
         startPoint =
-            PointX(ROWSIMAGE - 10, COLSIMAGE - 1); // 入库补线起点:固定左下角
-        endPoint = PointX(ROWSIMAGE / 3, COLSIMAGE - 1); // 入库补线终点
+            PointX(IMAGE_ROW - 10, IMAGE_COL - 1); // 入库补线起点:固定左下角
+        endPoint = PointX(IMAGE_ROW / 3, IMAGE_COL - 1); // 入库补线终点
         midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                           (startPoint.y + endPoint.y) / 2); // 入库补线中点
         repairPoints = {startPoint, midPoint, endPoint};
@@ -759,7 +759,7 @@ bool FsmPark::findSymbols(vector<PredictResult> results, int label) {
 bool FsmPark::findSymbols(vector<PredictResult> results, int label,
                           PredictResult &target) {
     bool res = false;
-    target.y = ROWSIMAGE - 1;
+    target.y = IMAGE_ROW - 1;
     for (int i = 0; i < results.size(); i++) {
         if (results[i].type == label) // AI标志
         {
@@ -854,13 +854,13 @@ PointX FsmPark::getResultCenter(PredictResult res) {
 
     if (center.x < 0)
         center.x = 0;
-    else if (center.x > COLSIMAGE)
-        center.x = COLSIMAGE;
+    else if (center.x > IMAGE_COL)
+        center.x = IMAGE_COL;
 
     if (center.y < 0)
         center.y = 0;
-    else if (center.y > ROWSIMAGE)
-        center.y = ROWSIMAGE;
+    else if (center.y > IMAGE_ROW)
+        center.y = IMAGE_ROW;
 
     return center;
 }
@@ -879,7 +879,7 @@ void FsmPark::findParkCars(vector<PredictResult> results) {
     if (spots.forks.size() != 2) // 基于岔路标志检测车位
         return;
 
-    if (spots.forks[1].y < ROWSIMAGE / 4) // 图像清晰度限制
+    if (spots.forks[1].y < IMAGE_ROW / 4) // 图像清晰度限制
         return;
 
     // IPM透视变换（保留，供调试显示；车壳占位判定已移除）

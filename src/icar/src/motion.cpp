@@ -6,16 +6,16 @@
 using std::shared_ptr;
 
 void Motion::poseControl(shared_ptr<Params> &params) {
-    float error = params->ctrl.center - COLSIMAGE / 2.0; // 图像控制中心转换偏差
+    float error = params->ctrl.center - IMAGE_COL / 2.0; // 图像控制中心转换偏差
     static int errorLast = 0;                            // 记录前一次的偏差
     if (params->mode ==
         FsmMode::yfork) // yfork单边：立即跟随center，不被上一帧偏差限速拖反
         errorLast = (int)error;
     else if (abs(error - errorLast) >
-             COLSIMAGE / 20.0) // 普通跟线：限速防猛打方向
+             IMAGE_COL / 20.0) // 普通跟线：限速防猛打方向
     {
-        error = error > errorLast ? errorLast + COLSIMAGE / 10
-                                  : errorLast - COLSIMAGE / 10;
+        error = error > errorLast ? errorLast + IMAGE_COL / 10
+                                  : errorLast - IMAGE_COL / 10;
     }
 
     params->config.turnP =
@@ -79,7 +79,7 @@ void Motion::speedControl(std::shared_ptr<Params> &params) {
     uint8_t controlMid = 5;   // 控制率
     uint8_t controlHigh = 10; // 速度控制上限
 
-    float upper = ROWSIMAGE * 0.35; // 84
+    float upper = IMAGE_ROW * 0.35; // 84
     line = std::max(line - 20, 0);
     if (line > upper)
         line = upper;
@@ -93,7 +93,7 @@ void Motion::speedControl(std::shared_ptr<Params> &params) {
 
 void Motion::drawImage(std::shared_ptr<Params> &params, Mat &img) {
     std::string str = "Vel: " + double2String(params->ctrl.speed, 2);
-    putText(img, str, Point(COLSIMAGE - 100, 120), FONT_HERSHEY_PLAIN, 1,
+    putText(img, str, Point(IMAGE_COL - 100, 120), FONT_HERSHEY_PLAIN, 1,
             Scalar(0, 0, 255), 1); // 速度
 }
 

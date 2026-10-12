@@ -74,7 +74,7 @@ void FsmSlow::run(Mat &img) {
                 if (params->results[i].height < 100 &&
                     params->results[i].width < 80 &&
                     (params->results[i].y + params->results[i].height) >
-                        ROWSIMAGE * 0.2) // 标志距离计算
+                        IMAGE_ROW * 0.2) // 标志距离计算
                 {
                     timeout = 0;
                 }
@@ -84,7 +84,7 @@ void FsmSlow::run(Mat &img) {
                 if (params->results[i].height < 100 &&
                     params->results[i].width < 80 &&
                     (params->results[i].y + params->results[i].height) >
-                        ROWSIMAGE * 0.2) // 标志距离计算
+                        IMAGE_ROW * 0.2) // 标志距离计算
                 {
                     countRec++;
                     break;
@@ -118,7 +118,7 @@ void FsmSlow::show(Mat &img) {
     if (params->mode != FsmMode::slow)
         return;
 
-    putText(img, "[6] Slow", Point(COLSIMAGE / 2 - 50, 20),
+    putText(img, "[6] Slow", Point(IMAGE_COL / 2 - 50, 20),
             cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
 }
 

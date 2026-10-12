@@ -51,7 +51,7 @@ void FsmYfork::run(Mat &img) {
 
         // 标志中心计数
         if (resFork.score > 0 &&
-            (resFork.y + resFork.height / 2) > ROWSIMAGE * 0.28)
+            (resFork.y + resFork.height / 2.0) > IMAGE_ROW * 0.28)
             countFork++;
         else
             countFork = 0;
@@ -172,8 +172,8 @@ void FsmYfork::show(Mat &img) {
         return;
 
     putText(img, "[Yfork]" + std::string(branchLeft ? " L" : " R"),
-            Point(COLSIMAGE / 2 - 50, 20), cv::FONT_HERSHEY_TRIPLEX, 0.5,
-            cv::Scalar(0, 255, 0), 0.5);
+            Point(IMAGE_COL / 2 - 50, 20), cv::FONT_HERSHEY_TRIPLEX, 0.5,
+            cv::Scalar(0, 255, 0), 1);
 }
 
 /**

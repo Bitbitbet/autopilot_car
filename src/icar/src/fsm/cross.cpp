@@ -107,7 +107,7 @@ void FsmCross::run(Mat &img) {
                     params->results[i].height < 120 &&
                     params->results[i].width < 90 &&
                     (params->results[i].y + params->results[i].height) >
-                        ROWSIMAGE * 0.1) {
+                        IMAGE_ROW * 0.1) {
                     setStep(Step::NONE); // 放行，不进入停车
                     return;
                 }
@@ -145,7 +145,7 @@ void FsmCross::show(Mat &img) {
     if (params->mode != FsmMode::cross)
         return;
 
-    putText(img, "[8] Cross", Point(COLSIMAGE / 2 - 50, 20),
+    putText(img, "[8] Cross", Point(IMAGE_COL / 2 - 50, 20),
             cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
 
     switch (step) {

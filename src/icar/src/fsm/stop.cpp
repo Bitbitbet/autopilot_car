@@ -71,7 +71,7 @@ void FsmStop::run(Mat &img) {
                 countSes = 0;
                 timeout = 0;
                 if ((params->results[i].y + params->results[i].height) >
-                    ROWSIMAGE * 0.3) // 停车距离计算
+                    IMAGE_ROW * 0.3) // 停车距离计算
                 {
                     countRec++;
                     break;
@@ -116,7 +116,7 @@ void FsmStop::show(Mat &img) {
     if (params->mode != FsmMode::stop)
         return;
 
-    putText(img, "[7] Stop", Point(COLSIMAGE / 2 - 50, 20),
+    putText(img, "[7] Stop", Point(IMAGE_COL / 2 - 50, 20),
             cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
 
     switch (step) {
@@ -136,7 +136,7 @@ void FsmStop::show(Mat &img) {
         drawPolygon(img, polyCar, false, true);  // 绘制车辆多边形
 
         putText(img, "Overlap:" + double2String(overlap, 2),
-                Point(100, ROWSIMAGE - 60), FONT_HERSHEY_TRIPLEX, 0.5,
+                Point(100, IMAGE_ROW - 60), FONT_HERSHEY_TRIPLEX, 0.5,
                 Scalar(0, 0, 255), 0.5);
     }
 }
@@ -148,8 +148,8 @@ void FsmStop::show(Mat &img) {
  * @param result
  */
 double FsmStop::getRoadCarPloy(PredictResult result) {
-    if (params->track->pointsEdgeLeft.size() < ROWSIMAGE / 5 &&
-        params->track->pointsEdgeRight.size() < ROWSIMAGE / 5)
+    if (params->track->pointsEdgeLeft.size() < IMAGE_ROW / 5 &&
+        params->track->pointsEdgeRight.size() < IMAGE_ROW / 5)
         return 0.0;
 
     // 添加赛道多边形轮廓
@@ -199,14 +199,14 @@ double FsmStop::getRoadCarPloy(PredictResult result) {
     {
         //[3] 右下点
         ppoliy.x = params->track->pointsEdgeLeft[0].x;
-        ppoliy.y = COLSIMAGE - 1;
+        ppoliy.y = IMAGE_COL - 1;
 
         //[4] 右上点
         ppoliy.x =
             params->track
                 ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() - 1]
                 .x;
-        ppoliy.y = COLSIMAGE - 1;
+        ppoliy.y = IMAGE_COL - 1;
     } else {
         //[3] 右下点
         ppoliy = params->track->pointsEdgeRight[0];

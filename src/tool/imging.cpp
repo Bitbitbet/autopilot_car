@@ -14,8 +14,8 @@ int main(int argc, char const *argv[]) {
         return 1;
     }
 
-    capture.set(CAP_PROP_FRAME_WIDTH, COLSCAMERA);  // 设置图像的列数
-    capture.set(CAP_PROP_FRAME_HEIGHT, ROWSCAMERA); // 设置图像的行数
+    capture.set(CAP_PROP_FRAME_WIDTH, CAMERA_COL);  // 设置图像的列数
+    capture.set(CAP_PROP_FRAME_HEIGHT, CAMERA_ROW); // 设置图像的行数
 
     double rate = capture.get(CAP_PROP_FPS);            // 读取图像的帧率
     double width = capture.get(CAP_PROP_FRAME_WIDTH);   // 读取图像的宽度
@@ -25,7 +25,7 @@ int main(int argc, char const *argv[]) {
 
     // 读取xml中的相机标定参数
     std::shared_ptr<Predeal> predeal =
-        std::make_shared<Predeal>(-1); // 图像预处理类
+        std::make_shared<Predeal>(); // 图像预处理类
 
     while (1) {
         //[01] 图像采集

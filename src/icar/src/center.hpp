@@ -18,13 +18,11 @@ class Center {
   public:
     uint16_t validRowsLeft = 0;  // 边缘有效行数（左）
     uint16_t validRowsRight = 0; // 边缘有效行数（右）
-    double sigmaCenter = 0;      // 中心点集的方差
 
-    void fitting(std::shared_ptr<Params> &params);
+    void fitting(Params &params);
     void drawImage(std::shared_ptr<Params> &params, Mat &img);
 
   private:
-    std::string style = "";
     int countOut = 0;
     int timeout = 0;
 

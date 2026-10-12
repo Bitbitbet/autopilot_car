@@ -50,8 +50,8 @@ class FsmFork : public FSMState {
                                  bool straightSideJudge = true);
     int countFormerStickpointL(std::vector<PointX> pointsEdgeLeft,
                                int StartLine = 0,
-                               int Endline = ROWSIMAGE * 2 / 3);
+                               int Endline = IMAGE_ROW * 2 / 3);
     int countFormerStickpointR(std::vector<PointX> pointsEdgeRight,
                                int StartLine = 0,
-                               int Endline = ROWSIMAGE * 2 / 3);
+                               int Endline = IMAGE_ROW * 2 / 3);
 };

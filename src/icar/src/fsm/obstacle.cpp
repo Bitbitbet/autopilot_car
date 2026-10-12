@@ -87,7 +87,7 @@ void FsmObstacle::show(Mat &img) {
         cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
     }
 
-    putText(img, "[Obs] bypass", Point(COLSIMAGE / 2 - 50, 20),
+    putText(img, "[Obs] bypass", Point(IMAGE_COL / 2 - 50, 20),
             cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
 }
 
@@ -117,7 +117,7 @@ PredictResult FsmObstacle::findTarget() {
         if ((params->results[i].type == LABEL_CONE ||
              params->results[i].type == LABEL_PERSON) &&
             (params->results[i].y + params->results[i].height) >
-                ROWSIMAGE * 0.2 &&
+                IMAGE_ROW * 0.2 &&
             params->results[i].height > 20 &&
             params->results[i].height < 160 && // 放宽上限
             params->results[i].width > 20 && params->results[i].width < 140) {
@@ -138,7 +138,7 @@ PredictResult FsmObstacle::findTarget() {
  */
 void FsmObstacle::planObstacle(PredictResult obs) {
     // 障碍物方向判定（左/右）
-    int row = 0, width = COLSIMAGE;
+    int row = 0, width = IMAGE_COL;
     for (size_t i = 0; i < params->track->pointsEdgeLeft.size(); i++) {
         int w = abs(obs.y - params->track->pointsEdgeLeft[i].x);
         if (w < 2) {
@@ -165,7 +165,7 @@ void FsmObstacle::planObstacle(PredictResult obs) {
         else {
             vector<PointX> points(4); // 三阶贝塞尔曲线
             points[0] = params->track->pointsEdgeLeft[row / 2];
-            points[1] = {ROWSIMAGE,
+            points[1] = {IMAGE_ROW,
                          obs.x + obs.width * 1}; // 清障列延伸到画面底(车头)
             points[2] = {(obs.y + obs.height + obs.y) / 2,
                          obs.x + obs.width * 1};
@@ -195,7 +195,7 @@ void FsmObstacle::planObstacle(PredictResult obs) {
         else {
             vector<PointX> points(4); // 三阶贝塞尔曲线
             points[0] = params->track->pointsEdgeRight[row / 2];
-            points[1] = {ROWSIMAGE,
+            points[1] = {IMAGE_ROW,
                          obs.x - obs.width * 2}; // 清障列延伸到画面底(车头
             points[2] = {(obs.y + obs.height + obs.y) / 2,
                          obs.x - obs.width * 2};

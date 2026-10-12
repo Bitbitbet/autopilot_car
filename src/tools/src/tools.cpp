@@ -10,8 +10,8 @@ using std::string;
 using std::to_string;
 using std::vector;
 
-Mapping ipm = Mapping(Size(COLSIMAGE, ROWSIMAGE),
-                      Size(COLSIMAGEIPM, ROWSIMAGEIPM)); // 逆透视变换类
+Mapping ipm = Mapping(Size(IMAGE_COL, IMAGE_ROW),
+                      Size(IMAGE_COLIPM, IMAGE_ROWIPM)); // 逆透视变换类
 
 void savePicture(Mat &image) {
     // 存图

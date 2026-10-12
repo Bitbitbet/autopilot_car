@@ -1,6 +1,6 @@
 #pragma once
-
 #include "tools.hpp"
+#include <vector>
 
 using namespace cv;
 
@@ -14,17 +14,15 @@ class Track {
     double stdevRight;                   // 边缘斜率方差（右）
     int validRowsLeft = 0;               // 边缘有效行数（左）
     int validRowsRight = 0;              // 边缘有效行数（右）
-    uint16_t rowCutUp = 1;               // 图像顶部切行
-    uint16_t rowCutBottom = 20;          // 图像底部切行
+    int rowCutUp = 1;                    // 图像顶部切行
+    int rowCutBottom = 20;               // 图像底部切行
 
     void handle(Mat img);
     void handle(bool isResearch, uint16_t rowStart);
     void drawImage(Mat &img);
-    double stdevEdgeCal(std::vector<PointX> &v_edge, int img_height);
 
   private:
-    Mat imgShare; // 赛道搜索图像
-    void slopeCal(std::vector<PointX> &edge, int index);
-    void validRowsCal(void);
-    int getMiddleValue(std::vector<int> vec);
+    Mat track_img; // 赛道搜索图像
 };
+
+double stdevEdgeCal(const std::vector<PointX> &v_edge, int img_height);

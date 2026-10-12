@@ -6,15 +6,12 @@
 
 using namespace cv;
 
-#define COLSCAMERA 320   // 相机的列数
-#define ROWSCAMERA 240   // 相机的行数
-#define COLSIMAGE 320    // 图像的列数
-#define ROWSIMAGE 240    // 图像的行数
-#define COLSIMAGEIPM 800 // IPM图像的列数
-#define ROWSIMAGEIPM 500 // IPM图像的行数
-#define PWMSERVOMAX 1900 // 舵机PWM最大值（左）1840
-#define PWMSERVOMID 1500 // 舵机PWM中值 1520
-#define PWMSERVOMIN 1100 // 舵机PWM最小值（右）1200
+constexpr size_t CAMERA_COL = 320;   // 相机的列数
+constexpr size_t CAMERA_ROW = 240;   // 相机的行数
+constexpr size_t IMAGE_COL = 320;    // 图像的列数
+constexpr size_t IMAGE_ROW = 240;    // 图像的行数
+constexpr size_t IMAGE_COLIPM = 800; // IPM图像的列数
+constexpr size_t IMAGE_ROWIPM = 500; // IPM图像的行数
 
 #define LABEL_CONE 0    // AI标签: 锥桶
 #define LABEL_PERSON 1  // AI标签: 行人
@@ -166,7 +163,7 @@ inline bool compareX(const PointX &a, const PointX &b) {
  * @inform 可以用于任何判断是否在范围内
  * @return
  */
-bool posInRange(double pos, double a = 0, double b = ROWSIMAGE);
+bool posInRange(double pos, double a = 0, double b = IMAGE_ROW);
 /**
  * @brief 利用贝塞尔曲线的补线函数
  *
@@ -204,7 +201,7 @@ double gradientCal(PointX a, PointX b);
  * @return bias起点终点拟合直线后偏移较大的点
  */
 int linearCheck(std::vector<PointX> PointsEdge, int startLine = 0,
-                int endLine = ROWSIMAGE - 1, int judgebias = 3);
+                int endLine = IMAGE_ROW - 1, int judgebias = 3);
 
 /**
  * @brief 矫正域上判断点的位置是否适合

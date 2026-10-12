@@ -14,7 +14,7 @@ Show::Show(const int size) {
     namedWindow("ICAR", WINDOW_NORMAL);     // 图像名称
     resizeWindow("ICAR", 480 * 2, 320 * 2); // 分辨率
 
-    imgShow = Mat::zeros(ROWSIMAGE * 2, COLSIMAGE * 2, CV_8UC3);
+    imgShow = Mat::zeros(IMAGE_ROW * 2, IMAGE_COL * 2, CV_8UC3);
     enable = true;
     sizeWindow = size;
 };
@@ -35,13 +35,13 @@ void Show::setNewWindow(int index, string name, Mat img) {
         cvtColor(imgDraw, imgDraw, cv::COLOR_GRAY2BGR);
 
     // 图像缩放
-    if (imgDraw.cols != COLSIMAGE || imgDraw.rows != ROWSIMAGE) {
-        float fx = (float)COLSIMAGE / imgDraw.cols;
-        float fy = (float)ROWSIMAGE / imgDraw.rows;
+    if (imgDraw.cols != IMAGE_COL || imgDraw.rows != IMAGE_ROW) {
+        float fx = (float)IMAGE_COL / imgDraw.cols;
+        float fy = (float)IMAGE_ROW / imgDraw.rows;
         if (fx <= fy)
-            resize(imgDraw, imgDraw, Size(COLSIMAGE, ROWSIMAGE), fx, fx);
+            resize(imgDraw, imgDraw, Size(IMAGE_COL, IMAGE_ROW), fx, fx);
         else
-            resize(imgDraw, imgDraw, Size(COLSIMAGE, ROWSIMAGE), fy, fy);
+            resize(imgDraw, imgDraw, Size(IMAGE_COL, IMAGE_ROW), fy, fy);
     }
 
     // 限制图片标题长度
@@ -55,13 +55,13 @@ void Show::setNewWindow(int index, string name, Mat img) {
             cv::Scalar(255, 0, 0), 1);
 
     if (index <= 2) {
-        Rect placeImg = Rect(COLSIMAGE * (index - 1), 0, COLSIMAGE, ROWSIMAGE);
+        Rect placeImg = Rect(IMAGE_COL * (index - 1), 0, IMAGE_COL, IMAGE_ROW);
         imgDraw.copyTo(imgShow(placeImg));
     }
 
     else {
         Rect placeImg =
-            Rect(COLSIMAGE * (index - 3), ROWSIMAGE, COLSIMAGE, ROWSIMAGE);
+            Rect(IMAGE_COL * (index - 3), IMAGE_ROW, IMAGE_COL, IMAGE_ROW);
         imgDraw.copyTo(imgShow(placeImg));
     }
 
@@ -72,7 +72,7 @@ void Show::setNewWindow(int index, string name, Mat img) {
 void Show::show() {
     if (enable) {
         putText(imgShow, "Frame:" + to_string(index),
-                Point(COLSIMAGE / 2 - 50, ROWSIMAGE * 2 - 20),
+                Point(IMAGE_COL / 2 - 50, IMAGE_ROW * 2 - 20),
                 cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
         imshow("ICAR", imgShow);
 

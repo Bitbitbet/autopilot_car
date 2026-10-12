@@ -48,8 +48,8 @@ void FsmFork::show(Mat &img) {
     if (params->mode != FsmMode::fork)
         return;
 
-    putText(img, "[4] Fork", Point(COLSIMAGE / 2 - 50, 20),
-            cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
+    putText(img, "[4] Fork", Point(IMAGE_COL / 2 - 50, 20),
+            cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
 }
 
 /**
@@ -60,7 +60,7 @@ void FsmFork::reset(void) {
     step = Step::NONE; // 岔路处理阶段
     counterFork = 0;   // 图像状态计数
     lastForkL = PointX(0, 0, 0);
-    lastForkR = PointX(0, COLSIMAGE - 1, 0);
+    lastForkR = PointX(0, IMAGE_COL - 1, 0);
     repairing = false;
 }
 
@@ -79,10 +79,9 @@ bool FsmFork::handle(Mat &img, int type) {
         || params->track->pointsEdgeRight.size() !=
                params->track->widthBlock.size() ||
         params->track->widthBlock.size() <
-            ROWSIMAGE / 6) // 点太少了，不找特征了
+            IMAGE_ROW / 6) // 点太少了，不找特征了
         return false;
     if (step == Step::NONE) {
-
         if (type < 2) { // 左侧可能出现T形岔路口（卜型）
             // 先找到左侧道路上下直道段上下直道段
             PointX leftFilletUp;    // 左上圆弧点
@@ -129,7 +128,7 @@ bool FsmFork::handle(Mat &img, int type) {
             }
         } else if (type == 2) {
             if (params->track->widthBlock.size() >
-                ROWSIMAGE - params->track->rowCutBottom - 5) {
+                IMAGE_ROW - params->track->rowCutBottom - 5) {
                 return false; // 对于该部分判断一个重要依据即为搜索行数的减少
             }
             PointX Right_Fillet_DOWN;    // 左上圆弧点
@@ -157,10 +156,10 @@ bool FsmFork::handle(Mat &img, int type) {
                         countThroughoutBlocks++;
                     }
                     if (params->track->pointsEdgeLeft[i].y < 3 &&
-                        params->track->pointsEdgeRight[i].y > COLSIMAGE - 3)
+                        params->track->pointsEdgeRight[i].y > IMAGE_COL - 3)
                         countSTpointLR++;
                 }
-                if (countThroughoutBlocks > ROWSIMAGE / 6 &&
+                if (countThroughoutBlocks > IMAGE_ROW / 6 &&
                     countSTpointLR > 5) { // 许多行满足该情况
                     step = Step::ENTER;   // 判定通过，进入补线阶段
                     counterFork = 0;
@@ -181,7 +180,7 @@ bool FsmFork::handle(Mat &img, int type) {
                 leftFilletDown = searchFilletLeftDown(
                     params->track->pointsEdgeLeft,
                     params->track->pointsEdgeRight,
-                    (ROWSIMAGE - params->track->rowCutBottom) * 0.8);
+                    (IMAGE_ROW - params->track->rowCutBottom) * 0.8);
                 if (!leftFilletDown.slope ||
                     leftFilletDown.x <
                         40) { // 此时的Left_Fillet_DOWN不可能特别靠上
@@ -211,10 +210,10 @@ bool FsmFork::handle(Mat &img, int type) {
                     if (params->track->spurroad.size() > 0) {
                         for (int i = 0; i < params->track->spurroad.size();
                              i++) { // 太靠右侧以后出现了错误分岔点
-                            if (params->track->spurroad[i].x > ROWSIMAGE / 3 &&
-                                params->track->spurroad[i].y > COLSIMAGE / 3 &&
+                            if (params->track->spurroad[i].x > IMAGE_ROW / 3 &&
+                                params->track->spurroad[i].y > IMAGE_COL / 3 &&
                                 params->track->spurroad[i].y <
-                                    COLSIMAGE * 7 / 8) {
+                                    IMAGE_COL * 7 / 8) {
                                 lastForkR =
                                     params->track->spurroad
                                         [i]; // 出现符合要求的分岔点后改为补一条直线到分岔点+进入EXITING状态
@@ -236,7 +235,7 @@ bool FsmFork::handle(Mat &img, int type) {
                 int FirstRS = -1;
                 for (int i = 0; i < params->track->pointsEdgeRight.size();
                      i++) {
-                    if (params->track->pointsEdgeRight[i].y > COLSIMAGE - 3) {
+                    if (params->track->pointsEdgeRight[i].y > IMAGE_COL - 3) {
                         FirstRS = i;
                         break;
                     }
@@ -286,7 +285,7 @@ bool FsmFork::handle(Mat &img, int type) {
                     midPoint1 = PointX(endPoint.x + 10,
                                        startPoint.y - 30); // 补线：中点
                     midPoint2 =
-                        PointX(ROWSIMAGE - 30, startPoint.y - 15); // 补线：中点
+                        PointX(IMAGE_ROW - 30, startPoint.y - 15); // 补线：中点
                     vector<PointX> input = {startPoint, midPoint2, midPoint1,
                                             endPoint};
                     vector<PointX> b_modify = Bezier(0.01, input);
@@ -319,7 +318,7 @@ bool FsmFork::handle(Mat &img, int type) {
                     break;
             }
             for (int i = 0; i < params->track->pointsEdgeRight.size(); i++) {
-                if (params->track->pointsEdgeRight[i].y > COLSIMAGE - 3) {
+                if (params->track->pointsEdgeRight[i].y > IMAGE_COL - 3) {
                     StickR++;
                 } else
                     break;
@@ -463,8 +462,8 @@ bool FsmFork::handle(Mat &img, int type) {
             lastForkR.slope = 0;               // 开始重新找分岔点
             if (params->track->spurroad.size() > 0) {
                 for (int i = 0; i < params->track->spurroad.size(); i++) {
-                    if (params->track->spurroad[i].x > ROWSIMAGE / 3 &&
-                        params->track->spurroad[i].y > COLSIMAGE / 3) {
+                    if (params->track->spurroad[i].x > IMAGE_ROW / 3 &&
+                        params->track->spurroad[i].y > IMAGE_COL / 3) {
                         lastForkR =
                             params->track->spurroad
                                 [i]; // 出现符合要求的分岔点后改为补一条直线到分岔点+进入EXITING状态
@@ -531,7 +530,7 @@ bool FsmFork::handle(Mat &img, int type) {
                     break;
             }
             for (int i = 0; i < params->track->pointsEdgeRight.size(); i++) {
-                if (params->track->pointsEdgeRight[i].y > COLSIMAGE - 3) {
+                if (params->track->pointsEdgeRight[i].y > IMAGE_COL - 3) {
                     StickR++;
                 } else
                     break;
@@ -856,7 +855,7 @@ PointX FsmFork::searchFilletRightDown(vector<PointX> pointsEdgeRight,
         rowsEnd = pointsEdgeRight.size() - 4;
     }
     for (int i = 5; i < rowsEnd; i++) { // 先找下拐点
-        if (!Right_Fillet_DOWN.slope && pointsEdgeRight[i].y < COLSIMAGE - 10 &&
+        if (!Right_Fillet_DOWN.slope && pointsEdgeRight[i].y < IMAGE_COL - 10 &&
             pointsEdgeRight[i].y <
                 pointsEdgeRight[i + 1]
                     .y) // 第一次找下拐点，不找贴边点，找第一个反向点
@@ -910,7 +909,7 @@ PointX FsmFork::searchFilletRightDown(vector<PointX> pointsEdgeRight,
  */
 int FsmFork::countFormerStickpointL(vector<PointX> pointsEdgeLeft,
                                     int StartLine, int Endline) {
-    if (pointsEdgeLeft.size() < ROWSIMAGE * 2 / 3) {
+    if (pointsEdgeLeft.size() < IMAGE_ROW * 2 / 3) {
         Endline = pointsEdgeLeft.size();
     }
     int countStickL = 0;
@@ -932,12 +931,12 @@ int FsmFork::countFormerStickpointL(vector<PointX> pointsEdgeLeft,
  */
 int FsmFork::countFormerStickpointR(vector<PointX> pointsEdgeRight,
                                     int StartLine, int Endline) {
-    if (pointsEdgeRight.size() < ROWSIMAGE * 2 / 3) {
+    if (pointsEdgeRight.size() < IMAGE_ROW * 2 / 3) {
         Endline = pointsEdgeRight.size();
     }
     int countStickR = 0;
     for (int i = StartLine; i < Endline; i++) {
-        if (pointsEdgeRight[i].y > COLSIMAGE - 3) {
+        if (pointsEdgeRight[i].y > IMAGE_COL - 3) {
             countStickR++;
         }
     }

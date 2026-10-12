@@ -59,11 +59,16 @@ shared_ptr<CarControl> CarControl::create() {
 
 void CarControl::recvThreadMain() {
     size_t index = 0;
-    std::array<uint8_t, USB_FRAME_LENMAX> buffer; // 临时缓冲数据
+    array<uint8_t, USB_FRAME_LENMAX> buffer; // 临时缓冲数据
     while (!recvThreadStop.load(memory_order_relaxed)) {
         uint8_t byte;
+        /*
+         * LIBRARY BUG: Apparently you can't set ReadByte's msTimeout to any
+         * value other than 0
+         */
         try {
-            serialPort.ReadByte(byte, 100); // 定期检查退出，避免永久阻塞
+            // serialPort.ReadByte(byte, 100); // 定期检查退出，避免永久阻塞
+            serialPort.ReadByte(byte, 0);
         } catch (const ReadTimeout &) {
             continue;
         } catch (const std::exception &e) {

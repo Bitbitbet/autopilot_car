@@ -14,7 +14,6 @@
 #include "motion.hpp"
 #include "predeal.hpp"
 #include "show.hpp"
-#include "stop_signal.hpp"
 #include <condition_variable>
 #include <exception>
 #include <memory>
@@ -33,30 +32,26 @@ using std::lock_guard;
 using std::make_shared;
 using std::mutex;
 using std::shared_ptr;
+using std::vector;
 namespace this_thread = std::this_thread;
 namespace chrono = std::chrono;
-
-namespace {
-auto &stopRequested = car_signal::requested;
-}
+/**
+ * @brief 状态机管理
+ *
+ */
+struct FsmFactory {
+    shared_ptr<FsmBusy> busy;         // 施工区控制（原避障控制）
+    shared_ptr<FsmObstacle> obstacle; // 避障控制(锥桶绕行 + 行人礼让)
+    shared_ptr<FsmPark> park;         // 停车场控制
+    shared_ptr<FsmYfork> yfork;       // 岔路口控制
+    shared_ptr<FsmStop> stop;         // 停车区控制
+    shared_ptr<FsmCross> cross;       // 斑马线停车控制
+    shared_ptr<FsmFork> fork;         // 停车场岔路控制
+    shared_ptr<FsmSlow> slow;         // 慢行区控制
+};
 
 class Icar {
   private:
-    /**
-     * @brief 状态机管理
-     *
-     */
-    struct FsmFactory {
-        shared_ptr<FsmBusy> busy;         // 施工区控制（原避障控制）
-        shared_ptr<FsmObstacle> obstacle; // 避障控制(锥桶绕行 + 行人礼让)
-        shared_ptr<FsmPark> park;         // 停车场控制
-        shared_ptr<FsmYfork> yfork;       // 岔路口控制
-        shared_ptr<FsmStop> stop;         // 停车区控制
-        shared_ptr<FsmCross> cross;       // 斑马线停车控制
-        shared_ptr<FsmFork> fork;         // 停车场岔路控制
-        shared_ptr<FsmSlow> slow;         // 慢行区控制
-    };
-
     FsmFactory fsmFactory;       // 状态机管理
     bool parkWasActive = false;  // 上一帧停车场是否激活（检测退出过渡）
     int yforkLock = 0;           // 停车场退出后锁定 yfork 的剩余帧数
@@ -66,7 +61,7 @@ class Icar {
     shared_ptr<Detection> detection;      // 目标检测类
     shared_ptr<CarControl> control;       // UART通信类
     shared_ptr<Params> params;            // 车辆状态参数（FSM共享传递）
-    shared_ptr<Loops> loops;              // 子线程循环
+    shared_ptr<Loops> runModelThread;     // 子线程循环
     shared_ptr<Center> center;            // 控制中心处理类
     shared_ptr<Motion> motion;            // 运动控制器
 
@@ -76,7 +71,7 @@ class Icar {
     condition_variable cvImg;
     atomic<bool> readyImg{false};
     atomic<bool> shuttingDown{false};
-    LatestResult<std::vector<PredictResult>> modelResults;
+    LatestResult<vector<PredictResult>> modelResults;
 
     /**
      * @brief 鼠标的事件回调函数
@@ -88,7 +83,7 @@ class Icar {
         if (self)
             self->handleMouse(event, x, y, flags);
     }
-    void handleMouse(int event, int x, int y, int flags) {
+    void handleMouse(int event, int, int, int flags) {
         double value;
         switch (event) {
         case cv::EVENT_MOUSEWHEEL: // 鼠标滑球
@@ -115,13 +110,13 @@ class Icar {
      * @brief AI 模型推理
      *
      */
-    void runModel() {
+    void runModelThreadMainLoop() {
         try {
-            std::unique_lock<std::mutex> lock(mtxImg);
+            std::unique_lock lock(mtxImg);
             cvImg.wait_for(lock, chrono::milliseconds(50), [this] {
                 return shuttingDown.load() || readyImg.load();
             });
-            if (shuttingDown || !readyImg)
+            if (shuttingDown)
                 return;
             cv::Mat img = imgShare.clone(); // 图像拷贝出来再释放锁
             readyImg = false;
@@ -151,8 +146,8 @@ class Icar {
         fsmFactory.cross->run(img); // 斑马线停车识别与规划
         params->mode = fsmFactory.cross->getMode();
         if (params->mode == FsmMode::normal || params->mode == FsmMode::park ||
-            params->mode == FsmMode::cross) // 停车场图像处理
-        {
+            params->mode == FsmMode::cross) { // 停车场图像处理
+
             fsmFactory.park->run(img);
             FsmMode mode = fsmFactory.park->getMode();
             if (mode != FsmMode::normal)
@@ -211,7 +206,10 @@ class Icar {
         params = make_shared<Params>(); // 初始化参数
         center = make_shared<Center>(); // 控制中心处理类
         motion = make_shared<Motion>(); // 运动控制器
-        predeal = make_shared<Predeal>(params->config.binary); // 图像预处理类
+        predeal =
+            params->config.binary < 0
+                ? make_shared<Predeal>()
+                : make_shared<Predeal>(params->config.binary); // 图像预处理类
         detection =
             make_shared<Detection>(params->config.model,
                                    params->config.score); // AI模型初始化
@@ -230,8 +228,8 @@ class Icar {
             cerr << "[Error]: Can not open video device!" << endl;
             throw std::runtime_error("Cannot open video device");
         }
-        capture->set(cv::CAP_PROP_FRAME_WIDTH, COLSCAMERA);  // 设置图像分辨率
-        capture->set(cv::CAP_PROP_FRAME_HEIGHT, ROWSCAMERA); // 设置图像分辨率
+        capture->set(cv::CAP_PROP_FRAME_WIDTH, CAMERA_COL);  // 设置图像分辨率
+        capture->set(cv::CAP_PROP_FRAME_HEIGHT, CAMERA_ROW); // 设置图像分辨率
         capture->set(cv::CAP_PROP_FPS, 30);                  // 设置帧率
 
         if (params->config.debug) {
@@ -256,11 +254,12 @@ class Icar {
         fsmFactory.yfork = make_shared<FsmYfork>(params); // 岔路口控制实例化
 
         // 启动AI推理子线程
-        loops = make_shared<Loops>("LoopAI", 1.f / 30.f,
-                                   std::bind(&Icar::runModel, this));
-        loops->start(); // RL开始推理
+        runModelThread =
+            make_shared<Loops>("LoopAI", 1.f / 30.f,
+                               std::bind(&Icar::runModelThreadMainLoop, this));
+        runModelThread->start(); // RL开始推理
 
-        cout << "[OK]: Params initial succeed!" << endl;
+        cout << "[OK]: Icar initialization succeed!" << endl;
     };
     ~Icar() {
         stop(); // 在等待推理线程结束之前发送停车指令
@@ -269,8 +268,8 @@ class Icar {
             shuttingDown = true;
         }
         cvImg.notify_all();
-        if (loops)
-            loops->shutdown();
+        if (runModelThread)
+            runModelThread->shutdown();
     }
 
     void stop() noexcept {
@@ -285,11 +284,6 @@ class Icar {
      *
      */
     void mainLoop() {
-        if (stopRequested) {
-            params->quit = true;
-            stop();
-            return;
-        }
         modelResults.take(params->results); // FSM与绘图只读取主线程的结果快照
         //[01] 视频源读取
         cv::Mat img;
@@ -333,7 +327,7 @@ class Icar {
         predeal->correct(img); // 图像矫正
         /*---------------子线程共享数据，避免浅拷贝-----------------*/
         {
-            lock_guard<std::mutex> lock(mtxImg);
+            lock_guard lock(mtxImg);
             imgShare = img.clone();
             readyImg = true;
         }
@@ -360,9 +354,9 @@ class Icar {
         runFsm(imgBin);
 
         //[06] 控制中心计算
-        center->fitting(params);
+        center->fitting(*params);
 
-        if (params->quit || stopRequested) {
+        if (params->quit) {
             params->quit = true;
             stop();
             return;
@@ -381,7 +375,7 @@ class Icar {
 
             // 特殊区域图像处理结果显示
             Mat imgRes =
-                Mat::zeros(Size(COLSIMAGE, ROWSIMAGE), CV_8UC3); // 创建全黑图像
+                Mat::zeros(Size(IMAGE_COL, IMAGE_ROW), CV_8UC3); // 创建全黑图像
             fsmFactory.busy->show(imgRes);
             fsmFactory.park->show(imgRes);
             fsmFactory.stop->show(imgRes);
@@ -390,9 +384,8 @@ class Icar {
             fsmFactory.slow->show(imgRes);
             fsmFactory.yfork->show(imgRes);
             show->setNewWindow(4, "FSM", imgRes);
-        } else // 实车控制
-        {
-            if (stopRequested || shuttingDown || control->exitBoot) {
+        } else { // 实车控制
+            if (shuttingDown || control->exitBoot) {
                 params->quit = true;
                 stop();
                 return;
@@ -403,26 +396,27 @@ class Icar {
 
         if (params->quit) // 停标触发退出：先舵机归中再退出进程
         {
-            params->ctrl.servo = PWMSERVOMID;    // 舵机归中
-            params->ctrl.speed = 0;              // 停车
-            control->carControl(0, PWMSERVOMID); // 发送归中+停车指令
+            params->ctrl.servo = PWMSERVOMID; // 舵机归中
+            params->ctrl.speed = 0;           // 停车
+            control->resetVelocity();
             cout << "-----> System Exit (servo centered)! <-----" << endl;
-            params->quit = true;
             return;
         }
     }
 };
 
 int main() {
-    car_signal::install();
     try {
         Icar icar;
 
-        for (int i = 0; i < 100 && !stopRequested; ++i)
+        cout << "Waiting 10 seconds..." << endl;
+        for (int i = 0; i < 100; ++i)
             this_thread::sleep_for(chrono::milliseconds(100));
 
+        cout << "10-second-wait finished. Starting." << endl;
+
         const chrono::milliseconds durations(1000 / 30); // 控制周期：30Fps
-        while (!stopRequested && !icar.finished()) {
+        while (!icar.finished()) {
             auto timeStart = chrono::high_resolution_clock::now();
             icar.mainLoop(); // 系统主线程
 

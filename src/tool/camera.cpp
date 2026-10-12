@@ -34,7 +34,7 @@ int main(int argc, char const *argv[]) {
          << height << endl;
 
     // 读取xml中的相机标定参数
-    shared_ptr<Predeal> predeal = make_shared<Predeal>(-1); // 图像预处理类
+    shared_ptr<Predeal> predeal = make_shared<Predeal>(); // 图像预处理类
 
     while (1) {
         static auto timeLast = steady_clock::now();

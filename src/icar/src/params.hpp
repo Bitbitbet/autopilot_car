@@ -1,5 +1,6 @@
 #pragma once
 
+#include "control.hpp"
 #include "nlohmann/json.hpp"
 #include "track.hpp"
 #include <cstdint>
@@ -34,7 +35,7 @@ struct Control {
     bool slow = false;              // 车辆减速
     uint16_t servo = PWMSERVOMID;   // 发送给舵机的PWM
     float speed = 0.0;              // 发送给电机的速度
-    int center = COLSIMAGE / 2;     // 控制中心
+    int center = IMAGE_COL / 2;     // 控制中心
     std::vector<PointX> centerEdge; // 赛道中心点集
     int lineArea = 0;               // 面积规划行序号
     bool fitting = false;           // 控制中心拟合标志(停车场专用)

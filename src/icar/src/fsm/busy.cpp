@@ -77,7 +77,7 @@ void FsmBusy::run(Mat &img) {
         if (choice.score > 0) // 检测到箭头
         {
             timeout = 0;
-            if ((choice.y + choice.height / 2) > ROWSIMAGE * 0.33) // 箭头靠近
+            if ((choice.y + choice.height / 2.0) > IMAGE_ROW * 0.33) // 箭头靠近
                 countRec++;
             if (countRec > 1)
                 setStep(Step::FORKIN); // 左拐进区
@@ -111,7 +111,7 @@ void FsmBusy::run(Mat &img) {
                 resLeft = params->results[i]; // 取置信度最高的左转箭头
         }
         if (resLeft.score > 0 &&
-            (resLeft.y + resLeft.height / 2) > ROWSIMAGE * 0.3)
+            (resLeft.y + resLeft.height / 2.0) > IMAGE_ROW * 0.3)
             countRec++; // 左转标志开到画面下
         if (countRec > 2)
             setStep(Step::FORKOUT); // 出区左拐
@@ -160,8 +160,8 @@ void FsmBusy::show(Mat &img) {
         cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
     }
 
-    putText(img, "[1] Busy", Point(COLSIMAGE / 2 - 50, 20),
-            cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
+    putText(img, "[1] Busy", Point(IMAGE_COL / 2 - 50, 20),
+            cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
 }
 
 /**
@@ -187,8 +187,8 @@ void FsmBusy::replanTracking(bool left) {
 
     if (left) {
         // 左车道线
-        PointX startPoint = PointX(ROWSIMAGE - 10, 1); // 补线起点:固定左下角
-        PointX endPoint = PointX(ROWSIMAGE / 3, 1);    // 补线终点
+        PointX startPoint = PointX(IMAGE_ROW - 10, 1); // 补线起点:固定左下角
+        PointX endPoint = PointX(IMAGE_ROW / 3, 1);    // 补线终点
         PointX midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                                  (startPoint.y + endPoint.y) / 2); // 补线中点
         vector<PointX> repairPoints = {startPoint, midPoint, endPoint};
@@ -197,8 +197,8 @@ void FsmBusy::replanTracking(bool left) {
         params->track->pointsEdgeLeft = modifyEdge;
         // 右车道线
         startPoint =
-            PointX(ROWSIMAGE - 10, COLSIMAGE * 0.8); // 补线起点:固定左下角
-        endPoint = PointX(ROWSIMAGE / 3, 30);        // 补线终点
+            PointX(IMAGE_ROW - 10, IMAGE_COL * 0.8); // 补线起点:固定左下角
+        endPoint = PointX(IMAGE_ROW / 3, 30);        // 补线终点
         midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                           (startPoint.y + endPoint.y) / 2); // 补线中点
         repairPoints = {startPoint, midPoint, endPoint};
@@ -207,8 +207,8 @@ void FsmBusy::replanTracking(bool left) {
     } else {
         // 左车道线
         PointX startPoint =
-            PointX(ROWSIMAGE - 10, COLSIMAGE * 0.2); // 补线起点:固定左下角
-        PointX endPoint = PointX(ROWSIMAGE / 3, COLSIMAGE - 1); // 补线终点
+            PointX(IMAGE_ROW - 10, IMAGE_COL * 0.2); // 补线起点:固定左下角
+        PointX endPoint = PointX(IMAGE_ROW / 3, IMAGE_COL - 1); // 补线终点
         PointX midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                                  (startPoint.y + endPoint.y) / 2); // 补线中点
         vector<PointX> repairPoints = {startPoint, midPoint, endPoint};
@@ -217,8 +217,8 @@ void FsmBusy::replanTracking(bool left) {
         params->track->pointsEdgeLeft = modifyEdge;
         // 右车道线
         startPoint =
-            PointX(ROWSIMAGE - 10, COLSIMAGE - 1);       // 补线起点:固定左下角
-        endPoint = PointX(ROWSIMAGE / 3, COLSIMAGE - 1); // 补线终点
+            PointX(IMAGE_ROW - 10, IMAGE_COL - 1);       // 补线起点:固定左下角
+        endPoint = PointX(IMAGE_ROW / 3, IMAGE_COL - 1); // 补线终点
         midPoint = PointX((startPoint.x + endPoint.x) * 0.3,
                           (startPoint.y + endPoint.y) / 2); // 补线中点
         repairPoints = {startPoint, midPoint, endPoint};

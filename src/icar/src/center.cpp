@@ -11,250 +11,163 @@ using std::vector;
  *
  * @param params
  */
-void Center::fitting(shared_ptr<Params> &params) {
-
-    sigmaCenter = 0;
-    params->ctrl.center = COLSIMAGE / 2; // 控制中心
-    if (!params->ctrl.fitting)           // 除停车场特殊绘制
-    {
-        params->ctrl.centerEdge.clear();
+void Center::fitting(Params &params) {
+    params.ctrl.center = IMAGE_COL / 2; // 控制中心
+    auto &pointsEdgeLeft = params.track->pointsEdgeLeft;
+    auto &pointsEdgeRight = params.track->pointsEdgeRight;
+    if (!params.ctrl.fitting) { // 除停车场特殊绘制
+        params.ctrl.centerEdge.clear();
         vector<PointX> v_center(4); // 三阶贝塞尔曲线
-        style = "STRIGHT";
 
         // 边缘斜率重计算（边缘修正之后）
-        params->track->stdevLeft = params->track->stdevEdgeCal(
-            params->track->pointsEdgeLeft, ROWSIMAGE);
-        params->track->stdevRight = params->track->stdevEdgeCal(
-            params->track->pointsEdgeRight, ROWSIMAGE);
+        params.track->stdevLeft = stdevEdgeCal(pointsEdgeLeft, IMAGE_ROW);
+        params.track->stdevRight = stdevEdgeCal(pointsEdgeRight, IMAGE_ROW);
 
         // 边缘有效行优化
-        // 边缘有效行优化
-        if (params->track->pointsEdgeLeft.size() > 10 &&
-            params->track->pointsEdgeRight.size() > 10) {
-            validRowsCal(params->track->pointsEdgeLeft,
-                         params->track->pointsEdgeRight);
+        if (pointsEdgeLeft.size() > 10 && pointsEdgeRight.size() > 10) {
+            validRowsCal(pointsEdgeLeft, pointsEdgeRight);
 
-            params->track->pointsEdgeLeft.resize(validRowsLeft);
-            params->track->pointsEdgeRight.resize(validRowsRight);
+            pointsEdgeLeft.resize(validRowsLeft);
+            pointsEdgeRight.resize(validRowsRight);
         }
 
-        if (params->track->pointsEdgeLeft.size() > 4 &&
-            params->track->pointsEdgeRight.size() >
-                4) // 通过双边缘有效点的差来判断赛道类型
-        {
-            v_center[0] = {(params->track->pointsEdgeLeft[0].x +
-                            params->track->pointsEdgeRight[0].x) /
-                               2,
-                           (params->track->pointsEdgeLeft[0].y +
-                            params->track->pointsEdgeRight[0].y) /
-                               2};
+        if (pointsEdgeLeft.size() > 4 &&
+            pointsEdgeRight.size() > 4) { // 通过双边缘有效点的差来判断赛道类型
+            v_center[0] = {(pointsEdgeLeft[0].x + pointsEdgeRight[0].x) / 2,
+                           (pointsEdgeLeft[0].y + pointsEdgeRight[0].y) / 2};
 
             v_center[1] = {
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() / 3]
-                     .x +
-                 params->track
-                     ->pointsEdgeRight[params->track->pointsEdgeRight.size() /
-                                       3]
-                     .x) /
+                (params.track->pointsEdgeLeft[pointsEdgeLeft.size() / 3].x +
+                 params.track->pointsEdgeRight[pointsEdgeRight.size() / 3].x) /
                     2,
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() / 3]
-                     .y +
-                 params->track
-                     ->pointsEdgeRight[params->track->pointsEdgeRight.size() /
-                                       3]
-                     .y) /
+                (params.track->pointsEdgeLeft[pointsEdgeLeft.size() / 3].y +
+                 params.track->pointsEdgeRight[pointsEdgeRight.size() / 3].y) /
                     2};
 
             v_center[2] = {
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 2 /
-                                      3]
-                     .x +
-                 params->track
-                     ->pointsEdgeRight[params->track->pointsEdgeRight.size() *
-                                       2 / 3]
+                (params.track->pointsEdgeLeft[pointsEdgeLeft.size() * 2 / 3].x +
+                 params.track->pointsEdgeRight[pointsEdgeRight.size() * 2 / 3]
                      .x) /
                     2,
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 2 /
-                                      3]
-                     .y +
-                 params->track
-                     ->pointsEdgeRight[params->track->pointsEdgeRight.size() *
-                                       2 / 3]
+                (params.track->pointsEdgeLeft[pointsEdgeLeft.size() * 2 / 3].y +
+                 params.track->pointsEdgeRight[pointsEdgeRight.size() * 2 / 3]
                      .y) /
                     2};
 
             v_center[3] = {
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() *
-                                      0.9]
-                     .x +
-                 params->track
-                     ->pointsEdgeRight[params->track->pointsEdgeRight.size() *
-                                       0.9]
+                (params.track->pointsEdgeLeft[pointsEdgeLeft.size() * 0.9].x +
+                 params.track->pointsEdgeRight[pointsEdgeRight.size() * 0.9]
                      .x) /
                     2,
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() *
-                                      0.9]
-                     .y +
-                 params->track
-                     ->pointsEdgeRight[params->track->pointsEdgeRight.size() *
-                                       0.9]
+                (params.track->pointsEdgeLeft[pointsEdgeLeft.size() * 0.9].y +
+                 params.track->pointsEdgeRight[pointsEdgeRight.size() * 0.9]
                      .y) /
                     2};
 
-            params->ctrl.centerEdge = Bezier(0.03, v_center);
-            style = "STRIGHT";
+            params.ctrl.centerEdge = Bezier(0.03, v_center);
         }
         // 左单边
-        else if ((params->track->pointsEdgeLeft.size() > 0 &&
-                  params->track->pointsEdgeRight.size() <= 4) ||
-                 (params->track->pointsEdgeLeft.size() > 0 &&
-                  params->track->pointsEdgeRight.size() > 0 &&
-                  params->track->pointsEdgeLeft[0].x -
-                          params->track->pointsEdgeRight[0].x >
-                      ROWSIMAGE / 2)) {
-            style = "RIGHT";
-            params->ctrl.centerEdge =
-                centerCompute(params->track->pointsEdgeLeft, 0);
+        else if ((pointsEdgeLeft.size() > 0 && pointsEdgeRight.size() <= 4) ||
+                 (pointsEdgeLeft.size() > 0 && pointsEdgeRight.size() > 0 &&
+                  pointsEdgeLeft[0].x - pointsEdgeRight[0].x > IMAGE_ROW / 2)) {
+            params.ctrl.centerEdge = centerCompute(pointsEdgeLeft, 0);
         }
         // 右单边
-        else if ((params->track->pointsEdgeRight.size() > 0 &&
-                  params->track->pointsEdgeLeft.size() <= 4) ||
-                 (params->track->pointsEdgeRight.size() > 0 &&
-                  params->track->pointsEdgeLeft.size() > 0 &&
-                  params->track->pointsEdgeRight[0].x -
-                          params->track->pointsEdgeLeft[0].x >
-                      ROWSIMAGE / 2)) {
-            style = "LEFT";
-            params->ctrl.centerEdge =
-                centerCompute(params->track->pointsEdgeRight, 1);
-        } else if (params->track->pointsEdgeLeft.size() > 4 &&
-                   params->track->pointsEdgeRight.size() == 0) // 左单边
+        else if ((pointsEdgeRight.size() > 0 && pointsEdgeLeft.size() <= 4) ||
+                 (pointsEdgeRight.size() > 0 && pointsEdgeLeft.size() > 0 &&
+                  pointsEdgeRight[0].x - pointsEdgeLeft[0].x > IMAGE_ROW / 2)) {
+            params.ctrl.centerEdge = centerCompute(pointsEdgeRight, 1);
+        } else if (pointsEdgeLeft.size() > 4 &&
+                   pointsEdgeRight.size() == 0) // 左单边
         {
             v_center[0] = {
-                params->track->pointsEdgeLeft[0].x,
-                (params->track->pointsEdgeLeft[0].y + COLSIMAGE - 1) / 2};
+                pointsEdgeLeft[0].x,
+                static_cast<int>((pointsEdgeLeft[0].y + IMAGE_COL - 1) / 2)};
 
             v_center[1] = {
-                params->track
-                    ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() / 3]
-                    .x,
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() / 3]
-                     .y +
-                 COLSIMAGE - 1) /
-                    2};
+                params.track->pointsEdgeLeft[pointsEdgeLeft.size() / 3].x,
+                static_cast<int>(
+                    (params.track->pointsEdgeLeft[pointsEdgeLeft.size() / 3].y +
+                     IMAGE_COL - 1) /
+                    2)};
 
             v_center[2] = {
-                params->track
-                    ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 2 /
-                                     3]
-                    .x,
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 2 /
-                                      3]
-                     .y +
-                 COLSIMAGE - 1) /
-                    2};
+                params.track->pointsEdgeLeft[pointsEdgeLeft.size() * 2 / 3].x,
+                static_cast<int>(
+                    (params.track->pointsEdgeLeft[pointsEdgeLeft.size() * 2 / 3]
+                         .y +
+                     IMAGE_COL - 1) /
+                    2)};
 
             v_center[3] = {
-                params->track
-                    ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() - 1]
-                    .x,
-                (params->track
-                     ->pointsEdgeLeft[params->track->pointsEdgeLeft.size() - 1]
-                     .y +
-                 COLSIMAGE - 1) /
-                    2};
+                params.track->pointsEdgeLeft[pointsEdgeLeft.size() - 1].x,
+                static_cast<int>(
+                    (params.track->pointsEdgeLeft[pointsEdgeLeft.size() - 1].y +
+                     IMAGE_COL - 1) /
+                    2)};
 
-            params->ctrl.centerEdge = Bezier(0.02, v_center);
-            style = "RIGHT";
-        } else if (params->track->pointsEdgeLeft.size() == 0 &&
-                   params->track->pointsEdgeRight.size() > 4) // 右单边
+            params.ctrl.centerEdge = Bezier(0.02, v_center);
+        } else if (pointsEdgeLeft.size() == 0 &&
+                   pointsEdgeRight.size() > 4) // 右单边
         {
-            v_center[0] = {params->track->pointsEdgeRight[0].x,
-                           params->track->pointsEdgeRight[0].y / 2};
+            v_center[0] = {pointsEdgeRight[0].x, pointsEdgeRight[0].y / 2};
 
             v_center[1] = {
-                params->track
-                    ->pointsEdgeRight[params->track->pointsEdgeRight.size() / 3]
-                    .x,
-                params->track
-                        ->pointsEdgeRight
-                            [params->track->pointsEdgeRight.size() / 3]
-                        .y /
+                params.track->pointsEdgeRight[pointsEdgeRight.size() / 3].x,
+                params.track->pointsEdgeRight[pointsEdgeRight.size() / 3].y /
                     2};
 
             v_center[2] = {
-                params->track
-                    ->pointsEdgeRight[params->track->pointsEdgeRight.size() *
-                                      2 / 3]
-                    .x,
-                params->track
-                        ->pointsEdgeRight
-                            [params->track->pointsEdgeRight.size() * 2 / 3]
+                params.track->pointsEdgeRight[pointsEdgeRight.size() * 2 / 3].x,
+                params.track->pointsEdgeRight[pointsEdgeRight.size() * 2 / 3]
                         .y /
                     2};
 
             v_center[3] = {
-                params->track
-                    ->pointsEdgeRight[params->track->pointsEdgeRight.size() - 1]
-                    .x,
-                params->track
-                        ->pointsEdgeRight
-                            [params->track->pointsEdgeRight.size() - 1]
-                        .y /
+                params.track->pointsEdgeRight[pointsEdgeRight.size() - 1].x,
+                params.track->pointsEdgeRight[pointsEdgeRight.size() - 1].y /
                     2};
 
-            params->ctrl.centerEdge = Bezier(0.02, v_center);
-            style = "LEFT";
+            params.ctrl.centerEdge = Bezier(0.02, v_center);
         }
     }
 
     // 加权控制中心计算
     int controlNum = 1;
-    for (auto p : params->ctrl.centerEdge) {
-        if (p.x < ROWSIMAGE / 2) {
-            controlNum += ROWSIMAGE / 2;
-            params->ctrl.center += p.y * ROWSIMAGE / 2;
+    for (auto p : params.ctrl.centerEdge) {
+        if (p.x < IMAGE_ROW / 2) {
+            controlNum += IMAGE_ROW / 2;
+            params.ctrl.center += p.y * IMAGE_ROW / 2;
         } else {
-            controlNum += (ROWSIMAGE - p.x);
-            params->ctrl.center += p.y * (ROWSIMAGE - p.x);
+            controlNum += (IMAGE_ROW - p.x);
+            params.ctrl.center += p.y * (IMAGE_ROW - p.x);
         }
     }
     if (controlNum > 1) {
-        params->ctrl.center = params->ctrl.center / controlNum;
+        params.ctrl.center = params.ctrl.center / controlNum;
     }
 
-    if (params->ctrl.center > COLSIMAGE)
-        params->ctrl.center = COLSIMAGE;
-    else if (params->ctrl.center < 0)
-        params->ctrl.center = 0;
+    if (params.ctrl.center > IMAGE_COL)
+        params.ctrl.center = IMAGE_COL;
+    else if (params.ctrl.center < 0)
+        params.ctrl.center = 0;
 
     // 控制率计算
-    if (params->ctrl.centerEdge.size() > 20) {
+    if (params.ctrl.centerEdge.size() > 20) {
         vector<PointX> centerV;
-        int filt = params->ctrl.centerEdge.size() / 5;
-        for (int i = filt; i < params->ctrl.centerEdge.size() - filt;
+        int filt = params.ctrl.centerEdge.size() / 5;
+        for (int i = filt; i < params.ctrl.centerEdge.size() - filt;
              i++) // 过滤中心点集前后1/5的诱导性
         {
-            centerV.push_back(params->ctrl.centerEdge[i]);
+            centerV.push_back(params.ctrl.centerEdge[i]);
         }
-        sigmaCenter = sigma(centerV);
-    } else
-        sigmaCenter = 1000;
+    }
 
     // 车辆冲出赛道检测
-    if (!params->ctrl.parking &&
-        derailmentCheck(params->track->pointsEdgeLeft,
-                        params->track->pointsEdgeRight)) {
-        params->ctrl.stop = true;
-        params->quit = true; // 主循环统一停车并退出
+    if (!params.ctrl.parking &&
+        derailmentCheck(pointsEdgeLeft, pointsEdgeRight)) {
+        params.ctrl.stop = true;
+        params.quit = true; // 主循环统一停车并退出
     }
 }
 
@@ -285,7 +198,7 @@ void Center::drawImage(shared_ptr<Params> &params, Mat &img) {
             1, Scalar(0, 0, 255), -1);
 
     // 绘制加权控制中心：方向
-    Rect rect(params->ctrl.center, ROWSIMAGE - 20, 10, 20);
+    Rect rect(params->ctrl.center, IMAGE_ROW - 20, 10, 20);
     rectangle(img, rect, Scalar(0, 0, 255), cv::FILLED);
 
     // 详细控制参数显示
@@ -294,11 +207,11 @@ void Center::drawImage(shared_ptr<Params> &params, Mat &img) {
 
     str = "Edge: " + double2String(params->track->stdevLeft, 1) + " | " +
           double2String(params->track->stdevRight, 1);
-    putText(img, str, Point(COLSIMAGE - 100, 2 * dis), FONT_HERSHEY_PLAIN, 0.7,
+    putText(img, str, Point(IMAGE_COL - 100, 2 * dis), FONT_HERSHEY_PLAIN, 0.7,
             Scalar(0, 0, 255), 1); // 斜率：左|右
 
     putText(img, to_string(params->ctrl.center),
-            Point(COLSIMAGE / 2 - 10, ROWSIMAGE - 40), FONT_HERSHEY_PLAIN, 1.2,
+            Point(IMAGE_COL / 2 - 10, IMAGE_ROW - 40), FONT_HERSHEY_PLAIN, 1.2,
             Scalar(0, 0, 255), 1); // 中心
 
     // 绘制FSM状态
@@ -349,14 +262,14 @@ void Center::showMode(Mat &img, FsmMode mode) {
     }
 
     if (mode != FsmMode::normal) {
-        putText(img, str, Point(COLSIMAGE / 2 - 50, 20),
+        putText(img, str, Point(IMAGE_COL / 2 - 50, 20),
                 cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0);
-        circle(img, Point(COLSIMAGE / 2, ROWSIMAGE / 2), 40,
+        circle(img, Point(IMAGE_COL / 2, IMAGE_ROW / 2), 40,
                Scalar(40, 120, 250), -1);
-        putText(img, logo, Point(COLSIMAGE / 2 - 25, ROWSIMAGE / 2 + 27),
+        putText(img, logo, Point(IMAGE_COL / 2 - 25, IMAGE_ROW / 2 + 27),
                 FONT_HERSHEY_PLAIN, 5, Scalar(255, 255, 255), 3);
     } else {
-        putText(img, "[Normal]", Point(COLSIMAGE / 2 - 50, 20),
+        putText(img, "[Normal]", Point(IMAGE_COL / 2 - 50, 20),
                 cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 0, 255), 0);
     }
 }
@@ -394,7 +307,7 @@ uint16_t Center::searchBreakRightDown(vector<PointX> pointsEdgeRight) {
 
     for (int i = 0; i < pointsEdgeRight.size() - 10; i++) // 寻找左边跳变点
     {
-        if (pointsEdgeRight[i].y < COLSIMAGE - 2) {
+        if (pointsEdgeRight[i].y < IMAGE_COL - 2) {
             counter++;
             if (counter > 3) {
                 return i - 2;
@@ -415,7 +328,7 @@ uint16_t Center::searchBreakRightDown(vector<PointX> pointsEdgeRight) {
  */
 vector<PointX> Center::centerCompute(vector<PointX> pointsEdge, int side) {
     int step = 4;                    // 间隔尺度
-    int offsetWidth = COLSIMAGE / 2; // 首行偏移量
+    int offsetWidth = IMAGE_COL / 2; // 首行偏移量
     int offsetHeight = 0;            // 纵向偏移量
 
     vector<PointX> center; // 控制中心集合
@@ -439,7 +352,7 @@ vector<PointX> Center::centerCompute(vector<PointX> pointsEdge, int side) {
         counter = 0;
         for (int i = rowStart; i < pointsEdge.size(); i += step) {
             int py = pointsEdge[i].y + offsetWidth;
-            if (py > COLSIMAGE - 1) {
+            if (py > IMAGE_COL - 1) {
                 counter++;
                 if (counter > 2)
                     break;
@@ -453,7 +366,7 @@ vector<PointX> Center::centerCompute(vector<PointX> pointsEdge, int side) {
         uint16_t counter = 0, rowStart = 0;
         for (int i = 0; i < pointsEdge.size(); i++) // 删除底部无效行
         {
-            if (pointsEdge[i].y < COLSIMAGE - 1) {
+            if (pointsEdge[i].y < IMAGE_COL - 1) {
                 counter++;
                 if (counter > 2) {
                     rowStart = i - 2;
@@ -496,7 +409,7 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft,
             searchBreakLeftDown(pointsEdgeLeft); // 右边缘上升拐点
         uint16_t rowBreakRight =
             searchBreakRightDown(pointsEdgeRight); // 右边缘上升拐点
-        if (pointsEdgeRight[pointsEdgeRight.size() - 1].y < COLSIMAGE / 2 &&
+        if (pointsEdgeRight[pointsEdgeRight.size() - 1].y < IMAGE_COL / 2 &&
             rowBreakRight - rowBreakLeft > 5) // 左弯道
         {
             if (pointsEdgeLeft.size() > rowBreakRight) // 左边缘有效行重新搜索
@@ -513,14 +426,14 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft,
             }
         }
 
-        else if (pointsEdgeLeft[pointsEdgeLeft.size() - 1].y > COLSIMAGE / 2 &&
+        else if (pointsEdgeLeft[pointsEdgeLeft.size() - 1].y > IMAGE_COL / 2 &&
                  rowBreakLeft - rowBreakRight > 5) // 右弯道
         {
 
             if (pointsEdgeRight.size() > rowBreakLeft) // 右边缘有效行重新搜索
             {
                 for (int i = rowBreakLeft; i < pointsEdgeRight.size(); i++) {
-                    if (pointsEdgeRight[i].y > COLSIMAGE - 2) {
+                    if (pointsEdgeRight[i].y > IMAGE_COL - 2) {
                         counter++;
                         if (counter >= 3) {
                             pointsEdgeRight.resize(i - 3);
@@ -551,13 +464,13 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft,
     validRowsRight = 0;
     if (pointsEdgeRight.size() > 1) {
         for (int i = pointsEdgeRight.size() - 1; i >= 1; i--) {
-            if (pointsEdgeRight[i].y <= COLSIMAGE - 2 &&
-                pointsEdgeRight[i - 1].y <= COLSIMAGE - 2) {
+            if (pointsEdgeRight[i].y <= IMAGE_COL - 2 &&
+                pointsEdgeRight[i - 1].y <= IMAGE_COL - 2) {
                 validRowsRight = i + 1;
                 break;
             }
-            if (pointsEdgeRight[i].y >= COLSIMAGE - 2 &&
-                pointsEdgeRight[i - 1].y < COLSIMAGE - 2) {
+            if (pointsEdgeRight[i].y >= IMAGE_COL - 2 &&
+                pointsEdgeRight[i - 1].y < IMAGE_COL - 2) {
                 validRowsRight = i + 1;
                 break;
             }
