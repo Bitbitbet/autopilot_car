@@ -123,41 +123,20 @@ bool Camera::read(Mat &frame) {
     return true;
 }
 
-/**
- * @brief 齐次坐标变换：必须除以第三分量
- *
- * @param H 3x3 单应矩阵（CV_64F）
- * @return 变换后的点；无法变换（矩阵为空/地平线）时返回 (NaN, NaN)
- */
 static Point2d applyHomography(const Mat &H, double x, double y) {
-    if (H.empty()) {
-        return Point2d(NAN, NAN);
-    }
     const Mat v = (cv::Mat_<double>(3, 1) << x, y, 1.0);
     const Mat r = H * v;
     const double w = r.at<double>(2);
-    if (std::fabs(w) < 1e-12) {
-        return Point2d(NAN, NAN); // 地平线附近，映射到无穷远
-    }
+    // if (std::fabs(w) < 1e-12) {
+    //     return Point2d(NAN, NAN);
+    // }
     return Point2d(r.at<double>(0) / w, r.at<double>(1) / w);
 }
 
-/**
- * @brief 图像坐标 -> 地面坐标（米）
- *
- * @param img_pt read() 返回的矫正后图像上的像素点
- * @return 地面 (X, Y) 米；X 左负右正，Y 前正后负
- */
-Point2d Camera::imageToGround(const Point2f &img_pt) const {
+Point2d Camera::image_to_ground(const Point2f &img_pt) const {
     return applyHomography(H_img2gnd, img_pt.x, img_pt.y);
 }
 
-/**
- * @brief 地面坐标（米） -> 图像坐标
- *
- * @param gnd_pt 地面 (X, Y) 米；X 左负右正，Y 前正后负
- * @return 矫正后图像上的像素坐标
- */
-Point2d Camera::groundToImage(const Point2d &gnd_pt) const {
+Point2d Camera::ground_to_image(const Point2d &gnd_pt) const {
     return applyHomography(H_gnd2img, gnd_pt.x, gnd_pt.y);
 }

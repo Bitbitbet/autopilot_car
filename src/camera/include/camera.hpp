@@ -15,21 +15,20 @@ class Camera {
     /**
      * @brief 图像坐标 -> 地面坐标（米）
      *
-     * 输入是 read() 返回的**矫正后**图像（640x480）上的像素点；
+     * 输入是 read() 返回的矫正后图像（640x480）上的像素点；
      * 只对地面上的点有意义。
      * @param img_pt 图像坐标(px)
      * @return 地面坐标 (X, Y)，单位米；X 左负右正，Y 前正后负
-     *         未标定地面单应、或点落在地平线附近时返回 (NaN, NaN)
      */
-    cv::Point2d imageToGround(const cv::Point2f &img_pt) const;
+    cv::Point2d image_to_ground(const cv::Point2f &img_pt) const;
 
     /**
      * @brief 地面坐标（米） -> 图像坐标
      *
      * @param gnd_pt 地面坐标 (X, Y)，单位米；X 左负右正，Y 前正后负
-     * @return 矫正后图像(640x480)上的像素坐标；未标定时返回 (NaN, NaN)
+     * @return 矫正后图像(640x480)上的像素坐标
      */
-    cv::Point2d groundToImage(const cv::Point2d &gnd_pt) const;
+    cv::Point2d ground_to_image(const cv::Point2d &gnd_pt) const;
 
     int cols() const { return capture_width; }
     int rows() const { return capture_height; }

@@ -40,10 +40,6 @@ target_link_libraries(calibration PRIVATE show tools)
 add_executable(calibrate_homography src/tool/calibrate_homography.cpp)
 target_link_libraries(calibrate_homography PRIVATE ${OpenCV_LIBRARIES})
 
-# 图像测试
-add_executable(imging src/tool/imging.cpp)
-target_link_libraries(imging PRIVATE camera tools)
-
 # 目标检测
 add_executable(detection_tool src/tool/detection_tool.cpp)
 target_link_libraries(detection_tool PRIVATE camera detection)
