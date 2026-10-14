@@ -9,8 +9,10 @@
 #include <opencv2/core/types.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
+#include <opencv2/videoio.hpp>
 #include <sys/stat.h>
 #include <utility>
+#include <vector>
 
 using namespace cv;
 using std::cerr;
@@ -27,15 +29,15 @@ const Size SQUARE_SIZE =
 /*
  * 第一步：提取图片中的角点信息
  */
-vector<vector<Point2f>> extract_corners(const fs::path &temp_images_folder,
-                                        vector<fs::path> &temp_image_paths,
+vector<vector<Point2f>> extract_corners(const fs::path &before_images_folder,
+                                        vector<fs::path> &before_image_paths,
                                         Size &image_size) {
-    temp_image_paths.clear();
+    before_image_paths.clear();
     //[1] 提取每张图片的角点信息
     cout << "[1] 提取每张图片的角点信息" << endl;
     vector<vector<Point2f>> pointsCorners; // 保存检测到的所有角点
     bool image_size_initialized = false;
-    for (const auto &entry : fs::directory_iterator(temp_images_folder)) {
+    for (const auto &entry : fs::directory_iterator(before_images_folder)) {
         auto path = entry.path();
         Mat image = imread(path.string()); // OpenCV读取图像
         if (image.empty()) {
@@ -82,7 +84,7 @@ vector<vector<Point2f>> extract_corners(const fs::path &temp_images_folder,
                 BOARD_SIZE.width *
                 BOARD_SIZE.height; // 每张图像上该有的角点数量
             if (pointCorners.size() >= countCorner) {
-                temp_image_paths.push_back(path);
+                before_image_paths.push_back(path);
                 pointsCorners.push_back(
                     std::move(pointCorners)); // 保存亚像素角点
             }
@@ -108,8 +110,7 @@ vector<vector<Point2f>> extract_corners(const fs::path &temp_images_folder,
  * @note 输出标定参数文件.yml 和 评价结果.txt
  * @param imagesFolder 标定板图像路径（文件夹）
  */
-int main(int argc, char *argv[]) {
-
+int main() {
     fs::path working_path("../res/calibration");
     if (!fs::is_directory(working_path)) {
         cerr << "找不到" << working_path << "文件夹，请在正确位置执行该程序"
@@ -117,22 +118,22 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    auto temp_images_folder = working_path / "temp";
+    auto before_images_folder = working_path / "before";
     if (!fs::is_directory(working_path)) {
         cerr << "找不到" << working_path << "文件夹" << endl;
     }
 
-    Size image_size;                                        // 图像的尺寸
-    Mat cameraMatrix = Mat(3, 3, CV_32FC1, Scalar::all(0)); // 摄像机内参矩阵
-    Mat distCoeffs = Mat(1, 5, CV_32FC1, Scalar::all(0));   // 相机的畸变矩阵
+    Size image_size;                                         // 图像的尺寸
+    Mat camera_matrix = Mat(3, 3, CV_32FC1, Scalar::all(0)); // 摄像机内参矩阵
+    Mat dist_coeffs = Mat(1, 5, CV_32FC1, Scalar::all(0));   // 相机的畸变矩阵
 
-    vector<fs::path> temp_image_paths;
+    vector<fs::path> before_image_paths;
     auto pointsCorners =
-        extract_corners(temp_images_folder, temp_image_paths, image_size);
+        extract_corners(before_images_folder, before_image_paths, image_size);
 
     //[4] 开始标定图像
     vector<vector<Point3f>> pointsObject; // 标定板角点的三维坐标
-    for (int t = 0; t < pointsCorners.size(); t++) {
+    for (size_t t = 0; t < pointsCorners.size(); t++) {
         vector<Point3f> tempPointSet;
         for (int i = 0; i < BOARD_SIZE.height; i++) {
             for (int j = 0; j < BOARD_SIZE.width; j++) {
@@ -149,14 +150,14 @@ int main(int argc, char *argv[]) {
 
     vector<int> countCorners; // 每幅图像中角点的数量
     // 初始化每幅图像中的角点数量，假定每幅图像中都可以看到完整的标定板
-    for (int i = 0; i < pointsCorners.size(); i++) {
+    for (size_t i = 0; i < pointsCorners.size(); i++) {
         countCorners.push_back(BOARD_SIZE.width * BOARD_SIZE.height);
     }
 
     vector<Mat> rvecsMat; // 图像的旋转向量
     vector<Mat> tvecsMat; // 图像的平移向量
-    calibrateCamera(pointsObject, pointsCorners, image_size, cameraMatrix,
-                    distCoeffs, rvecsMat, tvecsMat, 0); // 开始标定
+    calibrateCamera(pointsObject, pointsCorners, image_size, camera_matrix,
+                    dist_coeffs, rvecsMat, tvecsMat, 0); // 开始标定
 
     cout << "相机标定完成!" << endl;
     cout << "正在评价标定结果 | Loading...." << endl;
@@ -174,17 +175,17 @@ int main(int argc, char *argv[]) {
 
     cout << "每幅图像的标定误差: \n";
     assessment << "每幅图像的标定误差: \n";
-    for (int t = 0; t < pointsCorners.size(); t++) {
+    for (size_t t = 0; t < pointsCorners.size(); t++) {
         vector<Point3f> tempPointSet = pointsObject[t];
         /* 通过得到的摄像机内外参数，对空间的三维点进行重新投影计算，得到新的投影点
          */
-        projectPoints(tempPointSet, rvecsMat[t], tvecsMat[t], cameraMatrix,
-                      distCoeffs, pointsImage);
+        projectPoints(tempPointSet, rvecsMat[t], tvecsMat[t], camera_matrix,
+                      dist_coeffs, pointsImage);
         /* 计算新的投影点和旧的投影点之间的误差*/
         const vector<Point2f> &tempImagePoint = pointsCorners[t];
         Mat tempImagePointMat = Mat(1, tempImagePoint.size(), CV_32FC2);
         Mat image_points2Mat = Mat(1, pointsImage.size(), CV_32FC2);
-        for (int j = 0; j < tempImagePoint.size(); j++) {
+        for (size_t j = 0; j < tempImagePoint.size(); j++) {
             image_points2Mat.at<Vec2f>(0, j) =
                 Vec2f(pointsImage[j].x, pointsImage[j].y);
             tempImagePointMat.at<Vec2f>(0, j) =
@@ -193,7 +194,7 @@ int main(int argc, char *argv[]) {
         error = norm(image_points2Mat, tempImagePointMat, NORM_L2);
         errorTotal += error /= countCorners[t];
 
-        const auto &filename = temp_image_paths[t].filename();
+        const auto &filename = before_image_paths[t].filename();
         cout << "图像[" << filename << "]的平均误差: " << error << "像素"
              << endl;
         assessment << "图像[" << filename << "]的平均误差: " << error << "像素"
@@ -209,11 +210,11 @@ int main(int argc, char *argv[]) {
     Mat rotation_matrix =
         Mat(3, 3, CV_32FC1, Scalar::all(0)); /* 保存每幅图像的旋转矩阵 */
     assessment << "相机内参数矩阵: " << endl;
-    assessment << cameraMatrix << endl << endl;
+    assessment << camera_matrix << endl << endl;
     assessment << "畸变系数: \n";
-    assessment << distCoeffs << endl << endl << endl;
+    assessment << dist_coeffs << endl << endl << endl;
     for (int t = 0; t < pointsCorners.size(); t++) {
-        const auto &filename = temp_image_paths[t].filename();
+        const auto &filename = before_image_paths[t].filename();
         assessment << "图像[" << filename << "]的旋转向量: " << endl;
         assessment << rvecsMat[t] << endl;
         /* 将旋转向量转换为相对应的旋转矩阵 */
@@ -227,24 +228,24 @@ int main(int argc, char *argv[]) {
     assessment << endl;
 
     //[5] 将相机标定参数写入xml文件
-    FileStorage calibration((working_path / "calibration.xml").string(),
-                            FileStorage::WRITE);
-    calibration << "cameraMatrix" << cameraMatrix;
-    calibration << "distCoeffs" << distCoeffs;
-    calibration.release();
+    FileStorage calib_file((working_path / "calibration.xml").string(),
+                           FileStorage::WRITE);
+    calib_file << "cameraMatrix" << camera_matrix;
+    calib_file << "distCoeffs" << dist_coeffs;
+    calib_file.release();
 
     //[6] 开始矫正图像
     cout << "正在显示图像矫正结果..." << endl;
     Show show(2); // 初始化UI显示窗口
-    for (int t = 0; t < pointsCorners.size(); t++) {
-        const auto &path = temp_image_paths[t];
+    for (size_t t = 0; t < pointsCorners.size(); t++) {
+        const auto &path = before_image_paths[t];
         Mat imageSource = imread(path.string()); // OpenCV读取图像
         Mat mapx = Mat(image_size, CV_32FC1);    // 经过矫正后的X坐标重映射参数
         Mat mapy = Mat(image_size, CV_32FC1);    // 经过矫正后的Y坐标重映射参数
         Mat R = Mat::eye(3, 3, CV_32F); // 内参矩阵与畸变矩阵之间的旋转矩阵
 
         // 采用initUndistortRectifyMap + remap进行图像矫正
-        initUndistortRectifyMap(cameraMatrix, distCoeffs, R, cameraMatrix,
+        initUndistortRectifyMap(camera_matrix, dist_coeffs, R, camera_matrix,
                                 image_size, CV_32FC1, mapx, mapy);
         Mat imageCorrect = imageSource.clone();
         remap(imageSource, imageCorrect, mapx, mapy, INTER_LINEAR);

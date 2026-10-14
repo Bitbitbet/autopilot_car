@@ -1,8 +1,7 @@
+#include "camera.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
 #include "joystick_car_control.hpp"
-#include "predeal.hpp"
-#include "tools.hpp"
 #include <fcntl.h>
 #include <filesystem>
 #include <iostream> // 输入输出类
@@ -22,7 +21,6 @@
 using std::cerr;
 using std::cout;
 using std::endl;
-using std::make_shared;
 using std::shared_ptr;
 using std::string;
 using std::to_string;
@@ -30,7 +28,7 @@ using std::to_string;
 using namespace cv;
 namespace fs = std::filesystem;
 
-int main(int argc, char const *argv[]) {
+int main() {
     try {
         // 通信
         auto car = CarControl::create();
@@ -44,32 +42,21 @@ int main(int argc, char const *argv[]) {
             cerr << "Failed to initialize joystick." << endl;
             return 1;
         }
-        VideoCapture capture;
         auto controlThread = startJoystickControlThread(car, js);
 
         car->buzzerSound(Buzzer::start);
 
         // 摄像头初始化
-        capture.open("/dev/video0");
-        if (!capture.isOpened()) {
-            cerr << "Failed to open video device!" << endl;
-            return 2;
-        }
-        capture.set(CAP_PROP_FRAME_WIDTH, IMAGE_COL);  // 设置图像的列
-        capture.set(CAP_PROP_FRAME_HEIGHT, IMAGE_ROW); // 设置图像的行
-
-        // 读取xml中的相机标定参数
-        shared_ptr<Predeal> predeal = make_shared<Predeal>(); // 图像预处理类
+        VideoCapture camera("/dev/video0");
 
         uint32_t index = 0;
         while (true) {
             // 读取图像
-            Mat img;
-            if (!capture.read(img) || img.empty())
-                throw std::runtime_error("Camera frame unavailable; stopping.");
-
-            // 图像预处理
-            predeal->correct(img); // 图像矫正
+            Mat frame;
+            if (!camera.read(frame)) {
+                cerr << "相机读取错误" << endl;
+                break;
+            }
 
             // 图像采集
             if (js->takeSampleOnce()) {
@@ -81,14 +68,14 @@ int main(int argc, char const *argv[]) {
 
                 fs::create_directory(imgPath);
 
-                imwrite(imgPath + imgName, img);
+                imwrite(imgPath + imgName, frame);
                 cout << "Saved image: " << imgName << endl;
             }
 
-            putText(img, to_string(index), Point(10, 30),
+            putText(frame, to_string(index), Point(10, 30),
                     cv::FONT_HERSHEY_TRIPLEX, 1, cv::Scalar(0, 0, 254), 1,
                     CV_AA); // 显示图片保存序号
-            imshow("img", img);
+            imshow("img", frame);
             int key = waitKey(10);
             if (key == 32) // 空格采图
                 js->requestSampleOnce();

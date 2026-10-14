@@ -1,5 +1,5 @@
+#include "camera.hpp"
 #include "detection.hpp"
-#include "predeal.hpp"
 #include <iostream>           // 输入输出类
 #include <opencv2/opencv.hpp> // OpenCV终端部署
 
@@ -15,23 +15,9 @@ cv::Mat cameraMatrix; // 摄像机内参矩阵
 cv::Mat distCoeffs;   // 相机的畸变矩阵
 void correction(cv::Mat &img);
 
-int main(int argc, char const *argv[]) {
+int main() {
     // 打开摄像头
-    // VideoCapture capture("../res/samples/sample.mp4");
-    VideoCapture capture("/dev/video0", CAP_V4L2);
-    if (!capture.isOpened()) {
-        cout << "can not open video device " << endl;
-        return 1;
-    }
-
-    capture.set(CAP_PROP_FRAME_WIDTH, 320);  // 设置图像的列数
-    capture.set(CAP_PROP_FRAME_HEIGHT, 240); // 设置图像的行数
-
-    double rate = capture.get(CAP_PROP_FPS);            // 读取图像的帧率
-    double width = capture.get(CAP_PROP_FRAME_WIDTH);   // 读取图像的宽度
-    double height = capture.get(CAP_PROP_FRAME_HEIGHT); // 读取图像的高度
-    cout << "Camera Param: frame rate = " << rate << " width = " << width
-         << " height = " << height << endl;
+    Camera camera;
 
     // 目标检测类(AI模型文件)
     shared_ptr<Detection> detection =
@@ -53,18 +39,12 @@ int main(int argc, char const *argv[]) {
         enable = false;
     }
 
-    // 读取xml中的相机标定参数
-    shared_ptr<Predeal> predeal = make_shared<Predeal>(); // 图像预处理类
-
     while (1) {
         Mat img;
-        if (!capture.read(img)) {
-            cout << "no video frame" << endl;
-            continue;
+        if (!camera.read(img)) {
+            cout << "相机读取错误" << endl;
+            break;
         }
-
-        // 图像预处理
-        predeal->correct(img); // 图像矫正
 
         // 启动AI推理
         auto preTime = chrono::duration_cast<chrono::milliseconds>(
@@ -82,5 +62,4 @@ int main(int argc, char const *argv[]) {
         imshow("img", img);
         waitKey(1);
     }
-    capture.release();
 }

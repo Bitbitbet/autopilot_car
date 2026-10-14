@@ -19,9 +19,9 @@
 #define USB_ADDR_LED 5     // LED灯效控制
 #define USB_ADDR_KEY 0x10  // 按键信息
 
-constexpr size_t PWMSERVOMAX = 1900; // 舵机PWM最大值（左）1840
-constexpr size_t PWMSERVOMID = 1500; // 舵机PWM中值 1520
-constexpr size_t PWMSERVOMIN = 1100; // 舵机PWM最小值（右）1200
+constexpr size_t PWMSERVOMAX = 1900; // 舵机PWM最大值（左）
+constexpr size_t PWMSERVOMID = 1500; // 舵机PWM中值
+constexpr size_t PWMSERVOMIN = 1100; // 舵机PWM最小值（右）
 
 /**
  * @brief 32位数据内存对齐/联合体

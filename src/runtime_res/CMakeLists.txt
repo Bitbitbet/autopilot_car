@@ -1,2 +1,0 @@
-add_library(runtime_res INTERFACE)
-target_include_directories(runtime_res INTERFACE include)

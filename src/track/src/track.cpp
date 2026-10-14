@@ -177,7 +177,7 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
     };
 
     vector<pair<int, int>> blocks, connected_blocks;
-    for (int r = rowStart; r > rowCutUp; r -= 2) { // 有效行：10~220
+    for (int r = rowStart; r > rowCutUp; r -= 2) {
         //  开始识别赛道左右边缘
         find_white_blocks(track_img, r, blocks);
         if (blocks.empty())
@@ -245,16 +245,16 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
  * @param img 需要叠加显示的图像
  */
 void Track::drawImage(Mat &img) {
-    for (int i = 0; i < pointsEdgeLeft.size(); i++) {
+    for (size_t i = 0; i < pointsEdgeLeft.size(); i++) {
         circle(img, Point(pointsEdgeLeft[i].y, pointsEdgeLeft[i].x), 2,
                Scalar(0, 255, 0), -1); // 绿色点
     }
-    for (int i = 0; i < pointsEdgeRight.size(); i++) {
+    for (size_t i = 0; i < pointsEdgeRight.size(); i++) {
         circle(img, Point(pointsEdgeRight[i].y, pointsEdgeRight[i].x), 2,
                Scalar(0, 255, 255), -1); // 黄色点
     }
 
-    for (int i = 0; i < spurroad.size(); i++) {
+    for (size_t i = 0; i < spurroad.size(); i++) {
         circle(img, Point(spurroad[i].y, spurroad[i].x), 3, Scalar(0, 0, 255),
                -1); // 红色点
     }

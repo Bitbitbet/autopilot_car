@@ -2,8 +2,6 @@
 #include "tools.hpp"
 #include <vector>
 
-using namespace cv;
-
 class Track {
   public:
     std::vector<PointX> pointsEdgeLeft;  // 赛道左边缘点集
