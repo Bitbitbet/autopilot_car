@@ -117,7 +117,7 @@ inline uint16_t clampServo(float pwm) {
  * ========================================================================== */
 struct AutoPilot {
     // ---- 输出 ----
-    vector<PointX> centerEdge;    // 中心线点集（x=行, y=列），也用于绘制
+    vector<Point2i> centerEdge;   // 中心线点集（x=行, y=列），也用于绘制
     int center = IMAGE_COL / 2;   // 加权控制中心（列号）
     uint16_t servo = PWMSERVOMID; // PD 输出的舵机 PWM
     bool lost = false;            // 是否判定为丢线
@@ -167,7 +167,7 @@ struct AutoPilot {
     /**
      * @brief 主更新：拟合中心线并算出舵机输出
      */
-    void update(const vector<PointX> &left, const vector<PointX> &right) {
+    void update(const vector<Point2i> &left, const vector<Point2i> &right) {
         const bool leftOk = left.size() >= cfg::kMinEdgePoints;
         const bool rightOk = right.size() >= cfg::kMinEdgePoints;
 
@@ -180,7 +180,7 @@ struct AutoPilot {
             lostFrames = 0;
             lost = false;
 
-            vector<PointX> raw; // 未平滑的中心点
+            vector<Point2i> raw; // 未平滑的中心点
             if (leftOk && rightOk) {
                 // 双边缘：按行号双指针配对取中点。
                 // Track::handle() 每行都是左右成对 append 的，行号天然一致；
@@ -205,7 +205,7 @@ struct AutoPilot {
             } else {
                 // 单边缘：用**实测**车道宽的一半偏移到中心，
                 // 原实现是"假设对侧边缘在图像边界上"，弯道里误差很大。
-                const vector<PointX> &edge = leftOk ? left : right;
+                const vector<Point2i> &edge = leftOk ? left : right;
                 const float off = laneWidthEma / 2.f;
                 const int sign =
                     leftOk ? +1 : -1; // 左边缘→中心在右；右边缘→中心在左
@@ -550,7 +550,7 @@ int main(int argc, char **argv) {
             }
             Mat bin = camera.binarize(img);
 
-            track.handle(bin);                 // [1] 边缘识别
+            track.handle(camera, bin);         // [1] 边缘识别
             pilot.update(track.pointsEdgeLeft, // [2] 中心线 + 舵机
                          track.pointsEdgeRight);
 

@@ -49,4 +49,4 @@ add_executable(collection src/tool/collection.cpp)
 target_link_libraries(collection PRIVATE control camera tools pthread PkgConfig::evdev PkgConfig::udev ${OpenCV_LIBRARIES})
 
 # 主程序
-add_subdirectory(src/icar)
+# add_subdirectory(src/icar)
