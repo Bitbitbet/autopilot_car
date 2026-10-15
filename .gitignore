@@ -6,3 +6,4 @@ build-debug
 CMakeUserPresets.json
 arm64-linux-gnu.toolchain.cmake
 res
+trackview_logs/

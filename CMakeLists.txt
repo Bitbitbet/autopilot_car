@@ -30,7 +30,7 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 
 # 查看轨道
 add_executable(trackview src/tool/track_view.cpp)
-target_link_libraries(trackview PRIVATE control track camera tools PkgConfig::evdev PkgConfig::udev pthread)
+target_link_libraries(trackview PRIVATE control track camera tools nlohmann_json PkgConfig::evdev PkgConfig::udev pthread)
 
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)
@@ -48,5 +48,5 @@ target_link_libraries(detection_tool PRIVATE camera detection)
 add_executable(collection src/tool/collection.cpp)
 target_link_libraries(collection PRIVATE control camera tools pthread PkgConfig::evdev PkgConfig::udev ${OpenCV_LIBRARIES})
 
-# 主程序
+# 主程序（src/icar 仍在用已删除的 Track 增量搜索重载，暂不构建）
 # add_subdirectory(src/icar)

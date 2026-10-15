@@ -16,7 +16,7 @@ using std::cout;
 using std::endl;
 
 Camera::Camera() : use_otsu(true) { initialize("/dev/video0"); }
-Camera::Camera(uint8_t threshold) : threshold_value(threshold), use_otsu(true) {
+Camera::Camera(uint8_t threshold) : threshold_value(threshold), use_otsu(false) {
     initialize("/dev/video0");
 }
 Camera::Camera(const char *capture_source) : use_otsu(true) {
@@ -69,10 +69,10 @@ void Camera::initialize(const char *capture_source) {
         exit(3);
     }
     if (H_img2gnd.empty() || H_gnd2img.empty()) {
-        cerr << "calibration.xml 中没有地面单应 ground_H_*，"
-                "先用 calibrate_homography 标定一次"
+        // 地面单应只影响 image_to_ground/ground_to_image，不阻塞取图
+        cerr << "校准文件中没有地面单应 ground_H_*，需要地面坐标时先用 "
+                "calibrate_homography 标定一次"
              << endl;
-        exit(12);
     }
 
     Size camera_size{capture_width, capture_height};
@@ -124,12 +124,12 @@ bool Camera::read(Mat &frame) {
 }
 
 static Point2d applyHomography(const Mat &H, double x, double y) {
+    if (H.empty()) { // 还没标定地面单应
+        return Point2d(NAN, NAN);
+    }
     const Mat v = (cv::Mat_<double>(3, 1) << x, y, 1.0);
     const Mat r = H * v;
     const double w = r.at<double>(2);
-    // if (std::fabs(w) < 1e-12) {
-    //     return Point2d(NAN, NAN);
-    // }
     return Point2d(r.at<double>(0) / w, r.at<double>(1) / w);
 }
 
