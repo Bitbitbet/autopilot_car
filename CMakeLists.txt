@@ -30,7 +30,7 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 
 # 查看轨道
 add_executable(trackview src/tool/track_view.cpp)
-target_link_libraries(trackview PRIVATE control track predeal tools PkgConfig::evdev PkgConfig::udev pthread)
+target_link_libraries(trackview PRIVATE control track predeal tools nlohmann_json PkgConfig::evdev PkgConfig::udev pthread)
 
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)
@@ -50,3 +50,9 @@ target_link_libraries(collection PRIVATE control predeal tools pthread PkgConfig
 
 # 主程序
 add_subdirectory(src/icar)
+
+option(TRACKVIEW_BUILD_TESTS "Build hardware-free trackview regressions" OFF)
+if(TRACKVIEW_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

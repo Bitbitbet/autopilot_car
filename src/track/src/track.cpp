@@ -1,6 +1,7 @@
 #include "track.hpp"
 #include <algorithm>
 #include <utility>
+#include <stdexcept>
 
 using namespace cv;
 using std::abs;
@@ -30,7 +31,7 @@ void slopeCal(vector<PointX> &edge, int index) {
         return;
     }
     float slop1 = 0.0, slop2 = 0.0;
-    bool has_slop1 = false, has_slop2 = true;
+    bool has_slop1 = false, has_slop2 = false;
 
     auto dx1 = edge[index].x - edge[index - 2].x;
     auto dy1 = edge[index].y - edge[index - 2].y;
@@ -140,8 +141,15 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
     PointX pointSpurroad;               // 岔路坐标
     bool spurroadEnabled = false;
 
-    rowCutUp = std::min(track_img.rows / 4, rowCutUp);
-    rowCutBottom = std::min(track_img.rows / 4, rowCutBottom);
+    if (track_img.empty() || track_img.type() != CV_8UC1 ||
+        track_img.rows != IMAGE_ROW || track_img.cols != IMAGE_COL) {
+        pointsEdgeLeft.clear(); pointsEdgeRight.clear();
+        widthBlock.clear(); spurroad.clear();
+        stdevLeft = stdevRight = 1000;
+        throw std::invalid_argument("Track requires a 320x240 CV_8UC1 image");
+    }
+    rowCutUp = std::clamp(rowCutUp, 0, track_img.rows / 4);
+    rowCutBottom = std::clamp(rowCutBottom, 0, track_img.rows / 4);
 
     if (!isResearch) {
         pointsEdgeLeft.clear();        // 初始化边缘结果
@@ -151,17 +159,18 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
         validRowsLeft = 0;             // 边缘有效行数（左）
         validRowsRight = 0;            // 边缘有效行数（右）
         is_searching_first_row = true; // 搜索到色块起始行的标志（行）
-        rowStart = IMAGE_ROW;
+        rowStart = track_img.rows - 1 - rowCutBottom;
     } else {
-        if (pointsEdgeLeft.size() > rowStart)
-            pointsEdgeLeft.resize(rowStart);
-        if (pointsEdgeRight.size() > rowStart)
-            pointsEdgeRight.resize(rowStart);
-        if (widthBlock.size() > rowStart) {
-            widthBlock.resize(rowStart);
-            if (rowStart > 1)
-                rowStart = widthBlock[rowStart - 1].x - 2;
-        }
+        // This overload receives a retained point count, not an image row.
+        const size_t keep = std::min({size_t(rowStart), pointsEdgeLeft.size(),
+                                     pointsEdgeRight.size(), widthBlock.size()});
+        if (keep == 0) { handle(false, 0); return; }
+        pointsEdgeLeft.resize(keep);
+        pointsEdgeRight.resize(keep);
+        widthBlock.resize(keep);
+        const int next = widthBlock.back().x - 2;
+        if (next <= rowCutUp) return;
+        rowStart = std::clamp(next, rowCutUp + 1, track_img.rows - 1);
 
         is_searching_first_row = false; // 搜索到色块起始行的标志（行）
     }
@@ -177,11 +186,16 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
     };
 
     vector<pair<int, int>> blocks, connected_blocks;
+    int missingRows = 0;
     for (int r = rowStart; r > rowCutUp; r -= 2) { // 有效行：10~220
         //  开始识别赛道左右边缘
         find_white_blocks(track_img, r, blocks);
-        if (blocks.empty())
+        if (blocks.empty()) {
+            // Bridge only a narrow missing strip, never a broad disconnected road.
+            if (!is_searching_first_row && ++missingRows > 3) break;
             continue;
+        }
+        missingRows = 0;
 
         if (is_searching_first_row) {
             if (r < track_img.rows / 3)

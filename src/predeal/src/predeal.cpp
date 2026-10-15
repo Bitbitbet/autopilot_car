@@ -1,6 +1,7 @@
 #include "predeal.hpp"
 #include "tools.hpp"
 #include <iostream>
+#include <stdexcept>
 #include <opencv2/core/persistence.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -31,8 +32,13 @@ void Predeal::initialize() {
         cout << "相机矫正参数初始化成功!" << endl;
     } else {
         cout << "打开相机矫正参数失败!!!" << endl;
-        exit(3);
+        throw std::runtime_error("Cannot open ../res/calibration/calibration.xml");
     }
+
+    if (cameraMatrix.rows != 3 || cameraMatrix.cols != 3 ||
+        distCoeffs.empty() || !cv::checkRange(cameraMatrix) ||
+        !cv::checkRange(distCoeffs))
+        throw std::runtime_error("Invalid camera calibration matrices");
 
     Size camera_size{IMAGE_COL, IMAGE_ROW};
     mapx = Mat(camera_size,
@@ -73,6 +79,9 @@ Mat Predeal::binarize(const Mat &img) {
  * @return cv::Mat 输出图像
  */
 void Predeal::correct(Mat &camera_frame) {
+    if (camera_frame.empty() || camera_frame.type() != CV_8UC3 ||
+        camera_frame.size() != Size(IMAGE_COL, IMAGE_ROW))
+        throw std::runtime_error("Camera must supply 320x240 BGR frames");
     remap(camera_frame, camera_frame, mapx, mapy, cv::INTER_LINEAR);
 }
 

@@ -3,8 +3,10 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <chrono>
 #include <libserial/SerialPort.h>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 // USB通信帧
@@ -57,6 +59,18 @@ class CarControl {
     std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
     LibSerial::SerialPort serialPort;
     std::atomic_bool recvThreadStop{true};
+    std::atomic_bool serialFault{false};
+    std::atomic_bool commandExpired{false};
+    std::atomic_bool motionAllowed{true};
+    std::atomic<uint64_t> stopEpoch{0};
+    std::mutex writeMutex;
+    int serialFd = -1;
+    int commandTimeoutMs = 0;
+    bool moving = false;
+    std::chrono::steady_clock::time_point lastCommand;
+    void writeBufferLocked(const void *buffer, size_t len);
+    void carControlLocked(float speed, uint16_t servo);
+    void checkCommandTimeout();
 
     CarControl();
 
@@ -68,7 +82,13 @@ class CarControl {
     void recvThreadMain();
 
   public:
-    ~CarControl();
+    ~CarControl() noexcept;
+    bool hasFault() const { return serialFault.load() || commandExpired.load(); }
+    void setCommandTimeout(int milliseconds);
+    void latchStop(); // Exit/UI failure: prevent any racing worker from restarting.
+    void pauseMotion();
+    uint64_t motionEpoch() const { return stopEpoch.load(); }
+    bool resumeMotion(uint64_t expectedEpoch);
 
     bool exitBoot = false;
     bool keypress = false;
