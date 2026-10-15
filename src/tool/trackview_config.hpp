@@ -8,7 +8,7 @@
 
 struct TrackviewConfig {
     float cruiseSpeed = 0.25f, maxSpeed = 10.0f, minSpeed = 0.05f;
-    float curveSpeed = 10.0f, degradedSpeed = 10.0f, acceleration = 0.30f;
+    float curveSpeed = 0.15f, degradedSpeed = 0.12f, acceleration = 0.30f;
     float deceleration = 0.60f, qualityDeceleration = 1.20f;
     float curveStart = 0.20f, qualityRecoverTime = 0.30f;
     int curveLookaheadRow = 10;

@@ -61,9 +61,17 @@ int main(int argc, char **argv) {
         {
             TrackviewConfig ceiling;
             ceiling.validate();
-            check(ceiling.maxSpeed==10.f && ceiling.curveSpeed==10.f &&
-                ceiling.degradedSpeed==10.f && ceiling.cruiseSpeed==0.25f,
-                "10 m/s ceilings or initial cruise defaults are incorrect");
+            check(ceiling.maxSpeed==10.f && ceiling.curveSpeed==0.15f &&
+                ceiling.degradedSpeed==0.12f && ceiling.cruiseSpeed==0.25f,
+                "10 m/s adjustment ceiling or original v6 initial targets are incorrect");
+            AutoPilot defaults(ceiling);feed(defaults,lane());
+            check(std::fabs(drive(defaults,lane(),10.f,1100)-10.f)<0.001f,
+                "default configuration cannot reach the 10 m/s straight command ceiling");
+            check(std::fabs(drive(defaults,lane(65),10.f,1100)-0.15f)<0.001f,
+                "default curve target no longer matches original v6");
+            feed(defaults,lane());
+            check(std::fabs(drive(defaults,lane(0,true),10.f,1100)-0.12f)<0.001f,
+                "default degraded target no longer matches original v6");
             const auto path=std::filesystem::temp_directory_path()/
                 ("trackview-v6-ceilings-10-"+std::to_string(getpid())+".json");
             std::ofstream(path)<<R"({"maxSpeed":10,"curveSpeed":10,"degradedSpeed":10})";
@@ -97,7 +105,7 @@ int main(int argc, char **argv) {
             TrackviewConfig excessive;excessive.maxSpeed=10.01f;
             bool denied=false;try {excessive.validate();}catch(const std::invalid_argument &){denied=true;}
             check(denied,"ceiling above 10 m/s accepted");
-            std::cout<<"PASS 10 m/s default/JSON ceilings, straight/curve/degraded operator limits, target adjustment and path-loss stop\n";
+            std::cout<<"PASS 10 m/s adjustable ceiling, original default targets, explicit curve/quality overrides and path-loss stop\n";
         }
 
         {

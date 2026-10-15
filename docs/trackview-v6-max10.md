@@ -1,6 +1,6 @@
-# trackview v6：总上限、弯道目标和降级目标设为 10 m/s
+# trackview v6：最高可调 10 m/s，保留原版初始速度
 
-本版按用户要求将三个速度参数设为 10，允许用户根据赛道自行调整。启动巡航 limit 仍为 0.25 m/s；不会启动即发送 10 m/s 指令。
+本版按用户澄清的要求，将最高可调值保留为 10 m/s，恢复原版初始速度：启动巡航 limit=0.25、弯道目标 turn=0.15、降级目标 qualityLimit=0.12。C++ 默认值与示例 JSON 保持一致。
 
 分支：`trackview/v6-speed-ceilings-10-20261015`。基于已经保存的 v6 / 1.5 m/s 分支独立提交，不合并或修改组员的 master。
 
@@ -12,14 +12,14 @@
 {
   "cruiseSpeed": 0.25,
   "maxSpeed": 10.0,
-  "curveSpeed": 10.0,
-  "degradedSpeed": 10.0
+  "curveSpeed": 0.15,
+  "degradedSpeed": 0.12
 }
 ```
 
 这只是四个相关字段的展示；已有 JSON 中的其他字段保留。C++ 配置校验允许 maxSpeed 最大为 10。
 
-当 turn 和 qualityLimit 均为 10，而 limit 不超过 10 时，弯道和有效路径降级状态不会再把目标速度压到旧的 0.15 或 0.12，目标跟随用户设置的 limit。原有加速过程保留，速度指令不会瞬间升到 limit。
+弯道目标、降级目标和巡航 limit 都可以通过原按键调到 10；实际速度目标仍不超过 limit。默认弯道目标和降级目标仍参与减速；用户若把 turn、qualityLimit 都设为 10，则在可信路径有效时跟随 limit。原有加速过程保留，速度指令不会瞬间升到 limit。
 
 路径无效、跨度不足、丢线、手动停车、通信超时等停车条件保留；将速度参数提高不等于让车辆在没有可信路径时继续行驶。图像识别、转向参数、加减速率和日志实现均未修改。
 
@@ -27,17 +27,17 @@
 
 ## 上传和运行
 
-1. 上传新程序 `trackview_fixed_v6_max10` 到个人目录 `/root/track-trial-20261010/bin/`，保留旧程序。
-2. 在车上现有 JSON 中将 maxSpeed、curveSpeed、degradedSpeed 三项都改为 10，其他个人调参保留。只换程序而保留旧 JSON 会继续使用旧值。
+1. 上传新程序 `trackview_fixed_v6_max10_defaults` 到个人目录 `/root/track-trial-20261010/bin/`，保留旧程序。
+2. 在车上现有 JSON 中设置 maxSpeed=10、curveSpeed=0.15、degradedSpeed=0.12、cruiseSpeed=0.25，其他个人调参保留。只换程序而保留旧 JSON 会继续使用旧值。
 3. 退出旧程序后执行：
 
 ```bash
 cd /root/track-trial-20261010/bin
-chmod +x ./trackview_fixed_v6_max10
-./trackview_fixed_v6_max10 --config ./trackview.json
+chmod +x ./trackview_fixed_v6_max10_defaults
+./trackview_fixed_v6_max10_defaults --config ./trackview.json
 ```
 
-启动文字应包含 `default limit=0.25 m/s | max=10 | turn=10 quality=10`，具体 limit 以个人 JSON 的 cruiseSpeed 为准。
+启动文字应包含 `default limit=0.25 m/s | max=10 | turn=0.15 quality=0.12`，具体参数以个人 JSON 为准。
 
 点击图像窗口并使用英文输入法：
 
@@ -55,8 +55,10 @@ chmod +x ./trackview_fixed_v6_max10
 
 ## 检查
 
-新增离线回归覆盖三个参数默认值与 JSON 加载、直道/弯道/有效单边路径的用户 limit、10 上限、运行中降低 limit 和弯道/降级目标、无效路径停车。原 v6 记录测试改用显式的历史速度配置，继续验证原来的可调减速与识别行为。
+新增离线回归覆盖原版初始速度、10 上限、JSON 加载、默认弯道及降级减速、显式设置 turn/qualityLimit=10 后的直道/弯道/有效单边路径的用户 limit、运行中降低参数和无效路径停车。原 v6 记录测试改用显式的历史速度配置，继续验证原来的可调减速与识别行为。
 
 构建方法及环境依赖见历史说明 `trackview-v6-max1p5.md` 的构建部分。交叉编译使用已配置的 ARM64 车辆工具链和 sysroot；离线测试与真实车辆试跑是不同的验证。
 
-2026-10-15 已完成 ARM64 交叉编译，并在 QEMU 下通过上述控制算法回归、串口超时及故障检查、显示阻塞检查和 120 帧视频回放。新旧速度配置均有回归覆盖；原始 v6 和 1.5 m/s 可执行文件的哈希保持不变。
+历史三个速度值都设为 10 的版本保留在提交 `2a609cf` 及原本地文件 `max10/trackview_fixed_v6_max10` 中；当前版本恢复了原版初始目标。
+
+2026-10-15 已交叉编译 `trackview_fixed_v6_max10_defaults`，并通过 QEMU 下的控制回归、串口故障/超时检查、显示阻塞检查和 120 帧离线回放。启动输出核对为 `max=10 | turn=0.15 quality=0.12`。本次没有改变识别、转向或停车算法，也未进行实车操作。
