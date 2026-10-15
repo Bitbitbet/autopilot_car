@@ -1,9 +1,9 @@
 {
   "cruiseSpeed": 0.25,
-  "maxSpeed": 1.5,
+  "maxSpeed": 10.0,
   "minSpeed": 0.05,
-  "curveSpeed": 0.15,
-  "degradedSpeed": 0.12,
+  "curveSpeed": 10.0,
+  "degradedSpeed": 10.0,
   "acceleration": 0.3,
   "runP1": 2.2,
   "runP2": 0.007,

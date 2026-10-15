@@ -1,5 +1,7 @@
 # trackview v6：速度上限 1.5 m/s
 
+本文记录历史 1.5 m/s 版本。本分支当前的 10 m/s 参数说明见 [trackview-v6-max10.md](trackview-v6-max10.md)。历史源码保留在 `trackview/v6-max-speed-1p5-20261015` 分支。
+
 本分支保存用户已完成实车测试的 v6，并仅将其可配置速度上限调整为 1.5 m/s。不是已完成 1.5 m/s 实车验证的声明。
 
 ## 分支与改动

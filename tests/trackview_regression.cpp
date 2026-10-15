@@ -9,6 +9,12 @@
 #include <unistd.h>
 void check(bool ok,const char *message) { if(!ok) throw std::runtime_error(message); }
 using Edges=std::pair<std::vector<PointX>,std::vector<PointX>>;
+// Replay historical v6 fixtures with their original, explicit speed settings.
+TrackviewConfig fixtureConfig() {
+    TrackviewConfig config;
+    config.maxSpeed=1.5f; config.curveSpeed=0.15f; config.degradedSpeed=0.12f;
+    return config;
+}
 Edges lane(int shift=0,bool clipRight=false,bool clipBoth=false) {
     Edges e;
     for(int row=219;row>=30;row-=2) {
@@ -55,18 +61,60 @@ int main(int argc, char **argv) {
         {
             TrackviewConfig ceiling;
             ceiling.validate();
+            check(ceiling.maxSpeed==10.f && ceiling.curveSpeed==10.f &&
+                ceiling.degradedSpeed==10.f && ceiling.cruiseSpeed==0.25f,
+                "10 m/s ceilings or initial cruise defaults are incorrect");
+            const auto path=std::filesystem::temp_directory_path()/
+                ("trackview-v6-ceilings-10-"+std::to_string(getpid())+".json");
+            std::ofstream(path)<<R"({"maxSpeed":10,"curveSpeed":10,"degradedSpeed":10})";
+            TrackviewConfig loaded;loaded.load(path.string(),true);
+            std::filesystem::remove(path);
+            for(const auto &scene : {lane(),lane(65)}) {
+                AutoPilot unrestricted(loaded);feed(unrestricted,lane());
+                check(std::fabs(drive(unrestricted,scene,0.75f,120)-0.75f)<0.001f,
+                    "curve ceiling still reduces an operator limit below 10 m/s");
+                check(std::fabs(drive(unrestricted,scene,10.f,1100)-10.f)<0.001f,
+                    "straight/curve command failed to reach the configured 10 m/s ceiling");
+                check(unrestricted.speedFor(20.f,1.f/30)<=10.0001f,
+                    "request exceeded 10 m/s ceiling");
+                check(unrestricted.speedFor(0.25f,1.f/30)<=0.2501f,
+                    "lower operator limit was not applied immediately");
+            }
+            AutoPilot single(loaded);feed(single,lane());
+            const auto oneSide=lane(0,true);
+            check(std::fabs(drive(single,oneSide,10.f,1100)-10.f)<0.001f && single.degraded,
+                "valid degraded path still has the former quality speed cap");
+            single.setCurveSpeed(0.2f);single.setDegradedSpeed(0.3f);
+            check(single.curveSpeed()==0.2f && single.degradedSpeed()==0.3f,
+                "operator cannot lower curve/quality settings");
+            single.setCurveSpeed(20.f);single.setDegradedSpeed(20.f);
+            check(single.curveSpeed()==10.f && single.degradedSpeed()==10.f,
+                "runtime targets exceeded the configured ceiling");
+            single.update({}, {}, 1.f/30);
+            check(single.speedFor(10.f,1.f/30)==0,"path loss failed to stop");
+            single.resetControl();
+            check(single.speedFor(10.f,1.f/30)==0,"reset resumed an invalid path");
+            TrackviewConfig excessive;excessive.maxSpeed=10.01f;
+            bool denied=false;try {excessive.validate();}catch(const std::invalid_argument &){denied=true;}
+            check(denied,"ceiling above 10 m/s accepted");
+            std::cout<<"PASS 10 m/s default/JSON ceilings, straight/curve/degraded operator limits, target adjustment and path-loss stop\n";
+        }
+
+        {
+            TrackviewConfig ceiling=fixtureConfig();
+            ceiling.validate();
             check(ceiling.maxSpeed==1.5f && ceiling.cruiseSpeed==0.25f &&
                 ceiling.curveSpeed==0.15f && ceiling.degradedSpeed==0.12f,
-                "1.5 m/s ceiling changed other default speeds");
+                "historical 1.5 m/s fixture profile changed");
             const auto path=std::filesystem::temp_directory_path()/
                 ("trackview-v6-ceiling-"+std::to_string(getpid())+".json");
             std::ofstream(path)<<R"({"maxSpeed":1.5})";
-            TrackviewConfig loaded;loaded.load(path.string(),true);
+            TrackviewConfig loaded=fixtureConfig();loaded.load(path.string(),true);
             std::filesystem::remove(path);
             check(loaded.maxSpeed==1.5f,"1.5 m/s JSON ceiling rejected");
-            TrackviewConfig excessive;excessive.maxSpeed=1.51f;
+            TrackviewConfig excessive;excessive.maxSpeed=10.01f;
             bool denied=false;try {excessive.validate();}catch(const std::invalid_argument &){denied=true;}
-            check(denied,"ceiling above 1.5 m/s accepted");
+            check(denied,"ceiling above 10 m/s accepted");
             AutoPilot faster(loaded);
             feed(faster,lane());
             check(std::fabs(drive(faster,lane(),1.5f,210)-1.5f)<0.001f,
@@ -85,10 +133,10 @@ int main(int argc, char **argv) {
             faster.update({}, {}, 1.f/30);
             check(faster.speedFor(1.5f,1.f/30)==0,
                 "path loss failed to stop with 1.5 m/s ceiling");
-            std::cout<<"PASS 1.5 m/s default/JSON ceiling, command clamp, unchanged curve/quality targets and path-loss stop\n";
+            std::cout<<"PASS historical 1.5 m/s profile, JSON loading, command clamp, configured curve/quality targets and path-loss stop\n";
         }
 
-        AutoPilot straight; feed(straight,lane());
+        AutoPilot straight(fixtureConfig()); feed(straight,lane());
         check(straight.valid && straight.ready && std::abs(straight.center-160)<=1,"straight not centered");
         check(std::abs(int(straight.servo)-1500)<=5,"straight servo");
         float speed=0; for(int i=0;i<90;++i) speed=straight.speedFor(0.5f,1.f/30);
@@ -98,13 +146,13 @@ int main(int argc, char **argv) {
         check(std::abs(straight.center-190)<3,"row-specific width reconstruction wrong");
         for(int i=0;i<90;++i) speed=straight.speedFor(0.5f,1.f/30);
         check(speed<=0.1201f,"single-side target not reached after quality braking");
-        AutoPilot unlearned; feed(unlearned,lane(0,true));
+        AutoPilot unlearned(fixtureConfig()); feed(unlearned,lane(0,true));
         check(!unlearned.valid,"single side used invented width before learning");
-        AutoPilot fullWhite; feed(fullWhite,lane(0,false,true));
+        AutoPilot fullWhite(fixtureConfig()); feed(fullWhite,lane(0,false,true));
         check(!fullWhite.valid && fullWhite.lost,"full-width white accepted as road");
         std::cout<<"PASS real vs clipped edges, width profile and degraded speed\n";
 
-        AutoPilot mixed; feed(mixed,lane());
+        AutoPilot mixed(fixtureConfig()); feed(mixed,lane());
         auto fewSingle=lane();
         for(size_t i=0;i<6;++i) fewSingle.second[i].y=319;
         feed(mixed,fewSingle);
@@ -119,7 +167,7 @@ int main(int argc, char **argv) {
         const auto legacyPath=std::filesystem::temp_directory_path()/
             ("trackview-v4-config-"+std::to_string(getpid())+".json");
         std::ofstream(legacyPath)<<R"({"mixedSpeed":0.01})";
-        TrackviewConfig legacy;legacy.load(legacyPath.string(),true);
+        TrackviewConfig legacy=fixtureConfig();legacy.load(legacyPath.string(),true);
         std::filesystem::remove(legacyPath);
         check(!legacy.toJson().contains("mixedSpeed"),"obsolete mixed cap still saved in v5 configuration");
         AutoPilot legacyMixed(legacy);feed(legacyMixed,lane());feed(legacyMixed,fewSingle);
@@ -143,7 +191,7 @@ int main(int argc, char **argv) {
         check(mixed.valid && !mixed.degraded && mixed.confidence<0.65f &&
             mixed.speedFor(0.5f,1.f/30)<=0.1201f,"low quality escaped protective cap");
         check(std::string(mixed.qualityLimitReason())=="LOW_QUALITY","low quality reason missing");
-        TrackviewConfig custom; custom.maxSingleFraction=0.05f;
+        TrackviewConfig custom=fixtureConfig(); custom.maxSingleFraction=0.05f;
         AutoPilot strict(custom);feed(strict,lane());feed(strict,fewSingle);
         check(strict.degraded,"maxSingleFraction configuration ignored");
         TrackviewConfig invalidShare;invalidShare.maxSingleFraction=1.f;
@@ -151,7 +199,7 @@ int main(int argc, char **argv) {
         check(rejected,"invalid share accepted");
         std::cout<<"PASS healthy mixed cruise 0.25/0.35/0.5, legacy mixedSpeed ignored; genuine quality caps preserved\n";
 
-        TrackviewConfig smoothConfig;smoothConfig.curveSpeed=0.20f;
+        TrackviewConfig smoothConfig=fixtureConfig();smoothConfig.curveSpeed=0.20f;
         AutoPilot smooth(smoothConfig);
         check(drive(smooth,lane(),0.5f)>0.49f,"cannot prepare straight speed");
         auto hardCurve=lane(65);
@@ -165,7 +213,7 @@ int main(int argc, char **argv) {
         check(std::fabs(drive(smooth,hardCurve,0.5f)-0.30f)<0.001f,"runtime curve target ignored");
         check(smooth.speedFor(0.10f,1.f/30)<=0.1001f,"operator lower limit not applied immediately");
 
-        AutoPilot qualityBrake;
+        AutoPilot qualityBrake(fixtureConfig());
         check(drive(qualityBrake,lane(),0.5f)>0.49f,"cannot prepare quality test");
         qualityBrake.update(manySingle.first,manySingle.second,1.f/30,0.5f);
         const float firstQuality=qualityBrake.speedFor(0.5f,1.f/30);
@@ -189,18 +237,18 @@ int main(int argc, char **argv) {
             const int row=farBend.first[i].x,shift=std::max(0,80-row)*4/5;
             farBend.first[i].y+=shift;farBend.second[i].y+=shift;
         }
-        TrackviewConfig nearConfig;nearConfig.curveLookaheadRow=100;
-        AutoPilot fullPreview,nearPreview(nearConfig);
+        TrackviewConfig nearConfig=fixtureConfig();nearConfig.curveLookaheadRow=100;
+        AutoPilot fullPreview(fixtureConfig()),nearPreview(nearConfig);
         feed(fullPreview,farBend);feed(nearPreview,farBend);
         check(fullPreview.severity>0 && nearPreview.severity==0 &&
             std::fabs(fullPreview.curveHeading)>std::fabs(nearPreview.curveHeading),
             "preview setting did not suppress far-only bend speed signal");
         check(!nearPreview.curveWindowFallback,"usable near preview unexpectedly fell back");
-        TrackviewConfig sparsePreview;sparsePreview.curveLookaheadRow=200;
+        TrackviewConfig sparsePreview=fixtureConfig();sparsePreview.curveLookaheadRow=200;
         AutoPilot fallback(sparsePreview);feed(fallback,farBend);
         check(fallback.curveWindowFallback && fallback.severity>0,
             "insufficient preview quietly disabled curve braking");
-        AutoPilot smallError;feed(smallError,lane(5));
+        AutoPilot smallError(fixtureConfig());feed(smallError,lane(5));
         check(smallError.rawSeverity>0 && smallError.severity==0,
             "small straight tracking errors still trigger curve slowdown");
         for(const float dt:{1.f/15,1.f/30,1.f/60}) {
@@ -224,7 +272,7 @@ int main(int argc, char **argv) {
         std::cout<<"PASS smooth curve/quality braking, recovery hold, adjustable targets, preview, deadband and 15/30/60 FPS rates\n";
 
         // Reproduce stationary pauses longer than v2's 15-second width lifetime.
-        AutoPilot paused; feed(paused,lane());
+        AutoPilot paused(fixtureConfig()); feed(paused,lane());
         feed(paused,{},1260,1.f/15); paused.resetControl();
         check(paused.lost && paused.speedFor(0.25f,1.f/15)==0,"blank pause failed to stop");
         feed(paused,lane(30,true),15,1.f/15);
@@ -234,20 +282,20 @@ int main(int argc, char **argv) {
         // Contradictory measurements suspend old widths, then relearn after agreement.
         Edges narrow;
         for(int row=219;row>=30;row-=2) { narrow.first.emplace_back(row,130); narrow.second.emplace_back(row,190); }
-        AutoPilot changed; feed(changed,lane()); feed(changed,narrow,1);
+        AutoPilot changed(fixtureConfig()); feed(changed,lane()); feed(changed,narrow,1);
         auto singleNarrow=narrow;
         for(auto &v:singleNarrow.second) v.y=319;
         feed(changed,singleNarrow,1);
         check(!changed.valid && changed.missingWidthPoints>0,"contradictory profile used old width");
         feed(changed,narrow,15); feed(changed,singleNarrow,15);
         check(changed.valid && std::abs(changed.center-160)<2,"consistent new width was not relearned");
-        AutoPilot shortSpan; Edges fragment;
+        AutoPilot shortSpan(fixtureConfig()); Edges fragment;
         for(int row=219;row>=199;row-=2) { fragment.first.emplace_back(row,60); fragment.second.emplace_back(row,260); }
         feed(shortSpan,fragment);
         check(!shortSpan.valid && std::string(shortSpan.pathIssue)=="SPAN_SHORT","short fragment escaped coverage check");
         std::cout<<"PASS 84s pause, single-side cap, contradictory width revalidation and span rejection\n";
 
-        AutoPilot a,b; feed(a,lane()); feed(b,lane()); feed(a,lane(30)); feed(b,lane(-30));
+        AutoPilot a(fixtureConfig()),b(fixtureConfig()); feed(a,lane()); feed(b,lane()); feed(a,lane(30)); feed(b,lane(-30));
         check(a.servo>1500 && b.servo<1500,"mirror steering direction changed");
         check(std::abs(int(a.servo)+int(b.servo)-3000)<8,"mirror steering asymmetric");
         float curveSpeed=0; for(int i=0;i<90;++i) curveSpeed=a.speedFor(0.5f,1.f/30);
@@ -261,7 +309,7 @@ int main(int argc, char **argv) {
         check(a.lost && a.speedFor(0.5f,0.5f)==0,"stale frame allowed motion");
         std::cout<<"PASS mirrored turns, curve reduction, immediate stop, timed loss and recovery\n";
 
-        AutoPilot p15,p30,p60;
+        AutoPilot p15(fixtureConfig()),p30(fixtureConfig()),p60(fixtureConfig());
         feed(p15,lane(),15,1.f/15); feed(p30,lane(),30,1.f/30); feed(p60,lane(),60,1.f/60);
         for(int i=1;i<=15;++i) feed(p15,lane(i*2),1,1.f/15);
         for(int i=1;i<=30;++i) feed(p30,lane(i),1,1.f/30);
@@ -279,7 +327,7 @@ int main(int argc, char **argv) {
                 check(!image.empty(),"missing saved curve fixture");
                 int centers[2]{};
                 for(int mirror=0;mirror<2;++mirror) {
-                    AutoPilot p;
+                    AutoPilot p(fixtureConfig());
                     Edges learned;
                     for(int row=219;row>=20;row-=2) {
                         int width=40+row;
@@ -303,7 +351,7 @@ int main(int argc, char **argv) {
             if(std::filesystem::exists(fieldRun/"1872-edges.csv")) {
                 auto actual=readEdges(fieldRun/"1872-edges.csv");
                 for(int mirror=0;mirror<2;++mirror) {
-                    AutoPilot p; Edges prior;
+                    AutoPilot p(fixtureConfig()); Edges prior;
                     for(int row=219;row>=20;row-=2) {
                         int width=40+row;
                         prior.first.emplace_back(row,160-width/2);
@@ -323,7 +371,7 @@ int main(int argc, char **argv) {
                         <<" valid="<<p.valid<<" dual="<<p.dualPoints<<" single="<<p.singlePoints
                         <<" rejected="<<p.rejectedPoints<<" center="<<p.center<<'\n';
                 }
-                AutoPilot noPrior; feed(noPrior,actual,15,1.f/15);
+                AutoPilot noPrior(fixtureConfig()); feed(noPrior,actual,15,1.f/15);
                 check(!noPrior.valid && noPrior.missingWidthPoints>0 &&
                     std::string(noPrior.pathIssue)=="SPAN_SHORT","fixture without width unexpectedly accepted");
                 std::cout<<"PASS stopped-frame expiry scenario and mirrored reconstruction; no-prior remains rejected\n";
@@ -341,7 +389,7 @@ int main(int argc, char **argv) {
                         prior.first.emplace_back(row,l);prior.second.emplace_back(row,l+w);
                     }
                 }
-                AutoPilot p;feed(p,prior);
+                AutoPilot p(fixtureConfig());feed(p,prior);
                 auto actual=readEdges(event/"3347-edges.csv");feed(p,actual);
                 check(p.valid && p.ready && p.singlePoints>0 && !p.degraded,
                     "recorded mostly-dual scene still degrades");

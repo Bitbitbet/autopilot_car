@@ -7,8 +7,8 @@
 #include <string>
 
 struct TrackviewConfig {
-    float cruiseSpeed = 0.25f, maxSpeed = 1.50f, minSpeed = 0.05f;
-    float curveSpeed = 0.15f, degradedSpeed = 0.12f, acceleration = 0.30f;
+    float cruiseSpeed = 0.25f, maxSpeed = 10.0f, minSpeed = 0.05f;
+    float curveSpeed = 10.0f, degradedSpeed = 10.0f, acceleration = 0.30f;
     float deceleration = 0.60f, qualityDeceleration = 1.20f;
     float curveStart = 0.20f, qualityRecoverTime = 0.30f;
     int curveLookaheadRow = 10;
@@ -28,7 +28,7 @@ struct TrackviewConfig {
 
     void validate() const {
         auto positive = [](float x) { return std::isfinite(x) && x > 0; };
-        if (!positive(cruiseSpeed) || !positive(maxSpeed) || maxSpeed > 1.5f ||
+        if (!positive(cruiseSpeed) || !positive(maxSpeed) || maxSpeed > 10.f ||
             !positive(minSpeed) || minSpeed > cruiseSpeed || cruiseSpeed > maxSpeed ||
             !positive(curveSpeed) || curveSpeed > maxSpeed ||
             !positive(degradedSpeed) || degradedSpeed > maxSpeed ||
