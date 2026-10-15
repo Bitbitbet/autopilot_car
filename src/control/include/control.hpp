@@ -2,8 +2,8 @@
 
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <libserial/SerialPort.h>
 #include <memory>
 #include <mutex>
@@ -83,9 +83,14 @@ class CarControl {
 
   public:
     ~CarControl() noexcept;
-    bool hasFault() const { return serialFault.load() || commandExpired.load(); }
+    bool hasFault() const {
+        return serialFault.load() || commandExpired.load();
+    }
     void setCommandTimeout(int milliseconds);
-    void latchStop(); // Exit/UI failure: prevent any racing worker from restarting.
+
+    /* Exit/UI failure: prevent any racing worker from restarting. */
+    void latch_stop();
+
     void pauseMotion();
     uint64_t motionEpoch() const { return stopEpoch.load(); }
     bool resumeMotion(uint64_t expectedEpoch);
