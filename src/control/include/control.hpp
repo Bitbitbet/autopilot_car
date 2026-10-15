@@ -85,7 +85,7 @@ class CarControl {
     ~CarControl() noexcept;
     bool hasFault() const { return serialFault.load() || commandExpired.load(); }
     void setCommandTimeout(int milliseconds);
-    void latchStop(); // Exit/UI failure: prevent any racing worker from restarting.
+    void latchStop(); // 退出或界面故障时锁定停车，防止其他线程重新发出行驶指令。
     void pauseMotion();
     uint64_t motionEpoch() const { return stopEpoch.load(); }
     bool resumeMotion(uint64_t expectedEpoch);

@@ -52,7 +52,7 @@ int main() {
         std::cout<<"PASS stalled main loop watchdog and restart veto\n";
         {
             auto car=CarControl::create(); frames(); car->carControl(0.12f,1500); frames();
-            shutdown(LibSerial::deviceFd,SHUT_RD); // Receive fails, write remains usable.
+            shutdown(LibSerial::deviceFd,SHUT_RD); // 模拟接收失败，同时保持写入可用。
             std::this_thread::sleep_for(std::chrono::milliseconds(60));
             check(car->hasFault(),"receive failure not published");
             auto s=frames(); check(!s.empty() && s.back()==0,"receive failure omitted stop");

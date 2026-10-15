@@ -4,7 +4,7 @@ target_compile_definitions(trackview_regression PRIVATE _DEBUG)
 target_link_libraries(trackview_regression PRIVATE track control nlohmann_json)
 add_test(NAME trackview_regression COMMAND trackview_regression)
 
-# Use real control.cpp with a socketpair-backed serial stand-in. No vehicle device.
+# 使用真实控制代码和成对套接字模拟串口，不连接车辆设备。
 add_executable(serial_regression serial_regression.cpp ../src/control/src/control.cpp)
 target_include_directories(serial_regression BEFORE PRIVATE mock ../src/control/include)
 target_link_libraries(serial_regression PRIVATE pthread)

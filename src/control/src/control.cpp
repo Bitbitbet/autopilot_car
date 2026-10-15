@@ -67,7 +67,7 @@ void CarControl::checkCommandTimeout() {
     std::lock_guard lock(writeMutex);
     if (moving && commandTimeoutMs > 0 &&
         Clock::now() - lastCommand >= std::chrono::milliseconds(commandTimeoutMs)) {
-        commandExpired = true; // Latched: old frames cannot restart the car.
+        commandExpired = true; // 锁定停车，旧图像帧不能使车辆重新启动。
         carControlLocked(0, PWMSERVOMID);
         std::cerr << "[Stop] Control command expired; restart program to rearm.\n";
     }
@@ -106,7 +106,7 @@ void CarControl::recvThreadMain() {
             }
         }
     } catch (const std::exception &e) {
-        serialFault = true; // All later motion is vetoed.
+        serialFault = true; // 禁止后续所有行驶指令。
         std::cerr << "[Error] Serial receive: " << e.what() << '\n';
         try { resetVelocity(); } catch (...) {}
     } catch (...) {
@@ -123,7 +123,7 @@ CarControl::~CarControl() noexcept {
 }
 
 void CarControl::translateBuffer(const std::array<uint8_t, USB_FRAME_LENMAX> &) {
-    // Preserve current protocol behavior, without per-byte console output.
+    // 保留现有协议行为，不再逐字节打印接收数据。
 }
 
 void CarControl::carControl(float speed, uint16_t servo) {
@@ -138,7 +138,7 @@ void CarControl::carControl(float speed, uint16_t servo) {
 }
 
 void CarControl::carControlLocked(float speed, uint16_t servo) {
-    uint8_t buff[11]{}; // Preserve the existing 10-byte frame + trailing zero.
+    uint8_t buff[11]{}; // 保留原有的 10 字节数据帧和末尾补零字节。
     buff[0] = USB_FRAME_HEAD; buff[1] = USB_ADDR_CARCTRL; buff[2] = 10;
     servo = std::clamp<uint16_t>(servo, PWMSERVOMIN, PWMSERVOMAX);
     std::memcpy(buff + 3, &speed, 4);
@@ -162,7 +162,7 @@ void CarControl::writeBuffer(void *buffer, size_t len) {
 }
 
 void CarControl::writeBufferLocked(const void *buffer, size_t len) {
-    if (serialFd < 0) return; // Clean destruction after failed open.
+    if (serialFd < 0) return; // 串口打开失败时，允许安全执行析构清理。
     const auto deadline = Clock::now() + std::chrono::milliseconds(100);
     size_t sent = 0;
     try {

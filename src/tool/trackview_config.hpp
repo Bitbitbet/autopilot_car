@@ -17,8 +17,8 @@ struct TrackviewConfig {
     float referenceDt = 1.f / 30.f, derivativeFilter = 0.08f;
     float maxErrorRate = 960.f, highSpeedGain = 1.f;
     float lostTimeout = 0.20f, recoverTime = 0.25f, maxFrameGap = 0.25f;
-    // widthLifetime is retained for old JSON files: age warning in diagnostics,
-    // not expiry of a static-camera width profile. Contradictory measurements revalidate it.
+    // 为兼容旧 JSON 保留 widthLifetime，仅用于诊断中提示记录过旧，
+    // 不使固定相机的宽度记录自动过期；观测冲突时仍需重新验证。
     float widthAlpha = 0.1f, widthLifetime = 15.f;
     int borderMargin = 3, minPoints = 8, minSpan = 30;
     int minWidth = 30, maxWidth = 300, rowCutUp = 10, rowCutBottom = 20;
@@ -64,7 +64,7 @@ struct TrackviewConfig {
         }
         nlohmann::json j; file >> j;
         if (!j.is_object()) throw std::invalid_argument("Config must be a JSON object");
-        // Reject spelling mistakes rather than silently ignoring a speed setting.
+        // 参数名拼写错误时直接报错，避免速度设置被静默忽略。
         const auto known = toJson();
         for (auto it = j.begin(); it != j.end(); ++it)
             if (!known.contains(it.key()) && it.key() != "mixedSpeed")
@@ -75,7 +75,7 @@ struct TrackviewConfig {
         TV_READ(deceleration); TV_READ(qualityDeceleration); TV_READ(curveStart);
         TV_READ(qualityRecoverTime); TV_READ(curveLookaheadRow);
         TV_READ(maxSingleFraction);
-        // Accept v4 configuration files without retaining their extra speed cap.
+        // 兼容 v4 配置文件，但不保留其额外的混合识别速度上限。
         if (j.contains("mixedSpeed"))
             std::cerr << "[Config] mixedSpeed ignored; healthy MIXED uses limit.\n";
         TV_READ(runP1); TV_READ(runP2); TV_READ(turnD); TV_READ(referenceDt);
