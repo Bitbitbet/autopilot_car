@@ -52,6 +52,42 @@ int main(int argc, char **argv) {
         check(rejected && t.pointsEdgeLeft.empty(),"invalid input retained stale track");
         std::cout<<"PASS bounds, bottom crop, rescan and invalid frame\n";
 
+        {
+            TrackviewConfig ceiling;
+            ceiling.validate();
+            check(ceiling.maxSpeed==1.5f && ceiling.cruiseSpeed==0.25f &&
+                ceiling.curveSpeed==0.15f && ceiling.degradedSpeed==0.12f,
+                "1.5 m/s ceiling changed other default speeds");
+            const auto path=std::filesystem::temp_directory_path()/
+                ("trackview-v6-ceiling-"+std::to_string(getpid())+".json");
+            std::ofstream(path)<<R"({"maxSpeed":1.5})";
+            TrackviewConfig loaded;loaded.load(path.string(),true);
+            std::filesystem::remove(path);
+            check(loaded.maxSpeed==1.5f,"1.5 m/s JSON ceiling rejected");
+            TrackviewConfig excessive;excessive.maxSpeed=1.51f;
+            bool denied=false;try {excessive.validate();}catch(const std::invalid_argument &){denied=true;}
+            check(denied,"ceiling above 1.5 m/s accepted");
+            AutoPilot faster(loaded);
+            feed(faster,lane());
+            check(std::fabs(drive(faster,lane(),1.5f,210)-1.5f)<0.001f,
+                "straight command failed to reach 1.5 m/s");
+            check(std::fabs(drive(faster,lane(),2.f,210)-1.5f)<0.001f,
+                "request exceeded 1.5 m/s ceiling");
+            check(faster.speedFor(0.25f,1.f/30)<=0.2501f,
+                "lower operator limit was not immediate");
+            const auto bend=lane(65);
+            check(std::fabs(drive(faster,bend,1.5f,210)-0.15f)<0.001f,
+                "1.5 m/s ceiling changed the curve target");
+            feed(faster,lane());
+            const auto single=lane(0,true);
+            check(std::fabs(drive(faster,single,1.5f,210)-0.12f)<0.001f,
+                "1.5 m/s ceiling changed the degraded target");
+            faster.update({}, {}, 1.f/30);
+            check(faster.speedFor(1.5f,1.f/30)==0,
+                "path loss failed to stop with 1.5 m/s ceiling");
+            std::cout<<"PASS 1.5 m/s default/JSON ceiling, command clamp, unchanged curve/quality targets and path-loss stop\n";
+        }
+
         AutoPilot straight; feed(straight,lane());
         check(straight.valid && straight.ready && std::abs(straight.center-160)<=1,"straight not centered");
         check(std::abs(int(straight.servo)-1500)<=5,"straight servo");
