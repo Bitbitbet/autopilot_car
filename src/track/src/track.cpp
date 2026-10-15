@@ -161,7 +161,7 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
         is_searching_first_row = true; // 搜索到色块起始行的标志（行）
         rowStart = track_img.rows - 1 - rowCutBottom;
     } else {
-        // This overload receives a retained point count, not an image row.
+        // 此重载参数表示保留的边界点数量，不是图像行号。
         const size_t keep = std::min({size_t(rowStart), pointsEdgeLeft.size(),
                                      pointsEdgeRight.size(), widthBlock.size()});
         if (keep == 0) { handle(false, 0); return; }
@@ -191,7 +191,7 @@ void Track::handle(bool isResearch, uint16_t rowStart) {
         //  开始识别赛道左右边缘
         find_white_blocks(track_img, r, blocks);
         if (blocks.empty()) {
-            // Bridge only a narrow missing strip, never a broad disconnected road.
+            // 只允许跨过少量连续缺失的扫描行，不跨越大范围断开的路面。
             if (!is_searching_first_row && ++missingRows > 3) break;
             continue;
         }

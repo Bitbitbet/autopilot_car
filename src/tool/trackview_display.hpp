@@ -6,7 +6,7 @@
 #include <opencv2/core.hpp>
 #include <vector>
 
-// Main thread alone owns HighGUI. Controller never waits for network rendering.
+// 主线程独占图形界面操作，控制线程不等待远程绘图。
 class TrackviewDisplay {
     std::mutex imageMutex, keyMutex;
     cv::Mat latestImage, latestBinary;
@@ -24,7 +24,7 @@ public:
     long long ageMs() const { return clockMs()-progressMs.load(); }
     bool stalled(int timeoutMs=2000) const { return ageMs()>=timeoutMs; }
     void publish(const cv::Mat &image,const cv::Mat &binary) {
-        // Clone outside the lock; no growing queue and no rendering under this lock.
+        // 在锁外复制图像；只保留最新帧，不积压队列，也不在持锁期间绘图。
         cv::Mat a=image.clone(), b=binary.clone();
         std::unique_lock lock(imageMutex,std::try_to_lock);
         if (!lock.owns_lock()) return;
@@ -33,7 +33,7 @@ public:
     bool snapshot(cv::Mat &image,cv::Mat &binary) {
         std::lock_guard lock(imageMutex);
         if (latestImage.empty()) return false;
-        // Immutable reference-counted snapshots remain valid across publications.
+        // 快照通过引用计数保持有效，发布新图像不会使旧快照失效。
         image=latestImage; binary=latestBinary;
         return true;
     }

@@ -14,7 +14,7 @@ inline uint16_t clampServo(float pwm) {
         pwm, float(PWMSERVOMIN), float(PWMSERVOMAX))));
 }
 
-// Hardware-independent controller, used by live driving and replay tests.
+// 与硬件解耦的控制器，供实车运行和离线回放测试共用。
 class AutoPilot {
     struct Width {
         float value = 0, pendingValue = 0;
@@ -34,12 +34,12 @@ class AutoPilot {
                p.y > config.borderMargin && p.y < int(IMAGE_COL) - 1 - config.borderMargin;
     }
     float widthAt(int row) const {
-        // Interpolate local observations only: no constant-width extrapolation.
+        // 只在邻近图像行的观测之间插值，不把固定宽度外推到其他距离。
         int lower = -1, upper = -1;
         for (int r = std::max(0, row - 12); r <= std::min(int(IMAGE_ROW)-1, row+12); ++r) {
             const auto &w = widths[r];
-            // Stationary time does not change camera perspective or track width.
-            // Contradictory trusted observations suspend a row until revalidated.
+            // 停车等待本身不会改变相机透视关系或赛道宽度。
+            // 可信观测与记录冲突时，暂停使用该行宽度，直到重新验证。
             if (w.observations < 3 || w.pendingObservations > 0) continue;
             if (r <= row) lower = r;
             if (r >= row && upper < 0) upper = r;
@@ -112,7 +112,7 @@ public:
     float qualitySpeedLimit() const {
         if(!valid || !ready || lost) return 0;
         if(qualityRestricted || degraded || confidence<0.65f) return config.degradedSpeed;
-        // Healthy mixed paths share the cruise limit; no separate mixed-speed cap.
+        // 正常的双边与单边混合路径共用巡航上限，不额外设置混合限速。
         return config.maxSpeed;
     }
     const char *qualityLimitReason() const {
@@ -181,8 +181,8 @@ public:
         else if(raw.front().x<int(IMAGE_ROW)*0.45f) pathIssue="NEAR_MISSING";
         else pathIssue="NONE";
         valid=std::string(pathIssue)=="NONE";
-        // A few reconstructed rows are normal when a road edge leaves the image.
-        // Degrade by their share of accepted centers, not their mere presence.
+        // 路边离开视野时，少量图像行需要重建中心点属于正常情况。
+        // 按单边重建点占有效中心点的比例判断降级，避免少量单边点就触发降级。
         degraded = singleFraction() > config.maxSingleFraction ||
                    rejectedPoints > int(rows.size()/3);
         centerEdge.clear();
@@ -190,7 +190,7 @@ public:
             missingTime += dt; stableTime = 0; ready = false; confidence = 0;
             qualityGoodTime=0; rawSeverity=severity=curveHeading=0; curveCause="NONE";
             lost = missingTime >= config.lostTimeout;
-            // Stop speed on the first bad frame; hold steering briefly, then center.
+            // 首个无效帧立即将速度指令清零；短暂保持转向，持续丢线后回正。
             commandedSpeed=speedTarget=0; speedReason="PATH_WAIT";
             if (lost) resetControl();
             return;
@@ -215,7 +215,7 @@ public:
             float w = weightOf(p.x); numerator += w*p.y; denominator += w;
         }
         center = std::clamp(int(std::lround(numerator/denominator)),0,int(IMAGE_COL)-1);
-        // Difference between far and near segments is a curve/heading proxy.
+        // 用远近中心线的横向位置差近似表示弯曲程度和道路朝向变化。
         const size_t n = std::max<size_t>(1, centerEdge.size()/4);
         float nearMean=0, farMean=0;
         for(size_t i=0;i<n;++i) {
@@ -223,8 +223,8 @@ public:
             farMean += centerEdge[centerEdge.size()-1-i].y;
         }
         heading = (farMean-nearMean)/n;
-        // Speed preview may use a nearer image region without changing steering
-        // or the original heading used to qualify width-learning observations.
+        // 速度预瞄可以改用较近的图像区域，而不改变转向所用的中心线
+        // 或宽度学习条件所用的原始远近偏移量。
         const auto end=std::find_if(centerEdge.begin(),centerEdge.end(),[&](const PointX &p) {
             return p.x<config.curveLookaheadRow;
         });
@@ -240,8 +240,8 @@ public:
             }
             curveHeading=(far-near)/section;
         }
-        // Learn perspective width only from a centered, nearly straight trusted path.
-        // Curves and unusable fragments must not overwrite the reference profile.
+        // 仅在车辆居中、道路近似直行且边界可信时学习各行的透视宽度。
+        // 弯道和无效的局部片段不能覆盖参考宽度记录。
         if (dualPoints >= config.minPoints && std::fabs(heading)<15 && std::abs(center-160)<20) {
             for (const auto &[row,w]:widthCandidates) {
                 auto &sample=widths[row];
@@ -253,8 +253,8 @@ public:
                     sample.observations=std::min(sample.observations+1,100);
                     sample.pendingObservations=0;
                 } else {
-                    // Require repeated, consistent double-edge measurements to relearn.
-                    // Do not use the old row for single-edge reconstruction meanwhile.
+                    // 需要多次一致的双边观测，才允许重新学习宽度。
+                    // 重新验证期间，不使用该行旧宽度进行单边中心重建。
                     if(sample.pendingObservations==0 ||
                        std::fabs(w-sample.pendingValue)>std::max(10.f,sample.pendingValue*0.1f)) {
                         sample.pendingValue=w; sample.pendingObservations=1;
@@ -297,8 +297,8 @@ public:
         speedTarget=std::min(curve,quality);
         speedReason=quality<limit && quality<=curve+1e-5f ? qualityLimitReason() :
                     curve<limit ? curveCause : "LIMIT";
-        // The operator's cruise ceiling takes effect immediately. Path loss also
-        // bypasses this ramp above. Valid-path slowdowns have bounded deceleration.
+        // 用户降低巡航上限时立即生效；上面的丢线停车同样
+        // 跳过缓降过程。只有路径有效时的减速才按设定减速度逐步执行。
         commandedSpeed=std::min(commandedSpeed,limit);
         const bool qualityBraking=quality<limit && quality<=curve+1e-5f;
         const float braking=qualityBraking ? std::max(config.deceleration,config.qualityDeceleration) : config.deceleration;

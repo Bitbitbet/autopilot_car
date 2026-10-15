@@ -14,8 +14,8 @@ using namespace std::chrono_literals;
 void check(bool ok,const char *message) { if(!ok) throw std::runtime_error(message); }
 
 int main() {
-    // Same controller/display mailbox and real serial implementation as the program.
-    // Socketpair replaces the hardware, and sleeping renderer replaces network X11.
+    // 使用与实车程序相同的控制器、显示消息传递机制和串口实现。
+    // 用成对套接字模拟串口硬件，用显示线程等待模拟 X11 网络延迟。
     auto car=CarControl::create();
     if(!car) return 1;
     car->setCommandTimeout(250);
@@ -57,7 +57,7 @@ int main() {
     try {
         for(int i=0;i<3;++i) {
             cv::Mat image,bin; display.snapshot(image,bin);
-            std::this_thread::sleep_for(400ms); // Formerly expires the 250ms command lease.
+            std::this_thread::sleep_for(400ms); // 旧实现中，此显示延迟会触发 250 毫秒的指令超时。
             display.progress();
             check(!car->hasFault() && !loopFault,"slow GUI still caused control timeout");
         }
@@ -68,7 +68,7 @@ int main() {
             "2s rendering delay incorrectly stopped a healthy controller");
         std::cout<<"PASS 2.2s renderer delay: commands continue; display lag is diagnostic only\n";
         display.progress();
-        // Genuine vision/controller stall must still trip the original lease.
+        // 真正的视觉处理或控制循环阻塞仍必须触发原有指令超时停车。
         std::this_thread::sleep_for(150ms);
         cameraStall=true;
         std::this_thread::sleep_for(500ms);

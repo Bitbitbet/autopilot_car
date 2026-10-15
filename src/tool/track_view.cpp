@@ -1,4 +1,4 @@
-/** Track following with validated boundaries, adaptive speed and latched stops. */
+/** 赛道循迹：校验边界可信度、自适应调速，并在故障后锁定停车。 */
 #include "control.hpp"
 #include "joystick.hpp"
 #include "predeal.hpp"
@@ -26,7 +26,7 @@ void onSignal(int) { stopping.store(true); }
 }
 enum class Mode { Manual, Auto };
 
-// Declared after the driving thread: inhibit motion before unwinding/joining it.
+// 在驾驶线程之后声明：析构时先禁止运动，再等待驾驶线程结束。
 struct StopOnExit {
     std::shared_ptr<CarControl> car;
     ~StopOnExit() {
@@ -99,7 +99,7 @@ public:
     void event(const std::string &reason,const AutoPilot &p,const cv::Mat &overlay={}) noexcept {
         if (!enabled) return;
         try {
-            // Called after stopping; image encoding never delays a motion command.
+            // 停车后才保存事件图像，避免图像编码延误运动指令。
             const auto path=directory/("event-"+std::to_string(++eventNumber));
             fs::create_directories(path);
             std::ofstream(path/"reason.txt") << reason << "\ncenter=" << p.center
@@ -179,15 +179,15 @@ int main(int argc,char **argv) {
         TrackviewConfig config; config.load(configPath,configRequired);
         pilot=AutoPilot(config);
         log=std::make_unique<Diagnostics>(config);
-        // Load calibration before opening any vehicle control device.
+        // 先加载相机标定参数，再打开车辆控制设备。
         auto predeal=config.binary<0 ? std::make_shared<Predeal>() : std::make_shared<Predeal>(config.binary);
         cv::VideoCapture capture;
         if(!replay) capture.open(source,cv::CAP_V4L2);
         if(!capture.isOpened()) capture.open(source);
         if(!capture.isOpened()) throw std::runtime_error("Cannot open video source: "+source);
         capture.set(cv::CAP_PROP_FRAME_WIDTH,IMAGE_COL); capture.set(cv::CAP_PROP_FRAME_HEIGHT,IMAGE_ROW);
-        capture.set(cv::CAP_PROP_BUFFERSIZE,1); // Backend may ignore this request.
-        std::atomic_bool joyLost{false}; // Must outlive gamepad callback.
+        capture.set(cv::CAP_PROP_BUFFERSIZE,1); // 摄像头后端可能忽略此缓冲区设置。
+        std::atomic_bool joyLost{false}; // 生命周期必须覆盖手柄回调的整个使用过程。
         std::shared_ptr<JoyStick> js;
         if(!noControl) {
             car=CarControl::create();
@@ -232,7 +232,7 @@ int main(int argc,char **argv) {
             }
             const auto captured=Clock::now(); captureMs=ms(captured,stageStarted);
             stage="preprocess"; stageStarted=captured;
-            // Calibration is defined at 320x240; never remap a mismatched frame.
+            // 标定参数对应 320×240 图像；分辨率不一致时先缩放，再进行去畸变。
             if(image.size()!=cv::Size(IMAGE_COL,IMAGE_ROW))
                 cv::resize(image,image,{IMAGE_COL,IMAGE_ROW},0,0,cv::INTER_AREA);
             predeal->correct(image);
@@ -279,8 +279,8 @@ int main(int argc,char **argv) {
                 }
                 else if(key=='w' || key=='W') pilot.cycleWeight();
             }
-            // X11 rendering is telemetry, not the control-loop heartbeat.
-            // Keep command watchdog/vision loss independent of remote UI delay.
+            // X11 远程绘图仅用于显示状态，不作为控制循环的心跳。
+            // 指令超时和视觉丢线判断独立于远程界面的显示延迟。
             const auto displayAge=headless ? 0LL : display.ageMs();
             if(js) {
                 float s=0; uint16_t sv=PWMSERVOMID;
@@ -345,7 +345,7 @@ int main(int argc,char **argv) {
         int render=0;
         auto lastRender=Clock::now()-std::chrono::milliseconds(100);
         while(!stopping.load() && !display.finished.load()) {
-            // GUI stays on the main thread; only immutable latest snapshots cross threads.
+            // 图形界面由主线程处理，线程之间只传递最新的只读图像快照。
             if(car && car->hasFault()) { display.failed=true; break; }
             if(headless) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -370,7 +370,7 @@ int main(int argc,char **argv) {
             }
             if(key==27) break;
             display.post(key);
-            if(key==' ' && car) car->pauseMotion(); // Veto racing worker writes immediately.
+            if(key==' ' && car) car->pauseMotion(); // 立即禁止运动，防止工作线程竞争写入旧的行驶指令。
         }
         stopping=true;
         if(car) { try { car->latchStop(); } catch(...) {} }

@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
         qualityBrake.update({}, {}, 1.f/30);
         check(qualityBrake.speedFor(0.5f,1.f/30)==0,"loss incorrectly uses soft braking");
 
-        // A bend visible only far away: the speed-preview row is independently adjustable.
+        // 仅远处出现弯道的测试场景：速度预瞄的图像行范围可单独调整。
         Edges farBend=lane();
         for(size_t i=0;i<farBend.first.size();++i) {
             const int row=farBend.first[i].x,shift=std::max(0,80-row)*4/5;
@@ -223,7 +223,7 @@ int main(int argc, char **argv) {
         check(rejected,"invalid preview row accepted");
         std::cout<<"PASS smooth curve/quality braking, recovery hold, adjustable targets, preview, deadband and 15/30/60 FPS rates\n";
 
-        // Reproduce stationary pauses longer than v2's 15-second width lifetime.
+        // 复现停车等待超过 v2 宽度记录 15 秒有效期的情形。
         AutoPilot paused; feed(paused,lane());
         feed(paused,{},1260,1.f/15); paused.resetControl();
         check(paused.lost && paused.speedFor(0.25f,1.f/15)==0,"blank pause failed to stop");
@@ -231,7 +231,7 @@ int main(int argc, char **argv) {
         check(paused.valid && paused.ready && paused.singlePoints>0,"84s pause discarded learned width");
         check(std::abs(paused.center-190)<3,"post-pause single reconstruction changed");
         check(paused.speedFor(0.5f,1.f/15)<=0.1201f,"post-pause single speed unsafe");
-        // Contradictory measurements suspend old widths, then relearn after agreement.
+        // 宽度观测冲突时先停用旧记录，多次观测一致后再重新学习。
         Edges narrow;
         for(int row=219;row>=30;row-=2) { narrow.first.emplace_back(row,130); narrow.second.emplace_back(row,190); }
         AutoPilot changed; feed(changed,lane()); feed(changed,narrow,1);
@@ -273,7 +273,7 @@ int main(int argc, char **argv) {
         std::cout<<"PASS 15/30/60 FPS consistency and configuration validation\n";
         if (argc > 1) {
             const std::filesystem::path out(argv[1]);
-            // Previous user failure images; width prior is synthetic, not car calibration.
+            // 使用之前故障时保存的图像；宽度先验为合成数据，不是实车标定值。
             for(const auto &name:{"curve-entry","curve-seam"}) {
                 cv::Mat image=cv::imread((out.parent_path()/"trial_fixes_20261012"/"fixtures"/name/"binary.png").string(),0);
                 check(!image.empty(),"missing saved curve fixture");
@@ -297,8 +297,8 @@ int main(int argc, char **argv) {
                 }
                 check(std::abs(centers[0]+centers[1]-319)<10,"saved fixture mirror center inconsistent");
             }
-            // Current run's actual edge coordinates, with a disclosed synthetic prior.
-            // v2 did not save its width model, so this tests expiry behavior, not physical calibration.
+            // 使用本次记录的真实边界坐标，并明确采用合成的宽度先验。
+            // v2 未保存宽度模型，因此这里只验证过期行为，不验证真实物理标定。
             const auto fieldRun=out/"现场记录"/"1791885777078-8366"/"event-2";
             if(std::filesystem::exists(fieldRun/"1872-edges.csv")) {
                 auto actual=readEdges(fieldRun/"1872-edges.csv");
@@ -351,7 +351,7 @@ int main(int argc, char **argv) {
                     <<" single="<<p.singlePoints<<" reject="<<p.rejectedPoints<<" confidence="<<p.confidence
                     <<" degraded="<<p.degraded<<" speed="<<velocity<<'\n';
             }
-            // Complete executable replay: identity calibration and synthetic video only.
+            // 完整程序回放测试：仅使用单位矩阵标定和合成视频。
             const auto replay=out/"replay";
             std::filesystem::create_directories(replay/"res"/"calibration");
             std::filesystem::create_directories(replay/"bin");
