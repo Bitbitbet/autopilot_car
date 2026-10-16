@@ -1,0 +1,235 @@
+#pragma once
+#include "race_perception.hpp"
+#include "track.hpp"
+#include <algorithm>
+#include <array>
+#include <limits>
+
+struct RacePath {
+    std::vector<PointX> left,right;
+    int splitRows=0;
+};
+
+// 沿近处已连通的白色路面向远处搜索。方向只在真正出现两个通路时生效。
+// 不采用“看到方向牌就立即删掉半边线”的开环转向。
+inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int direction,const RaceConfig &cfg) {
+    RacePath out;
+    if(bin.empty()||bin.type()!=CV_8UC1||bin.rows!=240||bin.cols!=320||
+       track.pointsEdgeLeft.empty()||track.pointsEdgeRight.empty()) return out;
+    int low=track.pointsEdgeLeft.front().y,high=track.pointsEdgeRight.front().y;
+    const int start=track.pointsEdgeLeft.front().x;
+    int missing=0;
+    for(int row=start;row>track.rowCutUp;row-=2) {
+        std::vector<std::pair<int,int>> blocks;
+        for(int col=0;col<bin.cols;) {
+            if(bin.at<uint8_t>(row,col)<=127) { ++col; continue; }
+            int first=col;
+            while(col<bin.cols&&bin.at<uint8_t>(row,col)>127) ++col;
+            if(col-first>=cfg.minBranchWidth&&std::min(col-1,high)>=std::max(first,low))
+                blocks.emplace_back(first,col-1);
+        }
+        if(blocks.empty()) { if(++missing>3) break; continue; }
+        missing=0;
+        bool split=blocks.size()>1&&blocks.back().first-blocks.front().second>=cfg.minBranchGap;
+        if(split) ++out.splitRows;
+        auto best=std::min_element(blocks.begin(),blocks.end(),[&](auto a,auto b) {
+            return std::abs(a.first+a.second-low-high)<std::abs(b.first+b.second-low-high);
+        });
+        if(split&&direction) best=direction<0?blocks.begin():blocks.end()-1;
+        // 几何探测保持两条连通分支的包络，才能要求多行连续分叉。
+        // 真正输出选路路径时，始终只跟随指定的一条白色通路。
+        low=(split&&!direction)?blocks.front().first:best->first;
+        high=(split&&!direction)?blocks.back().second:best->second;
+        out.left.emplace_back(row,low); out.right.emplace_back(row,high);
+    }
+    return out;
+}
+
+struct RacePlan {
+    float speedCap=10.f;
+    bool stop=false,buzzer=false,fresh=false;
+    bool selectedBranch=false;
+    double detectionAge=-1;
+    const char *state="AI_WAIT",*reason="AI_WAIT";
+    RacePath path;
+};
+
+class RaceManager {
+    RaceConfig cfg;
+    std::array<int,15> counts{};
+    std::array<bool,15> confirmed{};
+    std::array<PredictResult,15> boxes{};
+    uint64_t lastSequence=0;
+    double lastCapture=-1,now=0,stateSince=0,cooldownUntil=0;
+    double gateClearSince=-1,hazardClearSince=-1;
+    double directionUntil=0,splitTime=0,exitTime=0,lastCrossSeen=0;
+    bool lastActive=false,limited=false,crossBottomSeen=false,gateWaiting=false,hazardWaiting=false;
+    int direction=0;
+    enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
+    State state=State::Lane;
+    const char *reviewReason="REVIEW_REQUIRED";
+    PredictResult gateBox{};
+    void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0; }
+    bool seen(int label) const { return confirmed[label]; }
+    bool near(int label,int row) const { return seen(label)&&boxes[label].y+boxes[label].height>=row; }
+    bool updateObservation(const RaceSnapshot &snap,bool fresh) {
+        if(!fresh||snap.sequence<=lastSequence||snap.captured<=lastCapture) return false;
+        if(lastCapture<0||snap.captured-lastCapture>cfg.confirmGap) counts.fill(0);
+        lastSequence=snap.sequence; lastCapture=snap.captured;
+        std::array<bool,15> present{};
+        for(const auto &d:snap.detections) {
+            if(d.type<0||d.type>=15||!std::isfinite(d.score)||d.score<cfg.confidence||d.score>1||
+               d.x<0||d.y<0||d.width<=0||d.height<=0||d.x>319||d.y>239||
+               d.width>320-d.x||d.height>240-d.y) continue;
+            if(!present[d.type]||d.score>boxes[d.type].score) boxes[d.type]=d;
+            present[d.type]=true;
+        }
+        for(int i=0;i<15;++i) { counts[i]=present[i]?std::min(cfg.confirmFrames,counts[i]+1):0; confirmed[i]=counts[i]>=cfg.confirmFrames; }
+        return true;
+    }
+public:
+    explicit RaceManager(const RaceConfig &config):cfg(config) { cfg.validate(); }
+    bool aiReady(const RaceSnapshot &s,double time) const {
+        return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
+    }
+    RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track) {
+        now=time;
+        RacePlan p;
+        p.detectionAge=snap.sequence?time-snap.captured:-1;
+        p.fresh=aiReady(snap,time);
+        const bool newFrame=updateObservation(snap,p.fresh);
+        const auto geometry=raceBranchPath(bin,track,0,cfg);
+        if(active!=lastActive) {
+            // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
+            if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0; }
+            counts.fill(0); confirmed.fill(false); lastActive=active;
+        }
+        if(!active) { p.state="MANUAL"; p.reason="MANUAL"; return p; }
+        if(!p.fresh) {
+            p.stop=true; p.state="AI_WAIT"; p.reason=snap.failed?"AI_FAILED":"AI_STALE";
+            counts.fill(0); confirmed.fill(false); splitTime=exitTime=0;
+            // 无新观测时不累计恢复或穿越时间，也不能沿用旧方向继续完成动作。
+            if(state==State::ForkSelect) { enter(State::Fault); reviewReason="FORK_AI_STALE"; }
+            gateClearSince=hazardClearSince=-1; return p;
+        }
+        if(!std::isfinite(dt)||dt<=0||dt>0.25f) { p.stop=true; p.state="FRAME_WAIT"; p.reason="FRAME_GAP"; return p; }
+        if(newFrame) {
+            if(seen(LABEL_LIMIT)) limited=true;
+            else if(seen(LABEL_UNLIMIT)) limited=false;
+        }
+        if(limited) p.speedCap=cfg.limitedSpeed;
+
+        // 施工区和泊车不能仅凭标签就宣称已完成；基础版明确停车等待专项规划验证。
+        if(state!=State::ReviewStop&&state!=State::Fault&&newFrame&&
+           (near(LABEL_PARK,cfg.triggerRow)||near(LABEL_BUSY,cfg.triggerRow))) {
+            reviewReason=seen(LABEL_PARK)?"PARK_PLANNER_PENDING":"CONSTRUCTION_PLANNER_PENDING";
+            enter(State::ReviewStop);
+        }
+        if(state==State::ReviewStop||state==State::Fault) {
+            p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; return p;
+        }
+        if(state==State::Lane&&newFrame&&near(LABEL_STOP,cfg.triggerRow)) {
+            crossBottomSeen=false; lastCrossSeen=now;
+            enter(cfg.stopAfterCross?State::CrossApproach:State::SignalWait);
+        }
+        // 道闸优先于路线选择；绿色通行牌不能放行尚未抬起的杆。
+        if(newFrame&&near(LABEL_GATE,cfg.triggerRow)&&
+           boxes[LABEL_GATE].width>=boxes[LABEL_GATE].height&&!gateWaiting) {
+            gateBox=boxes[LABEL_GATE]; gateWaiting=true; gateClearSince=-1;
+        }
+        if(gateWaiting) {
+            if(newFrame) {
+                const auto &g=boxes[LABEL_GATE];
+                const bool sameArea=std::abs((g.x+g.width/2)-(gateBox.x+gateBox.width/2))<80;
+                const bool open=seen(LABEL_GATE)&&sameArea&&g.height>=30&&g.width<float(g.height)*cfg.gateOpenAspect;
+                if(open) { if(gateClearSince<0) gateClearSince=now; }
+                else gateClearSince=-1;
+                if(gateClearSince>=0&&now-gateClearSince>=cfg.clearTime) gateWaiting=false;
+            }
+        }
+        if(newFrame&&(near(LABEL_PERSON,cfg.obstacleRow)||near(LABEL_CONE,cfg.obstacleRow))) {
+            hazardWaiting=true; hazardClearSince=-1;
+        }
+        if(hazardWaiting) {
+            if(newFrame) {
+                // 单次漏检不能放行，连续的新鲜无障碍观测才能恢复。
+                const bool any=counts[LABEL_PERSON]>0||counts[LABEL_CONE]>0;
+                if(any) hazardClearSince=-1;
+                else if(hazardClearSince<0) hazardClearSince=now;
+                if(hazardClearSince>=0&&now-hazardClearSince>=cfg.clearTime) hazardWaiting=false;
+            }
+        }
+        if(gateWaiting||hazardWaiting) {
+            // 高优先级停车叠加在当前任务之上，不丢失信号灯等待等低优先级义务。
+            // 停车期间不累计穿越/选路动作时间。
+            stateSince+=dt; splitTime=exitTime=0;
+            if(state==State::CrossApproach) lastCrossSeen=now;
+            p.stop=true;
+            p.state=gateWaiting?"GATE_WAIT":"OBSTACLE_WAIT";
+            p.reason=gateWaiting?"GATE_NOT_VERIFIED_OPEN":"OBSTACLE_PLANNER_PENDING";
+            return p;
+        }
+        if(state==State::CrossApproach) {
+            p.speedCap=std::min(p.speedCap,cfg.approachSpeed);
+            p.state="CROSS_APPROACH"; p.reason="STOP_AFTER_CROSS";
+            if(newFrame) {
+                if(counts[LABEL_CROSS]>0) {
+                    lastCrossSeen=now;
+                    if(seen(LABEL_CROSS)&&near(LABEL_CROSS,cfg.crossPassedRow)) crossBottomSeen=true;
+                } else if(crossBottomSeen&&now-lastCrossSeen>=cfg.crossClearTime) enter(State::SignalWait);
+            }
+            if(now-stateSince>6&&state==State::CrossApproach) {
+                enter(State::Fault); reviewReason="CROSS_PASS_NOT_VERIFIED";
+            }
+        }
+        if(state==State::SignalWait) {
+            p.stop=true; p.state="SIGNAL_WAIT"; p.reason="WAIT_FRESH_FLOW";
+            if(newFrame&&seen(LABEL_FLOW)&&counts[LABEL_STOP]==0&&now-stateSince>=cfg.stopHoldTime) {
+                enter(State::Lane); cooldownUntil=now+cfg.cooldown; p.stop=false;
+            }
+            return p;
+        }
+        if(state==State::Lane&&now>=cooldownUntil&&newFrame) {
+            if(seen(LABEL_YLEFT)&&seen(LABEL_YRIGHT)) { direction=0; }
+            else if(seen(LABEL_YLEFT)||seen(LABEL_YRIGHT)) {
+                direction=seen(LABEL_YLEFT)?-1:1;
+                directionUntil=now+cfg.directionMemory; enter(State::ForkArmed);
+            }
+        }
+        if(state==State::ForkArmed) {
+            p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
+            p.state="FORK_ARMED"; p.reason=direction<0?"WAIT_LEFT_SPLIT":"WAIT_RIGHT_SPLIT";
+            if(newFrame&&seen(LABEL_YLEFT)&&seen(LABEL_YRIGHT)) {
+                enter(State::Fault); reviewReason="CONFLICTING_DIRECTIONS";
+            } else if(newFrame&&((direction<0&&seen(LABEL_YRIGHT))||(direction>0&&seen(LABEL_YLEFT)))) {
+                enter(State::Fault); reviewReason="DIRECTION_CHANGED_BEFORE_SPLIT";
+            } else if(now>directionUntil) { enter(State::Lane); direction=0; }
+            else if(geometry.splitRows>=cfg.minBranchRows) {
+                splitTime+=dt;
+                if(splitTime>=cfg.forkConfirmTime) { enter(State::ForkSelect); p.buzzer=true; }
+            } else splitTime=0;
+        }
+        if(state==State::ForkSelect) {
+            p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
+            p.state=direction<0?"FORK_LEFT":"FORK_RIGHT"; p.reason="CONNECTED_BRANCH";
+            p.path=raceBranchPath(bin,track,direction,cfg); p.selectedBranch=true;
+            if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
+            else if(now-stateSince>cfg.forkMaxTime) { enter(State::Fault); reviewReason="FORK_TIMEOUT"; }
+            else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0) {
+                exitTime+=dt;
+                if(exitTime>=cfg.forkExitTime) {
+                    enter(State::Lane); cooldownUntil=now+cfg.cooldown;
+                    p.selectedBranch=false; p.path={};
+                }
+            } else exitTime=0;
+        }
+        if(state==State::Lane) {
+            p.state=limited?"LIMIT_ZONE":"LANE"; p.reason=limited?"LIMIT_SIGN":"CRUISE";
+            if(geometry.splitRows>=cfg.minBranchRows&&now>=cooldownUntil) {
+                p.stop=true; p.state="FORK_WAIT"; p.reason="NO_CONFIRMED_DIRECTION";
+            }
+        }
+        if(state==State::Fault) { p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; }
+        return p;
+    }
+};

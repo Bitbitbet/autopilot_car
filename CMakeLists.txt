@@ -32,6 +32,18 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 add_executable(trackview src/tool/track_view.cpp)
 target_link_libraries(trackview PRIVATE control track predeal tools nlohmann_json PkgConfig::evdev PkgConfig::udev pthread)
 
+# 比赛集成程序独立构建，保留原有 trackview 和组员的 icar 入口。
+set_target_properties(tools detection PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(race_npu_backend SHARED src/tool/race_perception.cpp)
+target_link_libraries(race_npu_backend PRIVATE detection nlohmann_json pthread)
+target_link_options(race_npu_backend PRIVATE -static-libstdc++ -static-libgcc)
+if(CAR_CXX_RUNTIME)
+    target_link_options(race_npu_backend PRIVATE "-L${CAR_CXX_RUNTIME}/lib")
+endif()
+add_executable(trackview_race src/tool/trackview_race.cpp src/tool/race_backend_loader.cpp)
+target_link_libraries(trackview_race PRIVATE control track predeal tools nlohmann_json PkgConfig::evdev PkgConfig::udev pthread dl)
+add_dependencies(trackview_race race_npu_backend)
+
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)
 target_link_libraries(calibration PRIVATE show tools)

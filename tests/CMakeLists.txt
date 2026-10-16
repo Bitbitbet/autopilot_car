@@ -14,3 +14,9 @@ add_executable(gui_stall_regression gui_stall_regression.cpp ../src/control/src/
 target_include_directories(gui_stall_regression BEFORE PRIVATE mock ../src/control/include ../src/tool)
 target_link_libraries(gui_stall_regression PRIVATE tools nlohmann_json pthread)
 add_test(NAME gui_stall_regression COMMAND gui_stall_regression)
+
+add_executable(race_regression race_regression.cpp)
+target_include_directories(race_regression PRIVATE ../src/tool)
+target_compile_definitions(race_regression PRIVATE _DEBUG)
+target_link_libraries(race_regression PRIVATE track control nlohmann_json pthread)
+add_test(NAME race_regression COMMAND race_regression)
