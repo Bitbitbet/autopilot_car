@@ -33,7 +33,7 @@ public:
     }
     RaceSnapshot take(uint64_t frame,double time) {
         const auto it=records.find(frame);
-        if(it!=records.end()) latest={frame,time,it->second,false,{}};
+        if(it!=records.end()) latest={frame,time,it->second,false,{},{}};
         return latest;
     }
 };

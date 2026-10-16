@@ -1,5 +1,6 @@
 #include "race_manager.hpp"
 #include "race_replay.hpp"
+#include "race_preview.hpp"
 #include "trackview_pilot.hpp"
 #include <atomic>
 #include <chrono>
@@ -27,7 +28,7 @@ struct Fixture {
     RaceSnapshot snapshot;
     RacePlan step(std::vector<PredictResult> ds={},bool active=true,bool newFrame=true,float dt=.07f) {
         time+=dt; track.handle(image);
-        if(newFrame) snapshot={++sequence,time,std::move(ds),false,{}};
+        if(newFrame) snapshot={++sequence,time,std::move(ds),false,{},{}};
         return manager.update(snapshot,time,dt,active,image,track);
     }
     RacePlan repeat(std::vector<PredictResult> ds,int n=4) { RacePlan p; while(n--) p=step(ds); return p; }
@@ -123,11 +124,19 @@ int main(int argc,char **argv) {
                 return std::vector<PredictResult>{};
             });
             const double captured=raceTime();
-            for(int i=1;i<=30;++i) worker.submit(road(),i,captured);
+            for(int i=1;i<=30;++i) {
+                auto frame=road(); frame.at<uint8_t>(0,0)=i;
+                worker.submit(frame,i,captured);
+            }
             bool complete=false;
             for(int i=0;i<100;++i) {
                 auto snap=worker.snapshot();
-                if(snap.sequence==30) { complete=true; check(snap.captured==captured,"capture timestamp preserved"); break; }
+                if(snap.sequence==30) {
+                    complete=true;
+                    check(snap.captured==captured,"capture timestamp preserved");
+                    check(!snap.image.empty()&&snap.image.at<uint8_t>(0,0)==30,"preview image matches inferred frame");
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             check(complete&&calls<30,"inference queue keeps latest frame without backlog");
@@ -135,6 +144,18 @@ int main(int argc,char **argv) {
         if(argc==2) {
             const std::filesystem::path dir=argv[1];
             std::filesystem::create_directories(dir);
+            RaceSnapshot sample{9,1.0,{box(LABEL_YLEFT)},false,{},{}};
+            sample.image=cv::Mat(240,320,CV_8UC3,cv::Scalar(35,35,35));
+            const auto before=sample.image.clone();
+            const auto preview=racePreviewImage(sample,1.1,RaceConfig{});
+            check(preview.size()==cv::Size(640,300),"AI preview layout");
+            check(cv::norm(before,sample.image,cv::NORM_INF)==0,"drawing cannot alter raw AI frame");
+            check(saveRaceSample(dir,sample,1.1,RaceConfig{},1),"save AI sample");
+            const auto json=raceDetectionJson(sample,1.1,.65f);
+            check(json.at("detections").at(0).at("label")=="yleft","sample uses actual class mapping");
+            auto malformed=box(LABEL_YLEFT); malformed.x=-100;
+            sample.detections.push_back(malformed);
+            check(raceDetectionJson(sample,1.1,.65f).at("detections").size()==1,"invalid boxes excluded from preview metadata");
             cv::VideoWriter video((dir/"race-scenario.avi").string(),
                 cv::VideoWriter::fourcc('M','J','P','G'),30,{320,240});
             check(video.isOpened(),"create full entry replay fixture");
@@ -149,6 +170,6 @@ int main(int argc,char **argv) {
                 labels<<nlohmann::json({{"frame",frame},{"detections",ds}}).dump()<<'\n';
             }
         }
-        std::cout<<"PASS race limits/fork geometry/AI freshness/signal/gate/task boundaries/asynchronous queue\n";
+        std::cout<<"PASS race limits/fork geometry/AI freshness/signal/gate/task boundaries/asynchronous queue/matched preview and samples\n";
     } catch(const std::exception &e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; return 1; }
 }

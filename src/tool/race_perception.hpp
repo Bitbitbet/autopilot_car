@@ -15,6 +15,7 @@ struct RaceSnapshot {
     std::vector<PredictResult> detections;
     bool failed=false;
     std::string error;
+    cv::Mat image; // 与结果对应的原始推理图像，只读共享，不能用新帧冒充。
 };
 inline double raceTime() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -46,7 +47,7 @@ private:
                 }
                 auto result=infer(frame);
                 std::lock_guard lock(mutex);
-                latest={sequence,captured,std::move(result),false,{}};
+                latest={sequence,captured,std::move(result),false,{},std::move(frame)};
             }
         } catch(const std::exception &e) {
             std::lock_guard lock(mutex); latest.failed=true; latest.error=e.what();

@@ -2,6 +2,7 @@
  * 与 track_view.cpp 分开维护，避免改变已验证的 v6 程序。 */
 #include "race_manager.hpp"
 #include "race_replay.hpp"
+#include "race_preview.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
 #include "predeal.hpp"
@@ -235,6 +236,7 @@ int main(int argc,char **argv) {
         const double videoFps=capture.get(cv::CAP_PROP_FPS);
         const float replayDt=(videoFps>=5 && videoFps<=120)?float(1/videoFps):config.referenceDt;
         TrackviewDisplay display;
+        RacePreview aiPreview;
         std::ofstream displayTiming;
         if(!log->displayTimingPath().empty()) {
             displayTiming.open(log->displayTimingPath());
@@ -279,7 +281,9 @@ int main(int argc,char **argv) {
             if(dt<=0) dt=config.referenceDt;
             log->add(image,bin,track);
             const double observationTime=replay?raceFrame*double(replayDt):raceTime();
-            const auto observation=perception?perception->snapshot():detectionReplay->take(raceFrame,observationTime);
+            auto observation=perception?perception->snapshot():detectionReplay->take(raceFrame,observationTime);
+            if(replay&&observation.sequence==raceFrame) observation.image=image.clone();
+            if(!headless) aiPreview.publish(observation,observationTime);
             const uint64_t motionEpoch=car?car->motionEpoch():0;
             auto toggle=[&]() {
                 if(mode==Mode::Auto) { mode=Mode::Manual; jsSpeed=0; pilot.resetControl(); }
@@ -402,6 +406,9 @@ int main(int argc,char **argv) {
         });
         StopOnExit stopBeforeJoin{car};
         int render=0;
+        int savedAiSamples=0;
+        RaceSnapshot shownAi;
+        double shownAiTime=0;
         auto lastRender=Clock::now()-std::chrono::milliseconds(100);
         while(!stopping.load() && !display.finished.load()) {
             // 图形界面由主线程处理，线程之间只传递最新的只读图像快照。
@@ -418,6 +425,10 @@ int main(int argc,char **argv) {
                     display.progress(); continue;
                 }
                 cv::imshow("track_view",image); cv::imshow("binarized",bin);
+                auto snapshot=aiPreview.snapshot();
+                shownAi=std::move(snapshot.first);
+                shownAiTime=replay?snapshot.second:raceTime();
+                cv::imshow("AI detections",racePreviewImage(shownAi,shownAiTime,raceConfig));
                 lastRender=Clock::now(); ++render;
             }
             const int key=cv::waitKey(10);
@@ -428,6 +439,18 @@ int main(int argc,char **argv) {
                 displayTiming.flush();
             }
             if(key==27) break;
+            if(key=='s'||key=='S') {
+                if(!noControl) std::cout<<"[Sample] Use --no-control to save AI images.\n";
+                else {
+                    try {
+                        // 保存当前屏幕对应的 AI 帧；采样不占用巡线线程。
+                        if(saveRaceSample(log->outputDirectory(),shownAi,shownAiTime,raceConfig,++savedAiSamples))
+                            std::cout<<"[Sample] Saved ai-sample-"<<savedAiSamples<<'\n';
+                        else std::cout<<"[Sample] Wait for AI image; diagnostics must be enabled.\n";
+                    } catch(const std::exception &e) { std::cerr<<"[Sample] "<<e.what()<<'\n'; }
+                }
+                continue;
+            }
             display.post(key);
             if(key==' ' && car) car->pauseMotion(); // 立即禁止运动，防止工作线程竞争写入旧的行驶指令。
         }

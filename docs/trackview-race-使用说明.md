@@ -12,6 +12,7 @@
 - `src/tool/race_manager.hpp`：岔路扫描、任务状态和速度/停车仲裁。
 - `src/tool/race_config.hpp`、`config/race.json`：任务策略参数。
 - `src/tool/race_replay.hpp`：离线读取检测记录；禁止使用离线记录控制实车。
+- `src/tool/race_preview.hpp`：与推理帧对应的检测框、类别、置信度和样本保存。
 - `tests/race_regression.cpp`：无实车回归测试。
 - `docs/比赛准备与代码差距-20261016.md`：规则来源、准备及待完成项。
 
@@ -57,6 +58,10 @@ chmod +x ./trackview_race
 ```
 
 这一步不会打开电机串口或手柄；AI 模型仍在车载板运行。确认检测框与真实目标对应，再逐项低速测试：
+
+预览增加 `AI detections` 窗口：左侧画检测框，右侧显示类别/置信度，顶部显示帧号和结果年龄。`FRESH` 表示结果未过期，`STALE / WAIT` 表示不能作为当前有效结果。框必须落在对应实物上；高置信度本身不表示一定识别正确。
+
+在该窗口按 `s`，只在 `--no-control` 模式保存当前 AI 原图 `camera.png`、画框图 `detections.png` 和 `detections.json`，目录为本次日志中的 `ai-sample-N`。没有目标的画面也能保存，便于分析漏检。绘图和保存都在 GUI 线程执行，不阻塞巡线线程；图像属于原推理帧，不能把旧框画到新图上误导判断。
 
 ```bash
 ./trackview_race --config ./trackview.json --race-config ./race.json
