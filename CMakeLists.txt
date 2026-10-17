@@ -30,7 +30,7 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 
 # 查看轨道
 add_executable(trackview src/tool/track_view.cpp)
-target_link_libraries(trackview PRIVATE control track camera tools nlohmann_json PkgConfig::evdev PkgConfig::udev pthread)
+target_link_libraries(trackview PRIVATE control track camera tools PkgConfig::evdev PkgConfig::udev pthread)
 
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)

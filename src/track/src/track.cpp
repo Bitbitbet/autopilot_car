@@ -4,137 +4,23 @@
 #include <utility>
 
 using namespace cv;
-using std::abs;
-using std::make_pair;
 using std::pair;
-using std::to_string;
 using std::vector;
 
-using Blocks = vector<pair<int, int>>;
+constexpr double TRACK_MIN_DISTANCE = 0;
+constexpr double TRACK_MAX_DISTANCE = 1.2;
+constexpr double TRACK_MIN_WIDTH = 0.2;
+constexpr double TRACK_MAX_GAP_DISTANCE = 0.05;
 
-// 边缘识别内部辅助函数
-void find_white_blocks(const Mat &binary, int row, Blocks &blocks);
-void find_connected_blocks(const Blocks blocks, int last_left, int last_right,
-                           Blocks &connected_blocks);
-pair<int, int> selectClosestBlock(const Blocks &connected_blocks, int last_left,
-                                  int last_right);
+namespace {
+
+using Blocks = vector<pair<int, int>>; // 一行里的白色色块（起止列）
 
 /**
- * @brief 赛道线识别
- *
- * 二值图自下而上逐行搜索，行号 0 在图像顶部（远处），越大越靠近车头。
- * 搜索范围、色块宽度、缺口大小都用 camera 的单应换算成地面坐标（米）判断，
- * 所以换分辨率/换相机只需要重标 calibration.xml，不用改这里的数字。
- *
- * @param camera 相机（提供地面单应，见 calibration.xml 的 ground_H_img2gnd）
- * @param img    赛道识别基准图像（CV_8UC1 二值图）
+ * @brief 找出第 row 行的所有白色色块
  */
-void Track::handle(Camera &camera, Mat img) {
-    // 图像坐标(列,行) -> 地面坐标(米)，X 右正左负、Y 前正后负
-    const auto groundX = [&](int row, int col) {
-        return float(camera.image_to_ground({float(col), float(row)}).x);
-    };
-    // 行中心处的纵向距离：同一行上各列的距离差可以忽略
-    const auto distanceAt = [&](int row) {
-        return float(
-            camera.image_to_ground({float(img.cols) / 2, float(row)}).y);
-    };
-    // 同一行上左右边界的实际横向间距，就是色块在路面上的宽度
-    const auto widthAt = [&](int row, int left, int right) {
-        return std::fabs(groundX(row, right) - groundX(row, left));
-    };
-
-    pointsEdgeLeft.clear();  // 初始化边缘结果
-    pointsEdgeRight.clear(); // 初始化边缘结果
-    widthBlock.clear();      // 初始化色块数据
-    spurroad.clear();        // 岔路信息
-
-    bool isSearchingFirstRow = true; // 搜索到色块起始行的标志（行）
-    bool spurroadEnabled = false;
-    float lastDistance = 0;
-
-    auto appendEdge = [&](int row, int left, int right) {
-        pointsEdgeLeft.emplace_back(row, left);
-        pointsEdgeRight.emplace_back(row, right);
-        widthBlock.emplace_back(row, right - left + 1);
-    };
-
-    Blocks blocks, connected_blocks;
-    for (int r = img.rows - 1; r > 0; r -= 2) {
-        const float distance = distanceAt(r);
-        // 单应缺失、或者已经越过最远搜索距离，就没有可用的地面信息了
-        if (!std::isfinite(distance) || distance > maxDistance)
-            break;
-        if (distance < minDistance)
-            continue;
-
-        //  开始识别赛道左右边缘
-        find_white_blocks(img, r, blocks);
-        if (blocks.empty()) {
-            // 只桥接窄的缺失带，缺口超过 maxGapDistance 说明赛道已经结束
-            if (!isSearchingFirstRow &&
-                distance - lastDistance > maxGapDistance)
-                break;
-            continue;
-        }
-
-        if (isSearchingFirstRow) {
-            const auto widest = max_element(
-                blocks.begin(), blocks.end(), [](const auto &a, const auto &b) {
-                    return (a.second - a.first) < (b.second - b.first);
-                });
-            if (widthAt(r, widest->first, widest->second) < minRoadWidth)
-                continue; // 还不够宽，继续往上找起始行
-            appendEdge(r, widest->first, widest->second);
-            isSearchingFirstRow = false;
-            spurroadEnabled = false;
-            lastDistance = distance;
-            continue;
-        }
-        // 其它行色块坐标处理
-        const auto last_left = pointsEdgeLeft.back().y;
-        const auto last_right = pointsEdgeRight.back().y;
-        find_connected_blocks(blocks, last_left, last_right, connected_blocks);
-
-        if (connected_blocks.empty())
-            break; // 如果没有发现联通色块，则图像搜索完成，结束任务
-
-        if (connected_blocks.size() == 1) {
-            // 只存在单个色块，正常情况，提取边缘信息
-            const auto [left, right] = connected_blocks.front();
-
-            if (widthAt(r, left, right) < minRoadWidth) {
-                break; // 路面已经收窄到不可信，结束搜索
-            }
-
-            appendEdge(r, left, right);
-            spurroadEnabled = false;
-            lastDistance = distance;
-            continue;
-        }
-
-        // 存在多个色块，则需要择优处理：选取与上一行最近的色块
-        const auto [left, right] =
-            selectClosestBlock(connected_blocks, last_left, last_right);
-        if (widthAt(r, left, right) < minRoadWidth)
-            continue;
-        appendEdge(r, left, right);
-        lastDistance = distance;
-
-        //-------------------------------<岔路信息提取>----------------------------------------
-        if (!spurroadEnabled) {
-            spurroad.emplace_back(r, connected_blocks[0].second);
-            spurroadEnabled = true;
-        }
-        //------------------------------------------------------------------------------------
-    }
-
-    stdevLeft = stdevEdgeCal(pointsEdgeLeft); // 计算边缘方差
-    stdevRight = stdevEdgeCal(pointsEdgeRight);
-}
-
 void find_white_blocks(const Mat &binary, int row, Blocks &blocks) {
-    blocks.resize(0);
+    blocks.clear();
     bool found_white = false;
     int white_col_start = 0;
     for (int c = 0; c < binary.cols; ++c) {
@@ -143,41 +29,41 @@ void find_white_blocks(const Mat &binary, int row, Blocks &blocks) {
                 found_white = true;
                 white_col_start = c;
             }
-        } else {
-            if (found_white) {
-                found_white = false;
-                blocks.push_back(make_pair(white_col_start, c - 1));
-            }
+        } else if (found_white) {
+            found_white = false;
+            blocks.emplace_back(white_col_start, c - 1);
         }
     }
-    if (found_white) {
-        blocks.push_back(make_pair(white_col_start, binary.cols - 1));
-    }
+    if (found_white)
+        blocks.emplace_back(white_col_start, binary.cols - 1);
 }
 
-void find_connected_blocks(const Blocks blocks, const int last_left,
-                           const int last_right, Blocks &connected_blocks) {
-    connected_blocks.resize(0);
-    for (const auto &block : blocks) { // 上下行色块的连通性判断
-        int g_cover = std::min(block.second, last_right) -
-                      std::max(block.first, last_left);
-        if (g_cover >= 0) {
+/**
+ * @brief 和上一行的边缘区间有重叠的色块，才算同一块路面
+ */
+void find_connected_blocks(const Blocks &blocks, int last_left, int last_right,
+                           Blocks &connected_blocks) {
+    connected_blocks.clear();
+    for (const auto &block : blocks) {
+        const int cover = std::min(block.second, last_right) -
+                          std::max(block.first, last_left);
+        if (cover >= 0)
             connected_blocks.push_back(block);
-        }
     }
 }
 
+/**
+ * @brief 多个色块时，取中心与上一行最近的那个
+ */
 pair<int, int> selectClosestBlock(const Blocks &connected_blocks, int last_left,
                                   int last_right) {
     const int prevCenter = last_left + last_right;
-    int bestIdx = 0;
-    int bestDist = abs(connected_blocks[bestIdx].first +
-                       connected_blocks[bestIdx].second - prevCenter);
-
+    size_t bestIdx = 0;
+    int bestDist = std::abs(connected_blocks[0].first +
+                            connected_blocks[0].second - prevCenter);
     for (size_t i = 1; i < connected_blocks.size(); ++i) {
-        const auto dist = abs(connected_blocks[i].first +
-                              connected_blocks[i].second - prevCenter);
-
+        const int dist = std::abs(connected_blocks[i].first +
+                                  connected_blocks[i].second - prevCenter);
         if (dist < bestDist) {
             bestDist = dist;
             bestIdx = i;
@@ -186,33 +72,104 @@ pair<int, int> selectClosestBlock(const Blocks &connected_blocks, int last_left,
     return connected_blocks[bestIdx];
 }
 
-/**
- * @brief 显示赛道线识别结果
- *
- * @param img 需要叠加显示的图像
- */
-void Track::drawImage(Mat &img) {
-    for (size_t i = 0; i < pointsEdgeLeft.size(); i++) {
-        circle(img, Point(pointsEdgeLeft[i].y, pointsEdgeLeft[i].x), 2,
-               Scalar(0, 255, 0), -1); // 绿色点
-    }
-    for (size_t i = 0; i < pointsEdgeRight.size(); i++) {
-        circle(img, Point(pointsEdgeRight[i].y, pointsEdgeRight[i].x), 2,
-               Scalar(0, 255, 255), -1); // 黄色点
-    }
+} // namespace
 
-    for (size_t i = 0; i < spurroad.size(); i++) {
-        circle(img, Point(spurroad[i].y, spurroad[i].x), 3, Scalar(0, 0, 255),
-               -1); // 红色点
-    }
+void track_identify_from_bin(const Mat &bin_img, Camera &camera,
+                             vector<Point2i> &left_edge_points,
+                             vector<Point2i> &right_edge_points) {
+    left_edge_points.clear();
+    right_edge_points.clear();
 
-    putText(img, to_string(stdevRight), Point(img.cols - 100, img.rows - 50),
-            FONT_HERSHEY_TRIPLEX, 0.3, Scalar(0, 0, 255), 1, LINE_AA);
-    putText(img, to_string(stdevLeft), Point(20, img.rows - 50),
-            FONT_HERSHEY_TRIPLEX, 0.3, Scalar(0, 0, 255), 1, LINE_AA);
+    // 图像坐标(列,行) -> 地面坐标(米)，X 右正左负、Y 前正后负
+    const auto ground = [&](int row, int col) {
+        return camera.image_to_ground({float(col), float(row)});
+    };
+    // 行中心处的纵向距离：同一行上各列的距离差可以忽略
+    const auto distanceAt = [&](int row) {
+        return float(ground(row, bin_img.cols / 2).y);
+    };
+    // 同一行上左右边界的实际横向间距，就是色块在路面上的宽度
+    const auto widthAt = [&](int row, int left, int right) {
+        return float(std::fabs(ground(row, right).x - ground(row, left).x));
+    };
+
+    bool isSearchingFirstRow = true; // 还没找到最下面那行有效路面
+    float lastDistance = 0;
+
+    auto appendEdge = [&](int row, int left, int right) {
+        left_edge_points.emplace_back(row, left);
+        right_edge_points.emplace_back(row, right);
+    };
+
+    Blocks blocks, connected_blocks;
+    for (int r = bin_img.rows - 1; r > 0; r -= 2) {
+        const float distance = distanceAt(r);
+        // 单应缺失、或者已经越过最远搜索距离，就没有可用的地面信息了
+        if (!std::isfinite(distance) || distance > TRACK_MAX_DISTANCE)
+            break;
+        if (distance < TRACK_MIN_DISTANCE)
+            continue;
+
+        //  开始识别赛道左右边缘
+        find_white_blocks(bin_img, r, blocks);
+        if (blocks.empty()) {
+            // 只桥接窄的缺失带，缺口超过 TRACK_MAX_GAP_DISTANCE 说明赛道结束了
+            if (!isSearchingFirstRow &&
+                distance - lastDistance > TRACK_MAX_GAP_DISTANCE)
+                break;
+            continue;
+        }
+
+        if (isSearchingFirstRow) {
+            const auto widest = std::max_element(
+                blocks.begin(), blocks.end(), [](const auto &a, const auto &b) {
+                    return (a.second - a.first) < (b.second - b.first);
+                });
+            if (widthAt(r, widest->first, widest->second) < TRACK_MIN_WIDTH)
+                continue; // 还不够宽，继续往上找起始行
+            appendEdge(r, widest->first, widest->second);
+            isSearchingFirstRow = false;
+            lastDistance = distance;
+            continue;
+        }
+
+        // 其它行色块坐标处理
+        const int last_left = left_edge_points.back().y;
+        const int last_right = right_edge_points.back().y;
+        find_connected_blocks(blocks, last_left, last_right, connected_blocks);
+        if (connected_blocks.empty())
+            break; // 没有联通色块，图像搜索完成
+
+        if (connected_blocks.size() == 1) {
+            // 只存在单个色块，正常情况，提取边缘信息
+            const auto [left, right] = connected_blocks.front();
+            if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
+                break; // 路面已经收窄到不可信，结束搜索
+            appendEdge(r, left, right);
+            lastDistance = distance;
+            continue;
+        }
+
+        // 存在多个色块，则需要择优处理：选取与上一行最近的色块
+        const auto [left, right] =
+            selectClosestBlock(connected_blocks, last_left, last_right);
+        if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
+            continue;
+        appendEdge(r, left, right);
+        lastDistance = distance;
+    }
+}
+
+void track_draw_result(const vector<Point2i> &left_edge_points,
+                       const vector<Point2i> &right_edge_points, Mat &result) {
+    for (const auto &p : left_edge_points)
+        circle(result, Point(p.y, p.x), 2, Scalar(0, 255, 0), -1); // 绿色点
+    for (const auto &p : right_edge_points)
+        circle(result, Point(p.y, p.x), 2, Scalar(0, 255, 255), -1); // 黄色点
 }
 
 /**
+ * Hint: DEAD CODE
  * @brief 边缘斜率方差计算
  *
  * @param v_edge 边缘点集（x=行, y=列）

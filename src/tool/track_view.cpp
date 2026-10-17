@@ -1,22 +1,17 @@
-/** Track following with validated boundaries, adaptive speed and latched stops.
- */
 #include "camera.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
 #include "tools.hpp"
 #include "track.hpp"
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <csignal>
 #include <deque>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -25,183 +20,78 @@
 #include <vector>
 
 using cv::Mat;
+using std::atomic;
+using std::atomic_bool;
 using std::cerr;
 using std::cout;
+using std::deque;
 using std::jthread;
 using std::make_unique;
+using std::mutex;
+using std::ref;
 using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
 using std::chrono::duration;
+using std::chrono::duration_cast;
+using std::chrono::milliseconds;
 
 using Clock = std::chrono::steady_clock;
 
-struct TrackviewConfig {
-    float cruiseSpeed = 0.25f, maxSpeed = 1.50f, minSpeed = 0.05f;
-    float curveSpeed = 0.15f, degradedSpeed = 0.12f, acceleration = 0.30f;
-    float deceleration = 0.60f, qualityDeceleration = 1.20f;
-    float curveStart = 0.20f, qualityRecoverTime = 0.30f;
-    int curveLookaheadRow = 10;
-    float maxSingleFraction = 0.35f;
-    float runP1 = 2.2f, runP2 = 0.007f, turnD = 3.5f;
-    float referenceDt = 1.f / 30.f, derivativeFilter = 0.08f;
-    float maxErrorRate = 960.f, highSpeedGain = 1.f;
-    float lostTimeout = 0.20f, recoverTime = 0.25f, maxFrameGap = 0.25f;
-    float widthAlpha = 0.1f;
-    int borderMargin = 3, minPoints = 8, minSpan = 30;
-    int minWidth = 30, maxWidth = 300;
-    // 识别门限用地面坐标（米），见 Track::handle；上面的像素量（borderMargin/
-    // minWidth/maxWidth/minSpan/minPoints/curveLookaheadRow/maxErrorRate）
-    // 按 320x240 参考分辨率标定，AutoPilot 会按实际帧尺寸换算成原生像素运行
-    float minDistance = 0.f, maxDistance = 1.20f;
-    float minRoadWidth = 0.20f, maxGapDistance = 0.05f;
-    int commandTimeoutMs = 250, binary = -1;
-
-    void validate() const {
-        auto positive = [](float x) { return std::isfinite(x) && x > 0; };
-        if (!positive(cruiseSpeed) || !positive(maxSpeed) || maxSpeed > 1.5f ||
-            !positive(minSpeed) || minSpeed > cruiseSpeed ||
-            cruiseSpeed > maxSpeed || !positive(curveSpeed) ||
-            curveSpeed > maxSpeed || !positive(degradedSpeed) ||
-            degradedSpeed > maxSpeed || !positive(maxSingleFraction) ||
-            maxSingleFraction >= 1 || !positive(acceleration) ||
-            acceleration > 2 || !positive(runP1) || runP1 > 20 ||
-            !positive(deceleration) || deceleration > 5 ||
-            !positive(qualityDeceleration) || qualityDeceleration > 5 ||
-            !std::isfinite(curveStart) || curveStart < 0 ||
-            curveStart >= 0.95f || !std::isfinite(qualityRecoverTime) ||
-            qualityRecoverTime < 0 || qualityRecoverTime > 5 ||
-            curveLookaheadRow < 0 || curveLookaheadRow > 200 ||
-            !std::isfinite(runP2) || runP2 < 0 || runP2 > 1 ||
-            !std::isfinite(turnD) || turnD < 0 || turnD > 30 ||
-            !positive(referenceDt) || referenceDt > 0.1f ||
-            !positive(derivativeFilter) || derivativeFilter > 1 ||
-            !positive(maxErrorRate) || maxErrorRate > 5000 ||
-            !positive(highSpeedGain) || highSpeedGain > 2 ||
-            !positive(lostTimeout) || lostTimeout > 1 ||
-            !positive(recoverTime) || recoverTime > 5 ||
-            !positive(maxFrameGap) || maxFrameGap > 1 ||
-            !positive(widthAlpha) || widthAlpha > 1 || borderMargin < 1 ||
-            borderMargin > 20 || minPoints < 5 || minPoints > 100 ||
-            minSpan < 10 || minSpan > 200 || minWidth < 10 ||
-            maxWidth <= minWidth || maxWidth >= 320 || minDistance < 0 ||
-            maxDistance <= minDistance || maxDistance > 2 ||
-            !positive(minRoadWidth) || minRoadWidth > 1 ||
-            !positive(maxGapDistance) || maxGapDistance > 0.5f ||
-            commandTimeoutMs < 100 || commandTimeoutMs > 1000 || binary < -1 ||
-            binary > 255)
-            throw std::invalid_argument(
-                "Invalid trackview configuration values");
-    }
-    void load(const string &path, bool required = false) {
-        std::ifstream file(path);
-        if (!file) {
-            if (required)
-                throw std::runtime_error("Cannot read config: " + path);
-            validate();
-            return;
-        }
-        nlohmann::json j;
-        file >> j;
-        if (!j.is_object())
-            throw std::invalid_argument("Config must be a JSON object");
-        // Reject spelling mistakes rather than silently ignoring a speed
-        // setting.
-        const auto known = toJson();
-        for (auto it = j.begin(); it != j.end(); ++it)
-            if (!known.contains(it.key()) && it.key() != "mixedSpeed")
-                throw std::invalid_argument("Unknown config key: " + it.key());
-#define TV_READ(name)                                                          \
-    if (j.contains(#name))                                                     \
-    j.at(#name).get_to(name)
-        TV_READ(cruiseSpeed);
-        TV_READ(maxSpeed);
-        TV_READ(minSpeed);
-        TV_READ(curveSpeed);
-        TV_READ(degradedSpeed);
-        TV_READ(acceleration);
-        TV_READ(deceleration);
-        TV_READ(qualityDeceleration);
-        TV_READ(curveStart);
-        TV_READ(qualityRecoverTime);
-        TV_READ(curveLookaheadRow);
-        TV_READ(maxSingleFraction);
-        // Accept v4 configuration files without retaining their extra speed
-        // cap.
-        if (j.contains("mixedSpeed"))
-            std::cerr
-                << "[Config] mixedSpeed ignored; healthy MIXED uses limit.\n";
-        TV_READ(runP1);
-        TV_READ(runP2);
-        TV_READ(turnD);
-        TV_READ(referenceDt);
-        TV_READ(derivativeFilter);
-        TV_READ(maxErrorRate);
-        TV_READ(highSpeedGain);
-        TV_READ(lostTimeout);
-        TV_READ(recoverTime);
-        TV_READ(maxFrameGap);
-        TV_READ(widthAlpha);
-        TV_READ(borderMargin);
-        TV_READ(minPoints);
-        TV_READ(minSpan);
-        TV_READ(minWidth);
-        TV_READ(maxWidth);
-        TV_READ(minDistance);
-        TV_READ(maxDistance);
-        TV_READ(minRoadWidth);
-        TV_READ(maxGapDistance);
-        TV_READ(commandTimeoutMs);
-        TV_READ(binary);
-#undef TV_READ
-        validate();
-    }
-    nlohmann::json toJson() const {
-        return {{"cruiseSpeed", cruiseSpeed},
-                {"maxSpeed", maxSpeed},
-                {"minSpeed", minSpeed},
-                {"curveSpeed", curveSpeed},
-                {"degradedSpeed", degradedSpeed},
-                {"acceleration", acceleration},
-                {"deceleration", deceleration},
-                {"qualityDeceleration", qualityDeceleration},
-                {"curveStart", curveStart},
-                {"qualityRecoverTime", qualityRecoverTime},
-                {"curveLookaheadRow", curveLookaheadRow},
-                {"maxSingleFraction", maxSingleFraction},
-                {"runP1", runP1},
-                {"runP2", runP2},
-                {"turnD", turnD},
-                {"referenceDt", referenceDt},
-                {"derivativeFilter", derivativeFilter},
-                {"maxErrorRate", maxErrorRate},
-                {"highSpeedGain", highSpeedGain},
-                {"lostTimeout", lostTimeout},
-                {"recoverTime", recoverTime},
-                {"maxFrameGap", maxFrameGap},
-                {"widthAlpha", widthAlpha},
-                {"borderMargin", borderMargin},
-                {"minPoints", minPoints},
-                {"minSpan", minSpan},
-                {"minWidth", minWidth},
-                {"maxWidth", maxWidth},
-                {"minDistance", minDistance},
-                {"maxDistance", maxDistance},
-                {"minRoadWidth", minRoadWidth},
-                {"maxGapDistance", maxGapDistance},
-                {"commandTimeoutMs", commandTimeoutMs},
-                {"binary", binary}};
-    }
-};
+// 像素量是 640x480 口径；识别门限是地面坐标（米）。
+namespace cfg {
+// 速度 (m/s)
+constexpr float kCruiseSpeed = 0.25f; // 默认巡航
+constexpr float kMaxSpeed = 1.50f;    // 上限
+constexpr float kMinSpeed = 0.05f;
+constexpr float kCurveSpeed = 0.15f;    // 弯道限速
+constexpr float kDegradedSpeed = 0.12f; // 单边/低置信度限速
+constexpr float kAcceleration = 0.30f;
+constexpr float kDeceleration = 0.60f;
+constexpr float kQualityDeceleration = 1.20f;
+constexpr float kReferenceDt = 1.f / 30.f; // 无帧率信息时的 dt
+constexpr float kMaxFrameGap = 0.25f;      // 超过按丢帧处理
+constexpr float kLostTimeout = 0.20f;      // 丢线多久判定 LOST
+constexpr float kRecoverTime = 0.25f;      // 稳定多久才允许进 AUTO
+constexpr float kQualityRecoverTime = 0.30f;
+// 转向：servo = mid + gain*(err*kRunP1 + err^2*kRunP2 + d*kTurnD)，err
+// 是原生像素
+constexpr float kRunP1 = 1.10f;
+constexpr float kRunP2 = 0.00175f;
+constexpr float kTurnD = 1.75f;
+constexpr float kDerivativeFilter = 0.08f;
+constexpr float kMaxErrorRate = 1920.f; // 偏差变化率上限 (px/s)
+constexpr float kHighSpeedGain = 1.f;
+constexpr float kCurveStart = 0.20f;        // severity 超过它开始减速
+constexpr float kMaxSingleFraction = 0.35f; // 单边点占比上限
+// 路径判定（原生像素）
+constexpr int kBorderMargin = 6; // 图像左右边界余量
+constexpr int kMinPoints = 16;   // 至少多少行才算可信路径
+constexpr int kMinSpan = 60;     // 中心线最小纵向跨度
+constexpr int kMinWidth = 60;    // 双边路宽的合理范围
+constexpr int kMaxWidth = 600;
+constexpr int kCurveLookaheadRow = 20; // 速度预判用的近处行
+constexpr float kWidthAlpha = 0.1f;    // 宽度 profile 学习率
+constexpr int kWidthWindow = 24;       // 单边补线时宽度插值的行窗口(±)
+constexpr float kJumpLimitBase = 20.f; // 相邻行中心跳变上限
+constexpr float kJumpLimitPerRow = 6.f;
+constexpr float kStraightHeading = 30.f; // 学宽度要求的接近直道
+constexpr float kCenterGate = 40.f;      // 学宽度要求的居中范围
+constexpr float kWidthLearnStep = 40.f;  // profile 允许的偏差下限
+constexpr float kWidthPendingStep = 20.f;
+constexpr float kSeverityScale = 130.f; // severity 归一化尺度
+// 其它
+constexpr int kCommandTimeoutMs = 250;
+} // namespace cfg
 // Main thread alone owns HighGUI. Controller never waits for network rendering.
 class TrackviewDisplay {
-    std::mutex imageMutex, keyMutex;
-    cv::Mat latestImage, latestBinary;
-    std::deque<int> keys;
-    std::atomic_bool emergency{false};
-    std::atomic<long long> progressMs{0};
+    mutex imageMutex, keyMutex;
+    Mat latestImage, latestBinary;
+    deque<int> keys;
+    atomic_bool emergency{false};
+    atomic<long long> progressMs{0};
     static long long clockMs() {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
+        return duration_cast<milliseconds>(
                    std::chrono::steady_clock::now().time_since_epoch())
             .count();
     }
@@ -271,47 +161,26 @@ class AutoPilot {
         double time = -1;
         int observations = 0, pendingObservations = 0;
     };
-    TrackviewConfig config;
+    // 运行时可调的限速（键盘 [ ] , . 修改），初值来自 cfg
+    float curveLimit = cfg::kCurveSpeed;
+    float qualityLimit = cfg::kDegradedSpeed;
     int imageCols = IMAGE_COL, imageRows = IMAGE_ROW; // 实际帧尺寸
-    float refScale = 1.f;      // 实际分辨率 / 320x240 参考分辨率
-    std::vector<Width> widths; // 逐行宽度，原生像素
+    std::vector<Width> widths;                        // 逐行宽度，原生像素
     float filteredDerivative = 0, previousError = 0, commandedSpeed = 0;
     double now = 0, missingTime = 0, stableTime = 0;
     double qualityGoodTime = 0;
     bool qualityRestricted = false;
     bool hadPath = false;
 
-    // 配置里的像素量按 320x240（IMAGE_COL/IMAGE_ROW）标定，这里按实际帧宽换算成
-    // 原生像素，并把增益折算成原生像素口径，保证同样的横向偏差给出同样的舵机输出。
-    void scaleToFrame() {
-        refScale = float(imageCols) / IMAGE_COL;
-        if (refScale == 1.f)
-            return;
-        config.borderMargin = int(std::lround(config.borderMargin * refScale));
-        config.minWidth = int(std::lround(config.minWidth * refScale));
-        config.maxWidth = int(std::lround(config.maxWidth * refScale));
-        config.minSpan = int(std::lround(config.minSpan * refScale));
-        config.minPoints = int(std::lround(config.minPoints * refScale));
-        config.curveLookaheadRow =
-            int(std::lround(config.curveLookaheadRow * refScale));
-        config.maxErrorRate *= refScale;
-        // error 变成 refScale 倍：一次项除 refScale，二次项除平方，微分项也除
-        config.runP1 /= refScale;
-        config.runP2 /= refScale * refScale;
-        config.turnD /= refScale;
-    }
-    // 按 320x240 标定的像素常量换算到原生像素
-    float px(float reference) const { return reference * refScale; }
-
     bool trusted(const Point2i &p) const {
-        return p.x >= 0 && p.x < imageRows && p.y > config.borderMargin &&
-               p.y < imageCols - 1 - config.borderMargin;
+        return p.x >= 0 && p.x < imageRows && p.y > cfg::kBorderMargin &&
+               p.y < imageCols - 1 - cfg::kBorderMargin;
     }
     float widthAt(int row) const {
         // Interpolate local observations only: no constant-width extrapolation.
         int lower = -1, upper = -1;
-        for (int r = std::max(0, row - int(px(12.f)));
-             r <= std::min(imageRows - 1, row + int(px(12.f))); ++r) {
+        for (int r = max(0, row - cfg::kWidthWindow);
+             r <= min(imageRows - 1, row + cfg::kWidthWindow); ++r) {
             const auto &w = widths[r];
             // Stationary time does not change camera perspective or track
             // width. Contradictory trusted observations suspend a row until
@@ -360,11 +229,8 @@ class AutoPilot {
     bool valid = false, ready = false, lost = false, degraded = false;
     WeightMode weightMode = WeightMode::FarFull;
 
-    explicit AutoPilot(const TrackviewConfig &cfg = {},
-                       int frameCols = IMAGE_COL, int frameRows = IMAGE_ROW)
-        : config(cfg), imageCols(frameCols), imageRows(frameRows) {
-        config.validate();
-        scaleToFrame();
+    explicit AutoPilot(int frameCols = IMAGE_COL, int frameRows = IMAGE_ROW)
+        : imageCols(frameCols), imageRows(frameRows) {
         widths.assign(imageRows, Width{});
     }
     void cycleWeight() { weightMode = WeightMode((int(weightMode) + 1) % 3); }
@@ -378,34 +244,33 @@ class AutoPilot {
     float singleFraction() const {
         return float(singlePoints) / std::max(dualPoints + singlePoints, 1);
     }
-    float curveSpeed() const { return config.curveSpeed; }
-    float degradedSpeed() const { return config.degradedSpeed; }
+    float curveSpeed() const { return curveLimit; }
+    float degradedSpeed() const { return qualityLimit; }
     void setCurveSpeed(float value) {
         if (!std::isfinite(value))
             throw std::invalid_argument("Invalid curve speed");
-        config.curveSpeed = std::clamp(value, config.minSpeed, config.maxSpeed);
+        curveLimit = std::clamp(value, cfg::kMinSpeed, cfg::kMaxSpeed);
     }
     void setDegradedSpeed(float value) {
         if (!std::isfinite(value))
             throw std::invalid_argument("Invalid degraded speed");
-        config.degradedSpeed =
-            std::clamp(value, config.minSpeed, config.maxSpeed);
+        qualityLimit = std::clamp(value, cfg::kMinSpeed, cfg::kMaxSpeed);
     }
     float qualitySpeedLimit() const {
         if (!valid || !ready || lost)
             return 0;
         if (qualityRestricted || degraded || confidence < 0.65f)
-            return config.degradedSpeed;
+            return qualityLimit;
         // Healthy mixed paths share the cruise limit; no separate mixed-speed
         // cap.
-        return config.maxSpeed;
+        return cfg::kMaxSpeed;
     }
     const char *qualityLimitReason() const {
         if (!valid || !ready || lost)
             return "PATH_WAIT";
         if (degraded)
-            return singleFraction() > config.maxSingleFraction ? "SINGLE_SHARE"
-                                                               : "REJECT_SHARE";
+            return singleFraction() > cfg::kMaxSingleFraction ? "SINGLE_SHARE"
+                                                              : "REJECT_SHARE";
         if (confidence < 0.65f)
             return "LOW_QUALITY";
         if (qualityRestricted)
@@ -422,7 +287,7 @@ class AutoPilot {
     void update(const std::vector<Point2i> &left,
                 const std::vector<Point2i> &right, float dt,
                 float previousSpeed = 0) {
-        if (!std::isfinite(dt) || dt <= 0 || dt > config.maxFrameGap) {
+        if (!std::isfinite(dt) || dt <= 0 || dt > cfg::kMaxFrameGap) {
             valid = ready = false;
             lost = true;
             centerEdge.clear();
@@ -463,7 +328,7 @@ class AutoPilot {
             float c = 0, w = r - l;
             bool dual = lOk && rOk;
             if (dual) {
-                if (w < config.minWidth || w > config.maxWidth) {
+                if (w < cfg::kMinWidth || w > cfg::kMaxWidth) {
                     ++rejectedPoints;
                     continue;
                 }
@@ -483,7 +348,8 @@ class AutoPilot {
             if (c < 0 || c >= imageCols ||
                 (previousRow >= 0 &&
                  std::fabs(c - previousCenter) >
-                     px(10.f) + px(3.f) * (previousRow - row))) {
+                     cfg::kJumpLimitBase +
+                         cfg::kJumpLimitPerRow * (previousRow - row))) {
                 ++rejectedPoints;
                 continue;
             }
@@ -498,9 +364,9 @@ class AutoPilot {
         }
         if (raw.empty())
             pathIssue = missingWidthPoints ? "WIDTH_UNAVAILABLE" : "NO_POINTS";
-        else if (raw.size() < size_t(config.minPoints))
+        else if (raw.size() < size_t(cfg::kMinPoints))
             pathIssue = "TOO_FEW_POINTS";
-        else if (raw.front().x - raw.back().x < config.minSpan)
+        else if (raw.front().x - raw.back().x < cfg::kMinSpan)
             pathIssue = "SPAN_SHORT";
         else if (raw.front().x < imageRows * 0.45f)
             pathIssue = "NEAR_MISSING";
@@ -510,7 +376,7 @@ class AutoPilot {
         // A few reconstructed rows are normal when a road edge leaves the
         // image. Degrade by their share of accepted centers, not their mere
         // presence.
-        degraded = singleFraction() > config.maxSingleFraction ||
+        degraded = singleFraction() > cfg::kMaxSingleFraction ||
                    rejectedPoints > int(rows.size() / 3);
         centerEdge.clear();
         if (!valid) {
@@ -521,7 +387,7 @@ class AutoPilot {
             qualityGoodTime = 0;
             rawSeverity = severity = curveHeading = 0;
             curveCause = "NONE";
-            lost = missingTime >= config.lostTimeout;
+            lost = missingTime >= cfg::kLostTimeout;
             // Stop speed on the first bad frame; hold steering briefly, then
             // center.
             commandedSpeed = speedTarget = 0;
@@ -533,7 +399,7 @@ class AutoPilot {
         missingTime = 0;
         lost = false;
         stableTime += dt;
-        ready = stableTime >= config.recoverTime;
+        ready = stableTime >= cfg::kRecoverTime;
         confidence = float(dualPoints + 0.6f * singlePoints) /
                      std::max<size_t>(rows.size(), 1);
         if (degraded || confidence < 0.65f) {
@@ -541,7 +407,7 @@ class AutoPilot {
             qualityGoodTime = 0;
         } else if (qualityRestricted) {
             qualityGoodTime += dt;
-            if (qualityGoodTime >= config.qualityRecoverTime)
+            if (qualityGoodTime >= cfg::kQualityRecoverTime)
                 qualityRestricted = false;
         }
         for (size_t i = 0; i < raw.size(); ++i) {
@@ -569,12 +435,12 @@ class AutoPilot {
         // or the original heading used to qualify width-learning observations.
         const auto end = std::find_if(
             centerEdge.begin(), centerEdge.end(),
-            [&](const Point2i &p) { return p.x < config.curveLookaheadRow; });
+            [&](const Point2i &p) { return p.x < cfg::kCurveLookaheadRow; });
         const size_t count = size_t(std::distance(centerEdge.begin(), end));
         curveWindowFallback =
-            count < size_t(config.minPoints) ||
+            count < size_t(cfg::kMinPoints) ||
             centerEdge.front().x - centerEdge[count ? count - 1 : 0].x <
-                config.minSpan;
+                cfg::kMinSpan;
         curveHeading = heading;
         if (!curveWindowFallback) {
             const size_t section = std::max<size_t>(1, count / 4);
@@ -588,17 +454,18 @@ class AutoPilot {
         // Learn perspective width only from a centered, nearly straight trusted
         // path. Curves and unusable fragments must not overwrite the reference
         // profile.
-        if (dualPoints >= config.minPoints && std::fabs(heading) < px(15.f) &&
-            std::abs(center - imageCols / 2) < px(20.f)) {
+        if (dualPoints >= cfg::kMinPoints &&
+            fabs(heading) < cfg::kStraightHeading &&
+            std::abs(center - imageCols / 2) < cfg::kCenterGate) {
             for (const auto &[row, w] : widthCandidates) {
                 auto &sample = widths[row];
                 if (sample.observations == 0) {
                     sample.value = w;
                     sample.time = now;
                     sample.observations = 1;
-                } else if (std::fabs(w - sample.value) <=
-                           std::max(px(20.f), sample.value * 0.25f)) {
-                    sample.value += config.widthAlpha * (w - sample.value);
+                } else if (fabs(w - sample.value) <=
+                           max(cfg::kWidthLearnStep, sample.value * 0.25f)) {
+                    sample.value += cfg::kWidthAlpha * (w - sample.value);
                     sample.time = now;
                     sample.observations =
                         std::min(sample.observations + 1, 100);
@@ -609,7 +476,8 @@ class AutoPilot {
                     // reconstruction meanwhile.
                     if (sample.pendingObservations == 0 ||
                         std::fabs(w - sample.pendingValue) >
-                            std::max(px(10.f), sample.pendingValue * 0.1f)) {
+                            max(cfg::kWidthPendingStep,
+                                sample.pendingValue * 0.1f)) {
                         sample.pendingValue = w;
                         sample.pendingObservations = 1;
                     } else {
@@ -626,25 +494,25 @@ class AutoPilot {
             }
         }
         error = float(center) - imageCols / 2.f;
-        error = std::clamp(error, previousError - config.maxErrorRate * dt,
-                           previousError + config.maxErrorRate * dt);
+        error = std::clamp(error, previousError - cfg::kMaxErrorRate * dt,
+                           previousError + cfg::kMaxErrorRate * dt);
         const float derivative =
-            hadPath ? (error - previousError) * config.referenceDt / dt : 0;
-        const float alpha = dt / (config.derivativeFilter + dt);
+            hadPath ? (error - previousError) * cfg::kReferenceDt / dt : 0;
+        const float alpha = dt / (cfg::kDerivativeFilter + dt);
         filteredDerivative += alpha * (derivative - filteredDerivative);
         const float speedRatio =
-            std::clamp(std::fabs(previousSpeed) / config.maxSpeed, 0.f, 1.f);
-        const float gain = 1 + (config.highSpeedGain - 1) * speedRatio;
-        const float p = config.runP1 + std::fabs(error) * config.runP2;
+            std::clamp(std::fabs(previousSpeed) / cfg::kMaxSpeed, 0.f, 1.f);
+        const float gain = 1 + (cfg::kHighSpeedGain - 1) * speedRatio;
+        const float p = cfg::kRunP1 + std::fabs(error) * cfg::kRunP2;
         servo =
             clampServo(PWMSERVOMID +
-                       gain * (error * p + filteredDerivative * config.turnD));
-        const float e = std::fabs(error) / px(65.f),
-                    h = std::fabs(curveHeading) / px(65.f);
+                       gain * (error * p + filteredDerivative * cfg::kTurnD));
+        const float e = std::fabs(error) / cfg::kSeverityScale,
+                    h = std::fabs(curveHeading) / cfg::kSeverityScale;
         const float s = std::fabs(float(servo) - PWMSERVOMID) / 320.f;
         rawSeverity = std::clamp(std::max({e, h, s}), 0.f, 1.f);
-        severity = std::clamp((rawSeverity - config.curveStart) /
-                                  (1 - config.curveStart),
+        severity = std::clamp((rawSeverity - cfg::kCurveStart) /
+                                  (1 - cfg::kCurveStart),
                               0.f, 1.f);
         curveCause = severity <= 0      ? "NONE"
                      : h >= e && h >= s ? "CURVE_HEADING"
@@ -655,15 +523,14 @@ class AutoPilot {
     }
     float speedFor(float cruise, float dt) {
         if (!std::isfinite(cruise) || !std::isfinite(dt) || dt <= 0 ||
-            dt > config.maxFrameGap || !valid || !ready || lost) {
+            dt > cfg::kMaxFrameGap || !valid || !ready || lost) {
             commandedSpeed = speedTarget = 0;
             speedReason = "PATH_WAIT";
             return 0;
         }
-        const float limit =
-            std::clamp(cruise, config.minSpeed, config.maxSpeed);
+        const float limit = std::clamp(cruise, cfg::kMinSpeed, cfg::kMaxSpeed);
         const float curve =
-            std::min(limit, limit + (config.curveSpeed - limit) * severity);
+            std::min(limit, limit + (curveLimit - limit) * severity);
         const float quality = qualitySpeedLimit();
         speedTarget = std::min(curve, quality);
         speedReason = quality < limit && quality <= curve + 1e-5f
@@ -677,14 +544,14 @@ class AutoPilot {
         const bool qualityBraking = quality < limit && quality <= curve + 1e-5f;
         const float braking =
             qualityBraking
-                ? std::max(config.deceleration, config.qualityDeceleration)
-                : config.deceleration;
+                ? std::max(cfg::kDeceleration, cfg::kQualityDeceleration)
+                : cfg::kDeceleration;
         if (speedTarget < commandedSpeed)
             commandedSpeed =
                 std::max(speedTarget, commandedSpeed - braking * dt);
         else
-            commandedSpeed = std::min(
-                speedTarget, commandedSpeed + config.acceleration * dt);
+            commandedSpeed =
+                std::min(speedTarget, commandedSpeed + cfg::kAcceleration * dt);
         return commandedSpeed;
     }
 };
@@ -711,9 +578,9 @@ struct StopOnExit {
     }
 };
 
-static void drawHud(cv::Mat &image, const AutoPilot &pilot, Mode mode,
-                    bool panic, float cruise, float speed, uint16_t servo,
-                    double fps, bool displaySlow) {
+static void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
+                    float cruise, float speed, uint16_t servo, double fps,
+                    bool displaySlow) {
     for (const auto &p : pilot.centerEdge)
         cv::circle(image, cv::Point(p.y, p.x), 1, cv::Scalar(0, 0, 255), -1);
     int y = 18;
@@ -759,310 +626,228 @@ static void drawHud(cv::Mat &image, const AutoPilot &pilot, Mode mode,
     line("[/]:turn  ,/.:quality  w:weight");
 }
 
-void parse_arguments(int argc, char **argv, string &source, string &configPath,
-                     bool &noControl, bool &headless, bool &replay,
-                     bool &configRequired) {
-    for (int i = 1; i < argc; ++i) {
-        const string arg = argv[i];
-        auto value = [&]() {
-            if (++i >= argc)
-                throw std::invalid_argument("Missing argument for " + arg);
-            return string(argv[i]);
-        };
-        if (arg == "--config") {
-            configPath = value();
-            configRequired = true;
-        } else if (arg == "--replay") {
-            source = value();
-            replay = noControl = true;
-        } else if (arg == "--no-control")
-            noControl = true;
-        else if (arg == "--headless")
-            headless = true;
-        else if (arg == "--help") {
-            std::cout << "trackview [--config trackview.json] [--no-control] "
-                         "[--headless] [--replay video]\n"
-                      << "keys: a=auto/manual  space=stop  +/-=limit  [/]=turn "
-                         ",/.=quality  w=weight  ESC=quit\n"
-                      << "Default MANUAL; replay never opens serial/gamepad.\n";
-            exit(0);
-        } else if (arg.rfind("--", 0) == 0)
-            throw std::invalid_argument("Unknown option: " + arg);
-        else
-            source = arg;
+void driving_thread(Camera &camera, CarControl *car, AutoPilot &pilot,
+                    JoyStick *js, TrackviewDisplay &display,
+                    atomic_bool &joyLost) {
+    float cruise = cfg::kCruiseSpeed, jsSpeed = 0, speed = 0;
+    auto start = Clock::now(), last = start;
+    uint16_t jsServo = PWMSERVOMID;
+    auto mode = Mode::Manual;
+    bool panic = false;
+
+    string stage = "startup";
+    try {
+        while (!stopping.load()) {
+            stage = "before_capture";
+            if (car && car->hasFault())
+                throw std::runtime_error(
+                    "Serial fault or command watchdog timeout");
+            cv::Mat image;
+            stage = "capture";
+            if (!camera.read(image) || image.empty()) {
+                if (car)
+                    car->resetVelocity();
+                throw std::runtime_error("Camera frame unavailable");
+            }
+            stage = "preprocess";
+            cv::Mat bin = camera.binarize(image);
+            stage = "track";
+            std::vector<Point2i> left_edges, right_edges;
+            track_identify_from_bin(bin, camera, left_edges, right_edges);
+            const auto now = Clock::now();
+            stage = "control";
+            auto dt = duration<double>(now - last).count();
+            last = now;
+            if (dt <= 0)
+                dt = cfg::kReferenceDt;
+            pilot.update(left_edges, right_edges, dt, speed);
+            track_draw_result(left_edges, right_edges, image);
+            const uint64_t motionEpoch = car ? car->motionEpoch() : 0;
+            auto toggle = [&]() {
+                if (mode == Mode::Auto) {
+                    mode = Mode::Manual;
+                    jsSpeed = 0;
+                    pilot.resetControl();
+                    cout << "[Mode] MANUAL\n";
+                } else if (pilot.ready && !joyLost &&
+                           (!js || !js->isStopped()) &&
+                           std::fabs(jsSpeed) <= 0.05f) {
+                    if (car && !car->resumeMotion(motionEpoch))
+                        return;
+                    mode = Mode::Auto;
+                    panic = false;
+                    jsSpeed = 0;
+                    pilot.resetControl();
+                    cout << "[Mode] AUTO\n";
+                } else {
+                    if (!pilot.ready)
+                        cout << "[Wait] Lane " << pilot.pathIssue
+                             << "; width rows=" << pilot.learnedWidthRows()
+                             << " missing width=" << pilot.missingWidthPoints
+                             << "; wait for stable trusted path.\n";
+                    else
+                        cout << "[Wait] Release gamepad throttle "
+                                "or reconnect gamepad.\n";
+                }
+            };
+            string stopReason;
+            for (const int key : display.takeKeys()) {
+                if (key == ' ') {
+                    panic = true;
+                    mode = Mode::Manual;
+                    jsSpeed = 0;
+                    pilot.resetControl();
+                    if (car)
+                        car->pauseMotion();
+                    stopReason = "keyboard stop";
+                } else if (key == 'a' || key == 'A')
+                    toggle();
+                else if (key == '+' || key == '=') {
+                    cruise = std::min(cfg::kMaxSpeed, cruise + 0.05f);
+                    cout << "[Set] limit=" << cruise << " m/s\n";
+                } else if (key == '-' || key == '_') {
+                    cruise = std::max(cfg::kMinSpeed, cruise - 0.05f);
+                    cout << "[Set] limit=" << cruise << " m/s\n";
+                } else if (key == '[' || key == ']') {
+                    pilot.setCurveSpeed(pilot.curveSpeed() +
+                                        (key == ']' ? 0.05f : -0.05f));
+                    cout << "[Set] curveSpeed=" << pilot.curveSpeed()
+                         << " m/s\n";
+                } else if (key == ',' || key == '.') {
+                    pilot.setDegradedSpeed(pilot.degradedSpeed() +
+                                           (key == '.' ? 0.05f : -0.05f));
+                    cout << "[Set] degradedSpeed=" << pilot.degradedSpeed()
+                         << " m/s\n";
+                } else if (key == 'w' || key == 'W') {
+                    pilot.cycleWeight();
+                    cout << "[Set] weight=" << pilot.weightName() << '\n';
+                }
+            }
+            // X11 rendering is telemetry, not the control-loop
+            // heartbeat. Keep command watchdog/vision loss independent
+            // of remote UI delay.
+            const auto displayAge = display.ageMs();
+            if (js) {
+                float s = 0;
+                uint16_t sv = PWMSERVOMID;
+                const bool newCommand = js->takeCarControl(s, sv);
+                if (newCommand) {
+                    jsSpeed = s;
+                    jsServo = sv;
+                }
+                if (js->takeSampleOnce())
+                    toggle();
+                js->takeBuzzer();
+                if (js->isStopped() || joyLost) {
+                    if (!panic)
+                        stopReason = "gamepad disconnected; stop latched";
+                    panic = true;
+                    mode = Mode::Manual;
+                    jsSpeed = 0;
+                    pilot.resetControl();
+                } else if (mode == Mode::Auto && newCommand &&
+                           std::fabs(jsSpeed) > 0.05f) {
+                    mode = Mode::Manual;
+                    pilot.resetControl();
+                    cout << "[Mode] MANUAL (gamepad takeover)\n";
+                }
+            }
+            if (mode == Mode::Auto && pilot.lost) {
+                mode = Mode::Manual;
+                panic = true;
+                jsSpeed = 0;
+                pilot.resetControl();
+                stopReason = string("trusted lane lost; stop latched, "
+                                    "press a after recovery; path=") +
+                             pilot.pathIssue;
+            }
+            speed = 0;
+            uint16_t servo = PWMSERVOMID;
+            if (!panic && !stopping) {
+                if (mode == Mode::Auto) {
+                    speed = pilot.speedFor(cruise, dt);
+                    servo = pilot.servo;
+                } else {
+                    speed =
+                        std::clamp(jsSpeed, -cfg::kMaxSpeed, cfg::kMaxSpeed);
+                    servo = jsServo;
+                }
+            }
+            if (car) {
+                if (car->hasFault())
+                    throw std::runtime_error(
+                        "Serial command timeout during processing");
+                car->carControl(speed, servo);
+            }
+            stage = "display";
+            drawHud(image, pilot, mode, panic, cruise, speed, servo, 1 / dt,
+                    displayAge >= 2000);
+            if (!stopReason.empty())
+                cerr << "[Stop] " << stopReason << '\n';
+            display.publish(image, bin);
+        }
+        if (car)
+            car->resetVelocity();
+        cout << "[Stop] "
+             << (stopping.load() ? "signal or UI stop" : "normal exit") << '\n';
+    } catch (const std::exception &e) {
+        if (car) {
+            try {
+                car->latch_stop();
+            } catch (...) {
+            }
+        }
+        if (stopping.load() && !display.failed.load()) {
+            cout << "[Stop] operator requested exit\n";
+        } else {
+            cerr << "[Error] " << e.what() << " (stage=" << stage << ")\n";
+            display.failed = true;
+        }
+    } catch (...) {
+        if (car) {
+            try {
+                car->latch_stop();
+            } catch (...) {
+            }
+        }
+        cerr << "[Error] unexpected driving thread failure (stage=" << stage
+             << ")\n";
+        display.failed = true;
     }
+    display.finished = true;
 }
-int main(int argc, char **argv) {
+int main() {
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
     signal(SIGHUP, onSignal);
-    shared_ptr<CarControl> car;
+    auto car = CarControl::create();
+    if (!car) {
+        cerr << "无法加载串口控制。" << endl;
+        return 1;
+    }
     AutoPilot pilot;
     try {
-        string source = "/dev/video0", configPath = "trackview.json";
-        bool noControl = false, headless = false, replay = false,
-             configRequired = false;
-        parse_arguments(argc, argv, source, configPath, noControl, headless,
-                        replay, configRequired);
-
-        if (!noControl && source.rfind("/dev/video", 0) != 0)
-            throw std::invalid_argument(
-                "Video files require --replay (no vehicle commands)");
-        TrackviewConfig config;
-        config.load(configPath, configRequired);
+        string source = "/dev/video0";
         // Load calibration before opening any vehicle control device.
-        unique_ptr<Camera> camera =
-            config.binary < 0
-                ? make_unique<Camera>(source.c_str())
-                : make_unique<Camera>(source.c_str(), uint8_t(config.binary));
-        // pilot 的控制参数按 320x240 标定，这里把实际帧尺寸交给它换算
-        pilot = AutoPilot(config, camera->cols(), camera->rows());
-        std::atomic_bool joyLost{false}; // Must outlive gamepad callback.
-        std::shared_ptr<JoyStick> js;
-        if (!noControl) {
-            car = CarControl::create();
-            if (!car)
-                throw std::runtime_error(
-                    "Cannot initialize vehicle serial port");
-            car->setCommandTimeout(config.commandTimeoutMs);
-            js = JoyStick::create([&joyLost] { joyLost = true; });
-            if (!js)
-                cerr << "[Warn] No gamepad; use image window keyboard.\n";
+        Camera camera;
+
+        pilot = AutoPilot(camera.cols(), camera.rows());
+
+        atomic_bool joyLost{false}; // Must outlive gamepad callback.
+        car->setCommandTimeout(cfg::kCommandTimeoutMs);
+        auto js = JoyStick::create([&joyLost] { joyLost = true; });
+        if (!js) {
+            cerr << "[Warn] No gamepad; use image window keyboard.\n";
         }
-        Track track;
-        track.minDistance = config.minDistance;
-        track.maxDistance = config.maxDistance;
-        track.minRoadWidth = config.minRoadWidth;
-        track.maxGapDistance = config.maxGapDistance;
-        Mode mode = replay ? Mode::Auto : Mode::Manual;
-        bool panic = false;
-        float cruise = config.cruiseSpeed, jsSpeed = 0, speed = 0;
-        uint16_t jsServo = PWMSERVOMID;
-        auto start = Clock::now(), last = start;
-        const double videoFps = camera->get_capture().get(cv::CAP_PROP_FPS);
-        const float replayDt = (videoFps >= 5 && videoFps <= 120)
-                                   ? float(1 / videoFps)
-                                   : config.referenceDt;
+
         TrackviewDisplay display;
-        cout << "trackview | " << (noControl ? "NO CONTROL" : "MANUAL START")
-             << " | source=" << source << " | frame=" << camera->cols() << "x"
-             << camera->rows() << " | limit=" << cruise << " m/s (max "
-             << config.maxSpeed << ") turn=" << pilot.curveSpeed()
+        cout << "trackview | source=" << source << " | frame=" << camera.cols()
+             << "x" << camera.rows() << " | limit=" << cfg::kCruiseSpeed
+             << " m/s (max " << cfg::kMaxSpeed << ") turn=" << pilot.curveSpeed()
              << " quality=" << pilot.degradedSpeed() << "\n";
-        cout << "  track " << config.minDistance << "-" << config.maxDistance
-             << " m, road>=" << config.minRoadWidth
-             << " m, gap<=" << config.maxGapDistance << " m\n";
-        jthread driving([&] {
-            string stage = "startup";
-            auto lastStatus = Clock::now();
-            try {
-                while (!stopping.load()) {
-                    stage = "before_capture";
-                    if (car && car->hasFault())
-                        throw std::runtime_error(
-                            "Serial fault or command watchdog timeout");
-                    cv::Mat image;
-                    stage = "capture";
-                    if (!camera->read(image) || image.empty()) {
-                        if (car)
-                            car->resetVelocity();
-                        if (replay) {
-                            std::cout << "[Stop] replay finished\n";
-                            break;
-                        }
-                        throw std::runtime_error("Camera frame unavailable");
-                    }
-                    stage = "preprocess";
-                    cv::Mat bin = camera->binarize(image);
-                    stage = "track";
-                    track.handle(*camera, bin);
-                    const auto now = Clock::now();
-                    stage = "control";
-                    float dt =
-                        replay ? replayDt
-                               : float(duration<double>(now - last).count());
-                    last = now;
-                    if (dt <= 0)
-                        dt = config.referenceDt;
-                    pilot.update(track.pointsEdgeLeft, track.pointsEdgeRight,
-                                 dt, speed);
-                    track.drawImage(image);
-                    const uint64_t motionEpoch = car ? car->motionEpoch() : 0;
-                    auto toggle = [&]() {
-                        if (mode == Mode::Auto) {
-                            mode = Mode::Manual;
-                            jsSpeed = 0;
-                            pilot.resetControl();
-                            std::cout << "[Mode] MANUAL\n";
-                        } else if (pilot.ready && !joyLost &&
-                                   (!js || !js->isStopped()) &&
-                                   std::fabs(jsSpeed) <= 0.05f) {
-                            if (car && !car->resumeMotion(motionEpoch))
-                                return;
-                            mode = Mode::Auto;
-                            panic = false;
-                            jsSpeed = 0;
-                            pilot.resetControl();
-                            std::cout << "[Mode] AUTO\n";
-                        } else {
-                            if (!pilot.ready)
-                                std::cout
-                                    << "[Wait] Lane " << pilot.pathIssue
-                                    << "; width rows="
-                                    << pilot.learnedWidthRows()
-                                    << " missing width="
-                                    << pilot.missingWidthPoints
-                                    << "; wait for stable trusted path.\n";
-                            else
-                                std::cout << "[Wait] Release gamepad throttle "
-                                             "or reconnect gamepad.\n";
-                        }
-                    };
-                    string stopReason;
-                    for (const int key : display.takeKeys()) {
-                        if (key == ' ') {
-                            panic = true;
-                            mode = Mode::Manual;
-                            jsSpeed = 0;
-                            pilot.resetControl();
-                            if (car)
-                                car->pauseMotion();
-                            stopReason = "keyboard stop";
-                        } else if (key == 'a' || key == 'A')
-                            toggle();
-                        else if (key == '+' || key == '=') {
-                            cruise = std::min(config.maxSpeed, cruise + 0.05f);
-                            std::cout << "[Set] limit=" << cruise << " m/s\n";
-                        } else if (key == '-' || key == '_') {
-                            cruise = std::max(config.minSpeed, cruise - 0.05f);
-                            std::cout << "[Set] limit=" << cruise << " m/s\n";
-                        } else if (key == '[' || key == ']') {
-                            pilot.setCurveSpeed(pilot.curveSpeed() +
-                                                (key == ']' ? 0.05f : -0.05f));
-                            std::cout
-                                << "[Set] curveSpeed=" << pilot.curveSpeed()
-                                << " m/s\n";
-                        } else if (key == ',' || key == '.') {
-                            pilot.setDegradedSpeed(
-                                pilot.degradedSpeed() +
-                                (key == '.' ? 0.05f : -0.05f));
-                            std::cout << "[Set] degradedSpeed="
-                                      << pilot.degradedSpeed() << " m/s\n";
-                        } else if (key == 'w' || key == 'W') {
-                            pilot.cycleWeight();
-                            std::cout << "[Set] weight=" << pilot.weightName()
-                                      << '\n';
-                        }
-                    }
-                    // X11 rendering is telemetry, not the control-loop
-                    // heartbeat. Keep command watchdog/vision loss independent
-                    // of remote UI delay.
-                    const auto displayAge = headless ? 0LL : display.ageMs();
-                    if (js) {
-                        float s = 0;
-                        uint16_t sv = PWMSERVOMID;
-                        const bool newCommand = js->takeCarControl(s, sv);
-                        if (newCommand) {
-                            jsSpeed = s;
-                            jsServo = sv;
-                        }
-                        if (js->takeSampleOnce())
-                            toggle();
-                        js->takeBuzzer();
-                        if (js->isStopped() || joyLost) {
-                            if (!panic)
-                                stopReason =
-                                    "gamepad disconnected; stop latched";
-                            panic = true;
-                            mode = Mode::Manual;
-                            jsSpeed = 0;
-                            pilot.resetControl();
-                        } else if (mode == Mode::Auto && newCommand &&
-                                   std::fabs(jsSpeed) > 0.05f) {
-                            mode = Mode::Manual;
-                            pilot.resetControl();
-                            std::cout << "[Mode] MANUAL (gamepad takeover)\n";
-                        }
-                    }
-                    if (mode == Mode::Auto && pilot.lost) {
-                        mode = Mode::Manual;
-                        panic = true;
-                        jsSpeed = 0;
-                        pilot.resetControl();
-                        stopReason = string("trusted lane lost; stop latched, "
-                                            "press a after recovery; path=") +
-                                     pilot.pathIssue;
-                    }
-                    speed = 0;
-                    uint16_t servo = PWMSERVOMID;
-                    if (!panic && !stopping) {
-                        if (mode == Mode::Auto) {
-                            speed = pilot.speedFor(cruise, dt);
-                            servo = pilot.servo;
-                        } else {
-                            speed = std::clamp(jsSpeed, -config.maxSpeed,
-                                               config.maxSpeed);
-                            servo = jsServo;
-                        }
-                    }
-                    if (car) {
-                        if (car->hasFault())
-                            throw std::runtime_error(
-                                "Serial command timeout during processing");
-                        car->carControl(speed, servo);
-                    }
-                    stage = "display";
-                    drawHud(image, pilot, mode, panic, cruise, speed, servo,
-                            1 / dt, displayAge >= 2000);
-                    if (!stopReason.empty())
-                        std::cerr << "[Stop] " << stopReason << '\n';
-                    if (!headless)
-                        display.publish(image, bin);
-                    // headless 没有画面，用 1 Hz 的状态行代替
-                    if (headless &&
-                        now - lastStatus >= std::chrono::seconds(1)) {
-                        lastStatus = now;
-                        std::cout
-                            << "[Status] "
-                            << (mode == Mode::Auto ? "AUTO" : "MANUAL")
-                            << " speed=" << speed << " center=" << pilot.center
-                            << " err=" << pilot.error << ' ' << pilot.pathIssue
-                            << '\n';
-                    }
-                }
-                if (car)
-                    car->resetVelocity();
-                std::cout << "[Stop] "
-                          << (stopping.load() ? "signal or UI stop"
-                                              : "normal exit")
-                          << '\n';
-            } catch (const std::exception &e) {
-                if (car) {
-                    try {
-                        car->latch_stop();
-                    } catch (...) {
-                    }
-                }
-                if (stopping.load() && !display.failed.load()) {
-                    std::cout << "[Stop] operator requested exit\n";
-                } else {
-                    std::cerr << "[Error] " << e.what() << " (stage=" << stage
-                              << ")\n";
-                    display.failed = true;
-                }
-            } catch (...) {
-                if (car) {
-                    try {
-                        car->latch_stop();
-                    } catch (...) {
-                    }
-                }
-                std::cerr << "[Error] unexpected driving thread failure (stage="
-                          << stage << ")\n";
-                display.failed = true;
-            }
-            display.finished = true;
-        });
+        jthread driving(driving_thread, ref(camera), car.get(), ref(pilot),
+                        js.get(), ref(display), ref(joyLost));
+
         StopOnExit stopBeforeJoin{car};
         auto lastRender = Clock::now() - std::chrono::milliseconds(100);
         while (!stopping.load() && !display.finished.load()) {
@@ -1071,10 +856,6 @@ int main(int argc, char **argv) {
             if (car && car->hasFault()) {
                 display.failed = true;
                 break;
-            }
-            if (headless) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
             }
             const auto rendered = Clock::now();
             cv::Mat image, bin;
@@ -1104,7 +885,7 @@ int main(int argc, char **argv) {
             }
         }
         driving.join();
-        std::cout << "[Stop] trackview finished.\n";
+        cout << "[Stop] trackview finished.\n";
         return display.failed.load() ? 1 : 0;
     } catch (const std::exception &e) {
         if (car) {
@@ -1113,7 +894,7 @@ int main(int argc, char **argv) {
             } catch (...) {
             }
         }
-        std::cerr << "[Error] " << e.what() << '\n';
+        cerr << "[Error] " << e.what() << '\n';
         return 1;
     } catch (...) {
         if (car) {
@@ -1122,7 +903,7 @@ int main(int argc, char **argv) {
             } catch (...) {
             }
         }
-        std::cerr << "[Error] unexpected exception\n";
+        cerr << "[Error] unexpected exception\n";
         return 1;
     }
 }
