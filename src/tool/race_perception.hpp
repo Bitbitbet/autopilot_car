@@ -1,5 +1,6 @@
 #pragma once
 #include "race_config.hpp"
+#include "race_direction.hpp"
 #include "tools.hpp"
 #include <chrono>
 #include <condition_variable>
@@ -16,6 +17,7 @@ struct RaceSnapshot {
     bool failed=false;
     std::string error;
     cv::Mat image; // 与结果对应的原始推理图像，只读共享，不能用新帧冒充。
+    std::vector<ForkDirectionCheck> directionChecks{};
 };
 inline double raceTime() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -27,6 +29,7 @@ public:
     using Infer=std::function<std::vector<PredictResult>(const cv::Mat&)>;
 private:
     Infer infer;
+    RaceConfig config;
     std::mutex mutex;
     std::condition_variable wake;
     cv::Mat pending;
@@ -46,8 +49,9 @@ private:
                     frame=std::move(pending); captured=pendingTime; sequence=pendingSequence;
                 }
                 auto result=infer(frame);
+                auto checks=config.verifyForkArrows?verifyForkDirections(frame,result):std::vector<ForkDirectionCheck>{};
                 std::lock_guard lock(mutex);
-                latest={sequence,captured,std::move(result),false,{},std::move(frame)};
+                latest={sequence,captured,std::move(result),false,{},std::move(frame),std::move(checks)};
             }
         } catch(const std::exception &e) {
             std::lock_guard lock(mutex); latest.failed=true; latest.error=e.what();
@@ -56,7 +60,7 @@ private:
         }
     }
 public:
-    explicit RacePerception(Infer fn):infer(std::move(fn)),worker([this] { run(); }) {}
+    explicit RacePerception(Infer fn,const RaceConfig &cfg={}):infer(std::move(fn)),config(cfg),worker([this] { run(); }) {}
     ~RacePerception() { { std::lock_guard lock(mutex); stop=true; } wake.notify_all(); worker.join(); }
     void submit(const cv::Mat &image,uint64_t sequence,double captured) {
         auto copy=image.clone();

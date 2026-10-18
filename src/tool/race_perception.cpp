@@ -32,5 +32,5 @@ extern "C" RacePerception *raceCreatePerception(const RaceConfig *input) {
     auto detector=std::make_shared<Detection>(path.string(),config.confidence);
     return new RacePerception([detector](const cv::Mat &frame) {
         detector->inference(frame); return detector->results;
-    });
+    },config);
 }

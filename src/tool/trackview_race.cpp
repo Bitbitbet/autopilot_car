@@ -369,7 +369,7 @@ int main(int argc,char **argv) {
                 for(const auto &d:observation.detections) entries.push_back({{"type",d.type},{"score",d.score},
                     {"x",d.x},{"y",d.y},{"width",d.width},{"height",d.height}});
                 detectionLog<<nlohmann::json({{"frame",observation.sequence},{"captured",observation.captured},
-                    {"detections",entries}}).dump()<<'\n';
+                    {"detections",entries},{"direction_checks",raceDirectionJson(observation)}}).dump()<<'\n';
                 loggedSequence=observation.sequence;
             }
             if(raceFrame%15==0) { raceLog.flush(); detectionLog.flush(); }

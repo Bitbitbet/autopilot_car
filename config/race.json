@@ -23,5 +23,6 @@
   "crossClearTime": 0.25,
   "stopHoldTime": 1.0,
   "gateOpenAspect": 0.75,
-  "modelDirectory": "../res/models/yolov3_mobilenet_v1"
+  "modelDirectory": "../res/models/yolov3_mobilenet_v1",
+  "verifyForkArrows": true
 }

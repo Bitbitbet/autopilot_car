@@ -21,12 +21,13 @@ struct RaceConfig {
     float crossClearTime=0.25f, stopHoldTime=1.f;
     // 基础版不把“目标消失”当作道闸已经抬起，默认需要同一道闸变为竖直。
     float gateOpenAspect=0.75f;
+    bool verifyForkArrows=true; // 对左右岔路类别增加蓝底白箭头几何复核。
     std::string modelDirectory="../res/models/yolov3_mobilenet_v1";
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(RaceConfig,confidence,maxDetectionAge,confirmGap,
         confirmFrames,limitedSpeed,forkSpeed,approachSpeed,directionMemory,
         forkConfirmTime,forkMinTime,forkMaxTime,forkExitTime,cooldown,minBranchWidth,
         minBranchGap,minBranchRows,triggerRow,obstacleRow,clearTime,stopAfterCross,
-        crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,modelDirectory)
+        crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,verifyForkArrows,modelDirectory)
     void validate() const {
         auto range=[](float v,float lo,float hi) { return std::isfinite(v)&&v>=lo&&v<=hi; };
         if(!range(confidence,0.1f,1.f)||!range(maxDetectionAge,0.05f,1.f)||

@@ -15,6 +15,14 @@ inline bool raceBoxValid(const PredictResult &d) {
         d.x>=0&&d.y>=0&&d.width>0&&d.height>0&&d.x<320&&d.y<240&&
         d.width<=320-d.x&&d.height<=240-d.y;
 }
+inline nlohmann::json raceDirectionJson(const RaceSnapshot &s) {
+    nlohmann::json checks=nlohmann::json::array();
+    for(const auto &c:s.directionChecks) checks.push_back({{"raw_type",c.rawType},
+        {"raw_label",raceLabel(c.rawType)},{"model_score",c.modelScore},
+        {"final_type",c.finalType},{"final_label",c.finalType<0?"unverified":raceLabel(c.finalType)},
+        {"reason",c.reason},{"x",c.box.x},{"y",c.box.y},{"width",c.box.width},{"height",c.box.height}});
+    return checks;
+}
 inline nlohmann::json raceDetectionJson(const RaceSnapshot &s,double time,float threshold) {
     nlohmann::json boxes=nlohmann::json::array();
     for(const auto &d:s.detections) if(raceBoxValid(d)) boxes.push_back({
@@ -22,7 +30,8 @@ inline nlohmann::json raceDetectionJson(const RaceSnapshot &s,double time,float 
         {"x",d.x},{"y",d.y},{"width",d.width},{"height",d.height},
         {"passes_threshold",d.score>=threshold}});
     return {{"frame",s.sequence},{"captured",s.captured},{"age_s",time-s.captured},
-        {"failed",s.failed},{"error",s.error},{"confidence_threshold",threshold},{"detections",boxes}};
+        {"failed",s.failed},{"error",s.error},{"confidence_threshold",threshold},{"detections",boxes},
+        {"direction_checks",raceDirectionJson(s)}};
 }
 inline cv::Mat racePreviewImage(const RaceSnapshot &s,double time,const RaceConfig &config) {
     cv::Mat canvas=cv::Mat::zeros(300,640,CV_8UC3);
@@ -42,6 +51,18 @@ inline cv::Mat racePreviewImage(const RaceSnapshot &s,double time,const RaceConf
         std::ostringstream label; label<<raceLabel(d.type)<<' '<<std::fixed<<std::setprecision(2)<<d.score;
         cv::putText(canvas,label.str(),{d.x,std::max(12,d.y-3)},cv::FONT_HERSHEY_PLAIN,.8,status,1);
         if(line<280) { text(label.str(),line,status); line+=15; }
+    }
+    for(const auto &c:s.directionChecks) {
+        const cv::Scalar color=c.finalType<0?cv::Scalar(0,180,255):status;
+        if(c.finalType<0&&c.box.width>0&&c.box.height>0) {
+            const auto clipped=c.box&cv::Rect(0,0,320,240);
+            if(!clipped.empty()) cv::rectangle(canvas,clipped,color,1);
+        }
+        if(line<250) {
+            text(std::string("model: ")+raceLabel(c.rawType),line,color); line+=15;
+            text(std::string("shape: ")+c.reason,line,color); line+=15;
+            text(std::string("final: ")+(c.finalType<0?"WAIT":raceLabel(c.finalType)),line,color); line+=15;
+        }
     }
     std::ostringstream header; header<<"frame="<<s.sequence<<" age="<<std::fixed<<std::setprecision(2)<<age<<"s";
     text(header.str(),15,status);
