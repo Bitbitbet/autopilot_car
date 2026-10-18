@@ -10,9 +10,30 @@ struct RacePath {
     int splitRows=0;
 };
 
+// 交通牌属于场景中的物体，牌面上的深色图案不能充当道路分隔带。
+// 只采用新鲜且达到阈值的有效检测框；行人、锥桶、道闸、斑马线不在此列。
+inline std::vector<cv::Rect> raceSignRegions(const RaceSnapshot &snap,const RaceConfig &cfg) {
+    std::vector<cv::Rect> regions;
+    for(const auto &d:snap.detections) {
+        const bool sign=d.type==LABEL_BUSY||d.type==LABEL_LIMIT||d.type==LABEL_UNLIMIT||
+            d.type==LABEL_STOP||d.type==LABEL_FLOW||d.type==LABEL_PARK||
+            d.type==LABEL_FORK||d.type==LABEL_LEFT||d.type==LABEL_CHOICE||
+            d.type==LABEL_YLEFT||d.type==LABEL_YRIGHT;
+        if(!sign||!std::isfinite(d.score)||d.score<cfg.confidence||d.score>1||
+           d.x<0||d.y<0||d.width<=0||d.height<=0||d.x>=320||d.y>=240||
+           d.width>320-d.x||d.height>240-d.y) continue;
+        // 原始图像为 320×240；留出少量检测抖动和异步帧位移的余量。
+        constexpr int margin=12;
+        regions.push_back(cv::Rect(d.x-margin,d.y-margin,d.width+2*margin,d.height+2*margin)&
+                          cv::Rect(0,0,320,240));
+    }
+    return regions;
+}
+
 // 沿近处已连通的白色路面向远处搜索。方向只在真正出现两个通路时生效。
 // 不采用“看到方向牌就立即删掉半边线”的开环转向。
-inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int direction,const RaceConfig &cfg) {
+inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int direction,const RaceConfig &cfg,
+                               const std::vector<cv::Rect> &signRegions={}) {
     RacePath out;
     if(bin.empty()||bin.type()!=CV_8UC1||bin.rows!=240||bin.cols!=320||
        track.pointsEdgeLeft.empty()||track.pointsEdgeRight.empty()) return out;
@@ -30,7 +51,17 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
         }
         if(blocks.empty()) { if(++missing>3) break; continue; }
         missing=0;
-        bool split=blocks.size()>1&&blocks.back().first-blocks.front().second>=cfg.minBranchGap;
+        bool split=false;
+        for(size_t i=1;i<blocks.size();++i) {
+            const int first=blocks[i-1].second+1,last=blocks[i].first-1;
+            if(last-first+1<cfg.minBranchGap) continue;
+            const int middle=(first+last)/2;
+            const bool covered=std::any_of(signRegions.begin(),signRegions.end(),[&](const cv::Rect &r) {
+                const int overlap=std::min(last,r.x+r.width-1)-std::max(first,r.x)+1;
+                return r.contains({middle,row})&&overlap>=(last-first+2)/2;
+            });
+            if(!covered) { split=true; break; }
+        }
         if(split) ++out.splitRows;
         auto best=std::min_element(blocks.begin(),blocks.end(),[&](auto a,auto b) {
             return std::abs(a.first+a.second-low-high)<std::abs(b.first+b.second-low-high);
@@ -98,7 +129,8 @@ public:
         p.detectionAge=snap.sequence?time-snap.captured:-1;
         p.fresh=aiReady(snap,time);
         const bool newFrame=updateObservation(snap,p.fresh);
-        const auto geometry=raceBranchPath(bin,track,0,cfg);
+        const auto signRegions=p.fresh?raceSignRegions(snap,cfg):std::vector<cv::Rect>{};
+        const auto geometry=raceBranchPath(bin,track,0,cfg,signRegions);
         if(active!=lastActive) {
             // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
             if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0; }
@@ -212,7 +244,7 @@ public:
         if(state==State::ForkSelect) {
             p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
             p.state=direction<0?"FORK_LEFT":"FORK_RIGHT"; p.reason="CONNECTED_BRANCH";
-            p.path=raceBranchPath(bin,track,direction,cfg); p.selectedBranch=true;
+            p.path=raceBranchPath(bin,track,direction,cfg,signRegions); p.selectedBranch=true;
             if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
             else if(now-stateSince>cfg.forkMaxTime) { enter(State::Fault); reviewReason="FORK_TIMEOUT"; }
             else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0) {

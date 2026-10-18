@@ -24,3 +24,7 @@ add_test(NAME race_regression COMMAND race_regression)
 add_executable(race_direction_regression race_direction_regression.cpp)
 target_include_directories(race_direction_regression PRIVATE ../src/tool)
 target_link_libraries(race_direction_regression PRIVATE tools nlohmann_json pthread)
+
+add_executable(race_scene_regression race_scene_regression.cpp)
+target_include_directories(race_scene_regression PRIVATE ../src/tool)
+target_link_libraries(race_scene_regression PRIVATE track nlohmann_json pthread)
