@@ -26,24 +26,6 @@ constexpr size_t PWMSERVOMID = 1500; // 舵机PWM中值
 constexpr size_t PWMSERVOMIN = 1100; // 舵机PWM最小值（右）
 
 /**
- * @brief 32位数据内存对齐/联合体
- */
-typedef union {
-    uint8_t buff[4];
-    float float32;
-    int int32;
-} Bit32Union;
-
-/**
- * @brief 16位数据内存对齐/联合体
- */
-typedef union {
-    uint8_t buff[2];
-    int int16;
-    uint16_t uint16;
-} Bit16Union;
-
-/**
  * @brief 蜂鸣器音效
  */
 enum class Buzzer : uint8_t {
@@ -56,21 +38,17 @@ enum class Buzzer : uint8_t {
 
 class CarControl {
   private:
-    std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
+    std::unique_ptr<std::thread> recvThread; // 串口接收子线程
     LibSerial::SerialPort serialPort;
     std::atomic_bool recvThreadStop{true};
     std::atomic_bool serialFault{false};
     std::atomic_bool commandExpired{false};
-    std::atomic_bool motionAllowed{true};
-    std::atomic<uint64_t> stopEpoch{0};
     std::mutex writeMutex;
     int serialFd = -1;
-    int commandTimeoutMs = 0;
     bool moving = false;
     std::chrono::steady_clock::time_point lastCommand;
     void writeBufferLocked(const void *buffer, size_t len);
     void carControlLocked(float speed, uint16_t servo);
-    void checkCommandTimeout();
 
     CarControl();
 
@@ -86,14 +64,9 @@ class CarControl {
     bool hasFault() const {
         return serialFault.load() || commandExpired.load();
     }
-    void setCommandTimeout(int milliseconds);
 
     /* Exit/UI failure: prevent any racing worker from restarting. */
     void latch_stop();
-
-    void pauseMotion();
-    uint64_t motionEpoch() const { return stopEpoch.load(); }
-    bool resumeMotion(uint64_t expectedEpoch);
 
     bool exitBoot = false;
     bool keypress = false;

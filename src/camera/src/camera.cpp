@@ -16,7 +16,8 @@ using std::cout;
 using std::endl;
 
 Camera::Camera() : use_otsu(true) { initialize("/dev/video0"); }
-Camera::Camera(uint8_t threshold) : threshold_value(threshold), use_otsu(false) {
+Camera::Camera(uint8_t threshold)
+    : threshold_value(threshold), use_otsu(false) {
     initialize("/dev/video0");
 }
 Camera::Camera(const char *capture_source) : use_otsu(true) {
@@ -133,7 +134,7 @@ static Point2d applyHomography(const Mat &H, double x, double y) {
     return Point2d(r.at<double>(0) / w, r.at<double>(1) / w);
 }
 
-Point2d Camera::image_to_ground(const Point2f &img_pt) const {
+Point2d Camera::image_to_ground(const Point2d &img_pt) const {
     return applyHomography(H_img2gnd, img_pt.x, img_pt.y);
 }
 

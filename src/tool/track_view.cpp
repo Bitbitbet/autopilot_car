@@ -4,6 +4,7 @@
 #include "tools.hpp"
 #include "track.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -11,7 +12,6 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
-#include <memory>
 #include <opencv2/opencv.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -25,16 +25,19 @@ using std::atomic_bool;
 using std::cerr;
 using std::cout;
 using std::deque;
+using std::greater;
 using std::jthread;
-using std::make_unique;
+using std::map;
+using std::memory_order_relaxed;
 using std::mutex;
+using std::pair;
 using std::ref;
-using std::shared_ptr;
 using std::string;
-using std::unique_ptr;
+using std::vector;
 using std::chrono::duration;
 using std::chrono::duration_cast;
 using std::chrono::milliseconds;
+using std::this_thread::sleep_for;
 
 using Clock = std::chrono::steady_clock;
 
@@ -80,9 +83,8 @@ constexpr float kCenterGate = 40.f;      // 学宽度要求的居中范围
 constexpr float kWidthLearnStep = 40.f;  // profile 允许的偏差下限
 constexpr float kWidthPendingStep = 20.f;
 constexpr float kSeverityScale = 130.f; // severity 归一化尺度
-// 其它
-constexpr int kCommandTimeoutMs = 250;
 } // namespace cfg
+
 // Main thread alone owns HighGUI. Controller never waits for network rendering.
 class TrackviewDisplay {
     mutex imageMutex, keyMutex;
@@ -91,28 +93,27 @@ class TrackviewDisplay {
     atomic_bool emergency{false};
     atomic<long long> progressMs{0};
     static long long clockMs() {
-        return duration_cast<milliseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
+        return duration_cast<milliseconds>(Clock::now().time_since_epoch())
             .count();
     }
 
   public:
-    std::atomic_bool finished{false}, failed{false};
+    atomic_bool finished{false}, failed{false};
     TrackviewDisplay() { progress(); }
     void progress() { progressMs.store(clockMs()); }
     long long ageMs() const { return clockMs() - progressMs.load(); }
     bool stalled(int timeoutMs = 2000) const { return ageMs() >= timeoutMs; }
-    void publish(const cv::Mat &image, const cv::Mat &binary) {
+    void publish(const Mat &image, const Mat &binary) {
         // Clone outside the lock; no growing queue and no rendering under this
         // lock.
-        cv::Mat a = image.clone(), b = binary.clone();
-        std::unique_lock lock(imageMutex, std::try_to_lock);
+        Mat a = image.clone(), b = binary.clone();
+        unique_lock lock(imageMutex, std::try_to_lock);
         if (!lock.owns_lock())
             return;
         latestImage = std::move(a);
         latestBinary = std::move(b);
     }
-    bool snapshot(cv::Mat &image, cv::Mat &binary) {
+    bool snapshot(Mat &image, Mat &binary) {
         std::lock_guard lock(imageMutex);
         if (latestImage.empty())
             return false;
@@ -129,16 +130,16 @@ class TrackviewDisplay {
             emergency = true;
             return;
         }
-        std::lock_guard lock(keyMutex);
+        lock_guard lock(keyMutex);
         if (keys.size() >= 32) {
             keys.clear();
             emergency = true;
         } else
             keys.push_back(key);
     }
-    std::vector<int> takeKeys() {
-        std::lock_guard lock(keyMutex);
-        std::vector<int> result(keys.begin(), keys.end());
+    vector<int> takeKeys() {
+        lock_guard lock(keyMutex);
+        vector<int> result(keys.begin(), keys.end());
         keys.clear();
         if (emergency.exchange(false)) {
             result.clear();
@@ -165,7 +166,7 @@ class AutoPilot {
     float curveLimit = cfg::kCurveSpeed;
     float qualityLimit = cfg::kDegradedSpeed;
     int imageCols = IMAGE_COL, imageRows = IMAGE_ROW; // 实际帧尺寸
-    std::vector<Width> widths;                        // 逐行宽度，原生像素
+    vector<Width> widths;                             // 逐行宽度，原生像素
     float filteredDerivative = 0, previousError = 0, commandedSpeed = 0;
     double now = 0, missingTime = 0, stableTime = 0;
     double qualityGoodTime = 0;
@@ -218,7 +219,7 @@ class AutoPilot {
     }
     const char *pathIssue = "NO_POINTS";
     int missingWidthPoints = 0;
-    std::vector<Point2i> centerEdge;
+    vector<Point2i> centerEdge;
     int center = imageCols / 2, dualPoints = 0, singlePoints = 0,
         rejectedPoints = 0;
     float error = 0, heading = 0, confidence = 0, severity = 0;
@@ -284,8 +285,7 @@ class AutoPilot {
         servo = PWMSERVOMID;
         hadPath = false;
     }
-    void update(const std::vector<Point2i> &left,
-                const std::vector<Point2i> &right, float dt,
+    void update(const map<int, pair<int, int>, greater<int>> &rows, float dt,
                 float previousSpeed = 0) {
         if (!std::isfinite(dt) || dt <= 0 || dt > cfg::kMaxFrameGap) {
             valid = ready = false;
@@ -304,19 +304,8 @@ class AutoPilot {
             return;
         }
         now += dt;
-        std::map<int, std::pair<int, int>, std::greater<int>> rows;
-        for (const auto &p : left) {
-            if (p.x < 0 || p.x >= imageRows || p.y < 0 || p.y >= imageCols)
-                continue;
-            rows.try_emplace(p.x, -1, -1).first->second.first = p.y;
-        }
-        for (const auto &p : right) {
-            if (p.x < 0 || p.x >= imageRows || p.y < 0 || p.y >= imageCols)
-                continue;
-            rows.try_emplace(p.x, -1, -1).first->second.second = p.y;
-        }
-        std::vector<Point2i> raw;
-        std::vector<std::pair<int, float>> widthCandidates;
+        vector<Point2i> raw;
+        vector<pair<int, float>> widthCandidates;
         dualPoints = singlePoints = rejectedPoints = 0;
         missingWidthPoints = 0;
         int previousRow = -1;
@@ -561,19 +550,18 @@ std::atomic_bool stopping{false};
 static_assert(std::atomic_bool::is_always_lock_free);
 void onSignal(int) { stopping.store(true); }
 } // namespace
+
 enum class Mode { Manual, Auto };
 
 // Declared after the driving thread: inhibit motion before unwinding/joining
 // it.
 struct StopOnExit {
-    std::shared_ptr<CarControl> car;
+    CarControl &car;
     ~StopOnExit() {
         stopping = true;
-        if (car) {
-            try {
-                car->latch_stop();
-            } catch (...) {
-            }
+        try {
+            car.latch_stop();
+        } catch (...) {
         }
     }
 };
@@ -626,8 +614,8 @@ static void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
     line("[/]:turn  ,/.:quality  w:weight");
 }
 
-void driving_thread(Camera &camera, CarControl *car, AutoPilot &pilot,
-                    JoyStick *js, TrackviewDisplay &display,
+void driving_thread(Camera &camera, CarControl &car, AutoPilot &pilot,
+                    JoyStick &js, TrackviewDisplay &display,
                     atomic_bool &joyLost) {
     float cruise = cfg::kCruiseSpeed, jsSpeed = 0, speed = 0;
     auto start = Clock::now(), last = start;
@@ -635,45 +623,34 @@ void driving_thread(Camera &camera, CarControl *car, AutoPilot &pilot,
     auto mode = Mode::Manual;
     bool panic = false;
 
-    string stage = "startup";
+    map<int, pair<int, int>, greater<int>> rows;
     try {
         while (!stopping.load()) {
-            stage = "before_capture";
-            if (car && car->hasFault())
+            if (car.hasFault())
                 throw std::runtime_error(
                     "Serial fault or command watchdog timeout");
-            cv::Mat image;
-            stage = "capture";
-            if (!camera.read(image) || image.empty()) {
-                if (car)
-                    car->resetVelocity();
+            Mat image;
+            if (!camera.read(image)) {
+                car.resetVelocity();
                 throw std::runtime_error("Camera frame unavailable");
             }
-            stage = "preprocess";
-            cv::Mat bin = camera.binarize(image);
-            stage = "track";
-            std::vector<Point2i> left_edges, right_edges;
-            track_identify_from_bin(bin, camera, left_edges, right_edges);
+            Mat bin = camera.binarize(image);
+            track_identify_from_bin(bin, camera, rows);
             const auto now = Clock::now();
-            stage = "control";
             auto dt = duration<double>(now - last).count();
             last = now;
             if (dt <= 0)
                 dt = cfg::kReferenceDt;
-            pilot.update(left_edges, right_edges, dt, speed);
-            track_draw_result(left_edges, right_edges, image);
-            const uint64_t motionEpoch = car ? car->motionEpoch() : 0;
+            pilot.update(rows, dt, speed);
+            track_draw_result(rows, image);
             auto toggle = [&]() {
                 if (mode == Mode::Auto) {
                     mode = Mode::Manual;
                     jsSpeed = 0;
                     pilot.resetControl();
-                    cout << "[Mode] MANUAL\n";
-                } else if (pilot.ready && !joyLost &&
-                           (!js || !js->isStopped()) &&
-                           std::fabs(jsSpeed) <= 0.05f) {
-                    if (car && !car->resumeMotion(motionEpoch))
-                        return;
+                    cout << "[Mode] MANUAL" << endl;
+                } else if (pilot.ready && !joyLost && !js.isStopped() &&
+                           fabs(jsSpeed) <= 0.05f) {
                     mode = Mode::Auto;
                     panic = false;
                     jsSpeed = 0;
@@ -693,12 +670,12 @@ void driving_thread(Camera &camera, CarControl *car, AutoPilot &pilot,
             string stopReason;
             for (const int key : display.takeKeys()) {
                 if (key == ' ') {
+                    // Stop = the write below this loop (speed 0) plus panic,
+                    // which only a successful toggle() clears.
                     panic = true;
                     mode = Mode::Manual;
                     jsSpeed = 0;
                     pilot.resetControl();
-                    if (car)
-                        car->pauseMotion();
                     stopReason = "keyboard stop";
                 } else if (key == 'a' || key == 'A')
                     toggle();
@@ -727,31 +704,30 @@ void driving_thread(Camera &camera, CarControl *car, AutoPilot &pilot,
             // heartbeat. Keep command watchdog/vision loss independent
             // of remote UI delay.
             const auto displayAge = display.ageMs();
-            if (js) {
-                float s = 0;
-                uint16_t sv = PWMSERVOMID;
-                const bool newCommand = js->takeCarControl(s, sv);
-                if (newCommand) {
-                    jsSpeed = s;
-                    jsServo = sv;
-                }
-                if (js->takeSampleOnce())
-                    toggle();
-                js->takeBuzzer();
-                if (js->isStopped() || joyLost) {
-                    if (!panic)
-                        stopReason = "gamepad disconnected; stop latched";
-                    panic = true;
-                    mode = Mode::Manual;
-                    jsSpeed = 0;
-                    pilot.resetControl();
-                } else if (mode == Mode::Auto && newCommand &&
-                           std::fabs(jsSpeed) > 0.05f) {
-                    mode = Mode::Manual;
-                    pilot.resetControl();
-                    cout << "[Mode] MANUAL (gamepad takeover)\n";
-                }
+            float s = 0;
+            uint16_t sv = PWMSERVOMID;
+            const bool newCommand = js.takeCarControl(s, sv);
+            if (newCommand) {
+                jsSpeed = s;
+                jsServo = sv;
             }
+            if (js.takeSampleOnce())
+                toggle();
+            js.takeBuzzer();
+            if (js.isStopped() || joyLost) {
+                if (!panic)
+                    stopReason = "gamepad disconnected; stop latched";
+                panic = true;
+                mode = Mode::Manual;
+                jsSpeed = 0;
+                pilot.resetControl();
+            } else if (mode == Mode::Auto && newCommand &&
+                       std::fabs(jsSpeed) > 0.05f) {
+                mode = Mode::Manual;
+                pilot.resetControl();
+                cout << "[Mode] MANUAL (gamepad takeover)\n";
+            }
+
             if (mode == Mode::Auto && pilot.lost) {
                 mode = Mode::Manual;
                 panic = true;
@@ -773,45 +749,39 @@ void driving_thread(Camera &camera, CarControl *car, AutoPilot &pilot,
                     servo = jsServo;
                 }
             }
-            if (car) {
-                if (car->hasFault())
-                    throw std::runtime_error(
-                        "Serial command timeout during processing");
-                car->carControl(speed, servo);
-            }
-            stage = "display";
+            if (car.hasFault())
+                throw std::runtime_error(
+                    "Serial command timeout during processing");
+            car.carControl(speed, servo);
+
             drawHud(image, pilot, mode, panic, cruise, speed, servo, 1 / dt,
                     displayAge >= 2000);
             if (!stopReason.empty())
                 cerr << "[Stop] " << stopReason << '\n';
             display.publish(image, bin);
         }
-        if (car)
-            car->resetVelocity();
+        car.resetVelocity();
         cout << "[Stop] "
              << (stopping.load() ? "signal or UI stop" : "normal exit") << '\n';
     } catch (const std::exception &e) {
-        if (car) {
-            try {
-                car->latch_stop();
-            } catch (...) {
-            }
+        try {
+            car.latch_stop();
+        } catch (...) {
         }
+
         if (stopping.load() && !display.failed.load()) {
             cout << "[Stop] operator requested exit\n";
         } else {
-            cerr << "[Error] " << e.what() << " (stage=" << stage << ")\n";
+            cerr << "[Error] " << e.what() << endl;
             display.failed = true;
         }
     } catch (...) {
-        if (car) {
-            try {
-                car->latch_stop();
-            } catch (...) {
-            }
+        try {
+            car.latch_stop();
+        } catch (...) {
         }
-        cerr << "[Error] unexpected driving thread failure (stage=" << stage
-             << ")\n";
+
+        cerr << "[Error] unexpected driving thread failure." << endl;
         display.failed = true;
     }
     display.finished = true;
@@ -825,43 +795,44 @@ int main() {
         cerr << "无法加载串口控制。" << endl;
         return 1;
     }
-    AutoPilot pilot;
+
+    atomic_bool joyLost{false}; // Must outlive gamepad callback.
+    auto js = JoyStick::create(
+        [&joyLost] { joyLost.store(true, memory_order_relaxed); });
+    if (!js) {
+        cerr << "Gamepad not connected." << endl;
+        return 2;
+    }
+
+    Camera camera;
+
+    AutoPilot pilot(camera.cols(), camera.rows());
+
     try {
-        string source = "/dev/video0";
-        // Load calibration before opening any vehicle control device.
-        Camera camera;
-
-        pilot = AutoPilot(camera.cols(), camera.rows());
-
-        atomic_bool joyLost{false}; // Must outlive gamepad callback.
-        car->setCommandTimeout(cfg::kCommandTimeoutMs);
-        auto js = JoyStick::create([&joyLost] { joyLost = true; });
-        if (!js) {
-            cerr << "[Warn] No gamepad; use image window keyboard.\n";
-        }
-
         TrackviewDisplay display;
-        cout << "trackview | source=" << source << " | frame=" << camera.cols()
-             << "x" << camera.rows() << " | limit=" << cfg::kCruiseSpeed
-             << " m/s (max " << cfg::kMaxSpeed << ") turn=" << pilot.curveSpeed()
-             << " quality=" << pilot.degradedSpeed() << "\n";
-        jthread driving(driving_thread, ref(camera), car.get(), ref(pilot),
-                        js.get(), ref(display), ref(joyLost));
+        cout << "trackview | frame=" << camera.cols() << "x" << camera.rows()
+             << " | limit=" << cfg::kCruiseSpeed << " m/s (max "
+             << cfg::kMaxSpeed << ") turn=" << pilot.curveSpeed()
+             << " quality=" << pilot.degradedSpeed() << endl;
 
-        StopOnExit stopBeforeJoin{car};
-        auto lastRender = Clock::now() - std::chrono::milliseconds(100);
+        jthread driving(driving_thread, ref(camera), ref(*car), ref(pilot),
+                        ref(*js), ref(display), ref(joyLost));
+
+        StopOnExit stopBeforeJoin{*car};
+
+        auto lastRender = Clock::now() - milliseconds(100);
         while (!stopping.load() && !display.finished.load()) {
             // GUI stays on the main thread; only immutable latest snapshots
             // cross threads.
-            if (car && car->hasFault()) {
+            if (car->hasFault()) {
                 display.failed = true;
                 break;
             }
             const auto rendered = Clock::now();
-            cv::Mat image, bin;
-            if (rendered - lastRender >= std::chrono::milliseconds(100)) {
+            Mat image, bin;
+            if (rendered - lastRender >= milliseconds(100)) {
                 if (!display.snapshot(image, bin)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    sleep_for(milliseconds(5));
                     display.progress();
                     continue;
                 }
@@ -874,35 +845,34 @@ int main() {
             if (key == 27)
                 break;
             display.post(key);
-            if (key == ' ' && car)
-                car->pauseMotion(); // Veto racing worker writes immediately.
+            if (key == ' ' && car) {
+                // The worker also sees this key and stops itself; writing 0
+                // here covers a worker blocked in frame capture.
+                car->resetVelocity();
+            }
         }
         stopping = true;
-        if (car) {
-            try {
-                car->latch_stop();
-            } catch (...) {
-            }
+        try {
+            car->latch_stop();
+        } catch (...) {
         }
         driving.join();
         cout << "[Stop] trackview finished.\n";
         return display.failed.load() ? 1 : 0;
     } catch (const std::exception &e) {
-        if (car) {
-            try {
-                car->resetVelocity();
-            } catch (...) {
-            }
+        try {
+            car->resetVelocity();
+        } catch (...) {
         }
+
         cerr << "[Error] " << e.what() << '\n';
         return 1;
     } catch (...) {
-        if (car) {
-            try {
-                car->resetVelocity();
-            } catch (...) {
-            }
+        try {
+            car->resetVelocity();
+        } catch (...) {
         }
+
         cerr << "[Error] unexpected exception\n";
         return 1;
     }

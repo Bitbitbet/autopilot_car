@@ -4,6 +4,8 @@
 #include <utility>
 
 using namespace cv;
+using std::greater;
+using std::map;
 using std::pair;
 using std::vector;
 
@@ -75,34 +77,30 @@ pair<int, int> selectClosestBlock(const Blocks &connected_blocks, int last_left,
 } // namespace
 
 void track_identify_from_bin(const Mat &bin_img, Camera &camera,
-                             vector<Point2i> &left_edge_points,
-                             vector<Point2i> &right_edge_points) {
-    left_edge_points.clear();
-    right_edge_points.clear();
+                             map<int, pair<int, int>, greater<int>> &rows) {
+    rows.clear();
 
-    // 图像坐标(列,行) -> 地面坐标(米)，X 右正左负、Y 前正后负
-    const auto ground = [&](int row, int col) {
-        return camera.image_to_ground({float(col), float(row)});
-    };
     // 行中心处的纵向距离：同一行上各列的距离差可以忽略
     const auto distanceAt = [&](int row) {
-        return float(ground(row, bin_img.cols / 2).y);
+        return float(
+            camera.image_to_ground({double(row), bin_img.cols / 2.0}).y);
     };
     // 同一行上左右边界的实际横向间距，就是色块在路面上的宽度
     const auto widthAt = [&](int row, int left, int right) {
-        return float(std::fabs(ground(row, right).x - ground(row, left).x));
+        return float(
+            fabs(camera.image_to_ground({double(right), double(row)}).x -
+                 camera.image_to_ground({double(left), double(row)}).x));
     };
 
     bool isSearchingFirstRow = true; // 还没找到最下面那行有效路面
     float lastDistance = 0;
 
     auto appendEdge = [&](int row, int left, int right) {
-        left_edge_points.emplace_back(row, left);
-        right_edge_points.emplace_back(row, right);
+        rows.insert({row, {left, right}});
     };
 
     Blocks blocks, connected_blocks;
-    for (int r = bin_img.rows - 1; r > 0; r -= 2) {
+    for (auto r = bin_img.rows - 1; r > 0; r -= 2) {
         const float distance = distanceAt(r);
         // 单应缺失、或者已经越过最远搜索距离，就没有可用的地面信息了
         if (!std::isfinite(distance) || distance > TRACK_MAX_DISTANCE)
@@ -134,8 +132,9 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
         }
 
         // 其它行色块坐标处理
-        const int last_left = left_edge_points.back().y;
-        const int last_right = right_edge_points.back().y;
+        auto last_row = *rows.rbegin();
+        const int last_left = last_row.second.first;
+        const int last_right = last_row.second.second;
         find_connected_blocks(blocks, last_left, last_right, connected_blocks);
         if (connected_blocks.empty())
             break; // 没有联通色块，图像搜索完成
@@ -160,12 +159,13 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
     }
 }
 
-void track_draw_result(const vector<Point2i> &left_edge_points,
-                       const vector<Point2i> &right_edge_points, Mat &result) {
-    for (const auto &p : left_edge_points)
-        circle(result, Point(p.y, p.x), 2, Scalar(0, 255, 0), -1); // 绿色点
-    for (const auto &p : right_edge_points)
-        circle(result, Point(p.y, p.x), 2, Scalar(0, 255, 255), -1); // 黄色点
+void track_draw_result(const map<int, pair<int, int>, greater<int>> &rows,
+                       Mat &result) {
+    for (auto [row, col] : rows) {
+        auto [left, right] = col;
+        circle(result, Point(left, row), 2, Scalar(0, 255, 0), -1);    // 绿色点
+        circle(result, Point(right, row), 2, Scalar(0, 255, 255), -1); // 黄色点
+    }
 }
 
 /**

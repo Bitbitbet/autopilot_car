@@ -9,6 +9,15 @@
 #include <stdexcept>
 #include <unistd.h>
 
+using std::array;
+using std::cerr;
+using std::clamp;
+using std::endl;
+using std::lock_guard;
+using std::make_unique;
+using std::thread;
+using std::chrono::milliseconds;
+
 using namespace LibSerial;
 using Clock = std::chrono::steady_clock;
 CarControl::CarControl() = default;
@@ -29,21 +38,12 @@ std::shared_ptr<CarControl> CarControl::create() {
         car->resetVelocity();
         car->recvThreadStop = false;
         auto raw = car.get();
-        car->threadRecv =
-            std::make_unique<std::thread>([raw] { raw->recvThreadMain(); });
+        car->recvThread = make_unique<thread>([=] { raw->recvThreadMain(); });
         return car;
     } catch (const std::exception &e) {
-        std::cerr << "Serial initialization failed: " << e.what() << '\n';
+        cerr << "Serial initialization failed: " << e.what() << endl;
         return nullptr;
     }
-}
-
-void CarControl::setCommandTimeout(int milliseconds) {
-    if (milliseconds < 0 || (milliseconds > 0 && milliseconds < 100))
-        throw std::invalid_argument(
-            "Serial command timeout must be 0 or >=100ms");
-    std::lock_guard lock(writeMutex);
-    commandTimeoutMs = milliseconds;
 }
 
 void CarControl::latch_stop() {
@@ -51,39 +51,11 @@ void CarControl::latch_stop() {
     resetVelocity();
 }
 
-void CarControl::pauseMotion() {
-    std::lock_guard lock(writeMutex);
-    ++stopEpoch;
-    motionAllowed = false;
-    carControlLocked(0, PWMSERVOMID);
-}
-
-bool CarControl::resumeMotion(uint64_t expectedEpoch) {
-    std::lock_guard lock(writeMutex);
-    if (hasFault() || expectedEpoch != stopEpoch.load())
-        return false;
-    motionAllowed = true;
-    return true;
-}
-
-void CarControl::checkCommandTimeout() {
-    std::lock_guard lock(writeMutex);
-    if (moving && commandTimeoutMs > 0 &&
-        Clock::now() - lastCommand >=
-            std::chrono::milliseconds(commandTimeoutMs)) {
-        commandExpired = true; // Latched: old frames cannot restart the car.
-        carControlLocked(0, PWMSERVOMID);
-        std::cerr
-            << "[Stop] Control command expired; restart program to rearm.\n";
-    }
-}
-
 void CarControl::recvThreadMain() {
     size_t index = 0;
-    std::array<uint8_t, USB_FRAME_LENMAX> buffer{};
+    array<uint8_t, USB_FRAME_LENMAX> buffer{};
     try {
         while (!recvThreadStop.load()) {
-            checkCommandTimeout();
             pollfd fd{serialFd, POLLIN, 0};
             const int status = poll(&fd, 1, 20);
             if (status < 0) {
@@ -96,7 +68,7 @@ void CarControl::recvThreadMain() {
             if (!(fd.revents & POLLIN))
                 continue;
             uint8_t byte = 0;
-            const auto n = ::read(serialFd, &byte, 1);
+            const auto n = read(serialFd, &byte, 1);
             if (n < 0 &&
                 (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
                 continue;
@@ -121,7 +93,7 @@ void CarControl::recvThreadMain() {
         }
     } catch (const std::exception &e) {
         serialFault = true; // All later motion is vetoed.
-        std::cerr << "[Error] Serial receive: " << e.what() << '\n';
+        cerr << "[Error] Serial receive: " << e.what() << endl;
         try {
             resetVelocity();
         } catch (...) {
@@ -141,8 +113,8 @@ CarControl::~CarControl() noexcept {
         resetVelocity();
     } catch (...) {
     }
-    if (threadRecv && threadRecv->joinable())
-        threadRecv->join();
+    if (recvThread && recvThread->joinable())
+        recvThread->join();
     try {
         if (serialPort.IsOpen())
             serialPort.Close();
@@ -150,19 +122,18 @@ CarControl::~CarControl() noexcept {
     }
 }
 
-void CarControl::translateBuffer(
-    const std::array<uint8_t, USB_FRAME_LENMAX> &) {
-    // Preserve current protocol behavior, without per-byte console output.
+void CarControl::translateBuffer(const array<uint8_t, USB_FRAME_LENMAX> &) {
+    // Currently do nothing here
 }
 
 void CarControl::carControl(float speed, uint16_t servo) {
-    std::lock_guard lock(writeMutex);
+    lock_guard lock(writeMutex);
     if (!std::isfinite(speed)) {
         serialFault = true;
         carControlLocked(0, PWMSERVOMID);
         throw std::invalid_argument("Non-finite vehicle speed");
     }
-    if (hasFault() || !motionAllowed.load()) {
+    if (hasFault()) {
         speed = 0;
         servo = PWMSERVOMID;
     }
@@ -174,9 +145,9 @@ void CarControl::carControlLocked(float speed, uint16_t servo) {
     buff[0] = USB_FRAME_HEAD;
     buff[1] = USB_ADDR_CARCTRL;
     buff[2] = 10;
-    servo = std::clamp<uint16_t>(servo, PWMSERVOMIN, PWMSERVOMAX);
-    std::memcpy(buff + 3, &speed, 4);
-    std::memcpy(buff + 7, &servo, 2);
+    servo = clamp<uint16_t>(servo, PWMSERVOMIN, PWMSERVOMAX);
+    memcpy(buff + 3, &speed, 4);
+    memcpy(buff + 7, &servo, 2);
     for (int i = 0; i < 9; ++i)
         buff[9] += buff[i];
     writeBufferLocked(buff, sizeof(buff));

@@ -20,7 +20,7 @@ class Camera {
      * @param img_pt 图像坐标(px)
      * @return 地面坐标 (X, Y)，单位米；X 左负右正，Y 前正后负
      */
-    cv::Point2d image_to_ground(const cv::Point2f &img_pt) const;
+    cv::Point2d image_to_ground(const cv::Point2d &img_pt) const;
 
     /**
      * @brief 地面坐标（米） -> 图像坐标
