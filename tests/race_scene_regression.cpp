@@ -34,8 +34,7 @@ int main(int argc,char **argv) {
             const int raw=raceBranchPath(bin,track,0,cfg).splitRows;
             const int verified=raceBranchPath(bin,track,0,cfg,raceSignRegions(snap,cfg)).splitRows;
             std::cout<<sample<<" raw_split_rows="<<raw<<" verified_split_rows="<<verified<<'\n';
-            if(std::string(sample).find("1792309155760")!=std::string::npos)
-                check(raw>=cfg.minBranchRows,"fixture no longer reproduces false fork");
+            check(raw<cfg.minBranchRows,"sign topology must also work when AI misses the sign");
             check(verified<cfg.minBranchRows,"printed sign must not count as road fork");
             RaceManager manager(cfg); RacePlan plan;
             for(int i=0;i<6;++i) {

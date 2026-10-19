@@ -32,3 +32,7 @@ target_link_libraries(race_scene_regression PRIVATE track nlohmann_json pthread)
 add_executable(race_trace_regression race_trace_regression.cpp)
 target_include_directories(race_trace_regression PRIVATE ../src/tool)
 target_link_libraries(race_trace_regression PRIVATE track nlohmann_json pthread)
+
+add_executable(race_topology_regression race_topology_regression.cpp)
+target_include_directories(race_topology_regression PRIVATE ../src/tool)
+target_link_libraries(race_topology_regression PRIVATE track nlohmann_json pthread)

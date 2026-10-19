@@ -30,8 +30,35 @@ inline std::vector<cv::Rect> raceSignRegions(const RaceSnapshot &snap,const Race
     return regions;
 }
 
-// 沿近处已连通的白色路面向远处搜索。方向只在真正出现两个通路时生效。
-// 不采用“看到方向牌就立即删掉半边线”的开环转向。
+// 仅保留与近处路面相接的白色区段，并把细小黑点和已检出的牌面合并回路面。
+inline std::vector<std::pair<int,int>> raceRoadBlocks(const cv::Mat &bin,int row,int low,int high,
+        const RaceConfig &cfg,const std::vector<cv::Rect> &signRegions) {
+    std::vector<std::pair<int,int>> blocks;
+    for(int col=0;col<bin.cols;) {
+        if(bin.at<uint8_t>(row,col)<=127) { ++col; continue; }
+        const int first=col;
+        while(col<bin.cols&&bin.at<uint8_t>(row,col)>127) ++col;
+        if(col-first<cfg.minBranchWidth||std::min(col-1,high)<std::max(first,low)) continue;
+        if(!blocks.empty()) {
+            const int gapFirst=blocks.back().second+1,gapLast=first-1;
+            const int middle=(gapFirst+gapLast)/2;
+            const bool covered=std::any_of(signRegions.begin(),signRegions.end(),[&](const cv::Rect &r) {
+                const int overlap=std::min(gapLast,r.x+r.width-1)-std::max(gapFirst,r.x)+1;
+                return r.contains({middle,row})&&overlap>=(gapLast-gapFirst+2)/2;
+            });
+            if(gapLast-gapFirst+1<cfg.minBranchGap||covered) {
+                blocks.back().second=col-1; continue;
+            }
+        }
+        blocks.emplace_back(first,col-1);
+    }
+    return blocks;
+}
+
+// 分叉必须是同一组通路持续延伸至搜索区远端，不能把不相邻的几行相加。
+// 车头图案会在更远处重新合成一片白色；牌面的圆环会分成两个黑边，
+// 都不满足道路分隔带连续的条件。判断使用本帧像素，AI 漏检时也不沿用旧框。
+// 方向只在通过此检查的分叉上生效，不采用看到方向牌就删掉半边线的开环转向。
 inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int direction,const RaceConfig &cfg,
                                const std::vector<cv::Rect> &signRegions={}) {
     RacePath out;
@@ -39,39 +66,66 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
        track.pointsEdgeLeft.empty()||track.pointsEdgeRight.empty()) return out;
     int low=track.pointsEdgeLeft.front().y,high=track.pointsEdgeRight.front().y;
     const int start=track.pointsEdgeLeft.front().x;
-    int missing=0;
+    if(start<0||start>=bin.rows||track.rowCutUp<0||track.rowCutUp>=start||
+       low<0||high>=bin.cols||low>=high) return out;
+    struct Row { int number; std::vector<std::pair<int,int>> blocks; };
+    std::vector<Row> rows;
+    std::vector<std::pair<int,int>> previousGaps;
+    int missing=0,continuous=0,forkStart=-1;
+    bool rejected=false,reachedFarEnd=false;
     for(int row=start;row>track.rowCutUp;row-=2) {
-        std::vector<std::pair<int,int>> blocks;
-        for(int col=0;col<bin.cols;) {
-            if(bin.at<uint8_t>(row,col)<=127) { ++col; continue; }
-            int first=col;
-            while(col<bin.cols&&bin.at<uint8_t>(row,col)>127) ++col;
-            if(col-first>=cfg.minBranchWidth&&std::min(col-1,high)>=std::max(first,low))
-                blocks.emplace_back(first,col-1);
+        auto blocks=raceRoadBlocks(bin,row,low,high,cfg,signRegions);
+        if(blocks.empty()) {
+            // 图像断层不能拼成连续分叉，也不能宣称已看清远端。
+            rejected=true; continuous=0;
+            if(++missing>3) break;
+            continue;
         }
+        missing=0;
+        std::vector<std::pair<int,int>> gaps;
+        for(size_t i=1;i<blocks.size();++i) {
+            gaps.emplace_back(blocks[i-1].second+1,blocks[i].first-1);
+        }
+        if(gaps.empty()) {
+            continuous=0; forkStart=-1; previousGaps.clear(); rejected=false;
+        } else {
+            if(!previousGaps.empty()) {
+                // 同一个黑色分隔带不能突然变成圆环的两条边，也不能跳到别处的黑点。
+                if(gaps.size()!=previousGaps.size()) rejected=true;
+                else for(size_t i=0;i<gaps.size();++i) {
+                    const int middle=(previousGaps[i].first+previousGaps[i].second)/2;
+                    if(middle<gaps[i].first||middle>gaps[i].second) rejected=true;
+                }
+            }
+            if(!rejected) {
+                if(continuous==0) forkStart=row;
+                ++continuous;
+            }
+            previousGaps=std::move(gaps);
+        }
+        // 几何检查保留所有连通支路，避免先选了牌面内部的白色而丢失两侧路面。
+        low=blocks.front().first; high=blocks.back().second;
+        rows.push_back({row,std::move(blocks)});
+        reachedFarEnd=row-2<=track.rowCutUp;
+    }
+    if(reachedFarEnd&&!rejected) out.splitRows=continuous;
+
+    low=track.pointsEdgeLeft.front().y; high=track.pointsEdgeRight.front().y;
+    missing=0;
+    for(const auto &r:rows) {
+        std::vector<std::pair<int,int>> blocks;
+        for(const auto &b:r.blocks)
+            if(std::min(b.second,high)>=std::max(b.first,low)) blocks.push_back(b);
         if(blocks.empty()) { if(++missing>3) break; continue; }
         missing=0;
-        bool split=false;
-        for(size_t i=1;i<blocks.size();++i) {
-            const int first=blocks[i-1].second+1,last=blocks[i].first-1;
-            if(last-first+1<cfg.minBranchGap) continue;
-            const int middle=(first+last)/2;
-            const bool covered=std::any_of(signRegions.begin(),signRegions.end(),[&](const cv::Rect &r) {
-                const int overlap=std::min(last,r.x+r.width-1)-std::max(first,r.x)+1;
-                return r.contains({middle,row})&&overlap>=(last-first+2)/2;
-            });
-            if(!covered) { split=true; break; }
-        }
-        if(split) ++out.splitRows;
         auto best=std::min_element(blocks.begin(),blocks.end(),[&](auto a,auto b) {
             return std::abs(a.first+a.second-low-high)<std::abs(b.first+b.second-low-high);
         });
-        if(split&&direction) best=direction<0?blocks.begin():blocks.end()-1;
-        // 几何探测保持两条连通分支的包络，才能要求多行连续分叉。
-        // 真正输出选路路径时，始终只跟随指定的一条白色通路。
-        low=(split&&!direction)?blocks.front().first:best->first;
-        high=(split&&!direction)?blocks.back().second:best->second;
-        out.left.emplace_back(row,low); out.right.emplace_back(row,high);
+        const bool fork=out.splitRows>=cfg.minBranchRows&&r.number<=forkStart;
+        if(fork&&direction) best=direction<0?blocks.begin():blocks.end()-1;
+        low=(!direction)?blocks.front().first:best->first;
+        high=(!direction)?blocks.back().second:best->second;
+        out.left.emplace_back(r.number,low); out.right.emplace_back(r.number,high);
     }
     return out;
 }
