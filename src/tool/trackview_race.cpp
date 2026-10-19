@@ -3,6 +3,7 @@
 #include "race_manager.hpp"
 #include "race_replay.hpp"
 #include "race_preview.hpp"
+#include "race_trace.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
 #include "predeal.hpp"
@@ -201,6 +202,9 @@ int main(int argc,char **argv) {
         else perception=createRacePerception(raceConfig);
         pilot=AutoPilot(config);
         log=std::make_unique<Diagnostics>(config);
+        std::unique_ptr<RaceTrace> forkTrace;
+        if(noControl&&!log->outputDirectory().empty())
+            forkTrace=std::make_unique<RaceTrace>(log->outputDirectory(),raceConfig);
         std::ofstream raceLog,detectionLog;
         if(!log->outputDirectory().empty()) {
             raceLog.open(log->outputDirectory()/"race.csv");
@@ -245,6 +249,7 @@ int main(int argc,char **argv) {
         std::cout<<"trackview_race experimental 2026-10-16 | "<<(noControl?"NO CONTROL":"MANUAL START")
             <<" | default limit="<<cruise<<" m/s | max="<<config.maxSpeed
             <<" | turn="<<pilot.curveSpeed()<<" quality="<<pilot.degradedSpeed()<<"\n";
+        if(forkTrace) std::cout<<"[Trace] AUTO FORK CAPTURE | NO CONTROL ONLY | up to 12 episodes\n";
         std::jthread driving([&] {
         std::string stage="startup";
         auto stageStarted=Clock::now();
@@ -335,6 +340,7 @@ int main(int argc,char **argv) {
                 }
             }
             const auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track);
+            if(forkTrace) forkTrace->observe(raceFrame,observationTime,image,bin,track,observation,racePlan);
             const auto &pathLeft=racePlan.selectedBranch?racePlan.path.left:track.pointsEdgeLeft;
             const auto &pathRight=racePlan.selectedBranch?racePlan.path.right:track.pointsEdgeRight;
             pilot.update(pathLeft,pathRight,dt,speed);
@@ -457,6 +463,11 @@ int main(int argc,char **argv) {
         stopping=true;
         if(car) { try { car->latchStop(); } catch(...) {} }
         driving.join();
+        if(forkTrace) {
+            forkTrace->finish();
+            std::cout<<"[Trace] saved="<<forkTrace->savedCount()<<" failed="<<forkTrace->failedCount()
+                <<" dropped="<<forkTrace->droppedCount()<<'\n';
+        }
         std::cout<<"[Stop] trackview_race finished.\n";
         return display.failed.load()?1:0;
     } catch(const std::exception &e) {
