@@ -4,6 +4,7 @@
 #include "race_replay.hpp"
 #include "race_preview.hpp"
 #include "race_trace.hpp"
+#include "race_ui.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
 #include "predeal.hpp"
@@ -169,7 +170,8 @@ int main(int argc,char **argv) {
     try {
         std::string source="/dev/video0", configPath="trackview.json";
         std::string raceConfigPath="race.json", detectionPath;
-        bool noControl=false, headless=false, replay=false, configRequired=false;
+        bool noControl=false, headless=false, replay=false, configRequired=false,legacyWindows=false;
+        int displayFps=5;
         for(int i=1;i<argc;++i) {
             const std::string arg=argv[i];
             auto value=[&]() { if(++i>=argc) throw std::invalid_argument("Missing argument for "+arg); return std::string(argv[i]); };
@@ -179,9 +181,17 @@ int main(int argc,char **argv) {
             else if(arg=="--replay") { source=value(); replay=noControl=true; }
             else if(arg=="--no-control") noControl=true;
             else if(arg=="--headless") headless=true;
+            else if(arg=="--legacy-windows") legacyWindows=true;
+            else if(arg=="--display-fps") {
+                const auto text=value(); size_t used=0;
+                displayFps=std::stoi(text,&used);
+                if(used!=text.size()||displayFps<1||displayFps>10)
+                    throw std::invalid_argument("--display-fps must be an integer from 1 to 10");
+            }
             else if(arg=="--help") {
-                std::cout<<"trackview_race [--config trackview.json] [--race-config race.json] [--no-control] [--headless] [--replay video --detections records.jsonl]\n"
-                    <<"Default MANUAL; press a in image window. Replay never opens serial/gamepad.\n"; return 0;
+                std::cout<<"trackview_race [--config trackview.json] [--race-config race.json] [--no-control] [--headless] [--replay video --detections records.jsonl] [--display-fps 1..10] [--legacy-windows]\n"
+                    <<"Default MANUAL; press a in image window. ESC/q quits; v toggles AI/binary.\n"
+                    <<"Default one compact window at 5 FPS; Ctrl+C in terminal also requests stop. Replay never opens serial/gamepad.\n"; return 0;
             } else if(arg.rfind("--",0)==0) throw std::invalid_argument("Unknown option: "+arg);
             else source=arg;
         }
@@ -244,17 +254,17 @@ int main(int argc,char **argv) {
         std::ofstream displayTiming;
         if(!log->displayTimingPath().empty()) {
             displayTiming.open(log->displayTimingPath());
-            displayTiming << "render,display_ms,key\n";
+            displayTiming << "render,display_ms,key,render_ms,wait_key_ms,raw_key\n";
         }
-        std::cout<<"trackview_race experimental 2026-10-16 | "<<(noControl?"NO CONTROL":"MANUAL START")
+        std::cout<<"trackview_race cropui 2026-10-20 | "<<(noControl?"NO CONTROL":"MANUAL START")
             <<" | default limit="<<cruise<<" m/s | max="<<config.maxSpeed
             <<" | turn="<<pilot.curveSpeed()<<" quality="<<pilot.degradedSpeed()<<"\n";
         if(forkTrace) std::cout<<"[Trace] AUTO FORK CAPTURE | NO CONTROL ONLY | up to 12 episodes\n";
+        auto ms=[](auto end,auto begin) { return std::chrono::duration<double,std::milli>(end-begin).count(); };
         std::jthread driving([&] {
         std::string stage="startup";
         auto stageStarted=Clock::now();
         double captureMs=0, preprocessMs=0, trackMs=0;
-        auto ms=[](auto end,auto begin) { return std::chrono::duration<double,std::milli>(end-begin).count(); };
         try {
         while(!stopping.load()) {
             stage="before_capture"; stageStarted=Clock::now();
@@ -415,7 +425,10 @@ int main(int argc,char **argv) {
         int savedAiSamples=0;
         RaceSnapshot shownAi;
         double shownAiTime=0;
-        auto lastRender=Clock::now()-std::chrono::milliseconds(100);
+        const auto displayInterval=std::chrono::milliseconds(1000/displayFps);
+        auto lastRender=Clock::now()-displayInterval;
+        bool showBinary=false;
+        int flushedRender=-1;
         while(!stopping.load() && !display.finished.load()) {
             // 图形界面由主线程处理，线程之间只传递最新的只读图像快照。
             if(car && car->hasFault()) { display.failed=true; break; }
@@ -425,26 +438,42 @@ int main(int argc,char **argv) {
             }
             const auto rendered=Clock::now();
             cv::Mat image,bin;
-            if(rendered-lastRender>=std::chrono::milliseconds(100)) {
+            if(rendered-lastRender>=displayInterval) {
                 if(!display.snapshot(image,bin)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     display.progress(); continue;
                 }
-                cv::imshow("track_view",image); cv::imshow("binarized",bin);
                 auto snapshot=aiPreview.snapshot();
                 shownAi=std::move(snapshot.first);
                 shownAiTime=replay?snapshot.second:raceTime();
-                cv::imshow("AI detections",racePreviewImage(shownAi,shownAiTime,raceConfig));
+                if(legacyWindows) {
+                    cv::imshow("track_view",image); cv::imshow("binarized",bin);
+                    cv::imshow("AI detections",racePreviewImage(shownAi,shownAiTime,raceConfig));
+                } else cv::imshow("track_view",raceCompactView(image,bin,shownAi,shownAiTime,raceConfig,showBinary));
                 lastRender=Clock::now(); ++render;
             }
-            const int key=cv::waitKey(10);
+            const auto waitingKey=Clock::now();
+            const int rawKey=cv::waitKeyEx(10);
+            const int key=raceUiKey(rawKey);
+            const auto receivedKey=Clock::now();
+            const bool quit=raceUiQuit(key);
+            // 收到退出/停车键后，先禁止运动，再写诊断和等待图像保存。
+            if(quit) {
+                stopping=true;
+                if(car) { try { car->latchStop(); } catch(...) {} }
+            } else if(key==' '&&car) car->pauseMotion();
             display.progress();
             if(displayTiming && render>0) {
                 displayTiming << render << ',' << std::chrono::duration<double,std::milli>(Clock::now()-rendered).count()
-                    << ',' << key << '\n';
-                displayTiming.flush();
+                    << ',' << key << ',' << ms(waitingKey,rendered) << ',' << ms(receivedKey,waitingKey)
+                    << ',' << rawKey << '\n';
+                if(key>=0||render!=flushedRender) { displayTiming.flush(); flushedRender=render; }
             }
-            if(key==27) break;
+            if(quit) {
+                std::cout<<"[Exit] Quit key received; control stop requested, saving diagnostics..."<<std::endl;
+                break;
+            }
+            if(key=='v'||key=='V') { showBinary=!showBinary; lastRender=Clock::now()-displayInterval; continue; }
             if(key=='s'||key=='S') {
                 if(!noControl) std::cout<<"[Sample] Use --no-control to save AI images.\n";
                 else {
@@ -458,7 +487,6 @@ int main(int argc,char **argv) {
                 continue;
             }
             display.post(key);
-            if(key==' ' && car) car->pauseMotion(); // 立即禁止运动，防止工作线程竞争写入旧的行驶指令。
         }
         stopping=true;
         if(car) { try { car->latchStop(); } catch(...) {} }

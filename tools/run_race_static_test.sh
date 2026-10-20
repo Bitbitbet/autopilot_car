@@ -8,9 +8,9 @@ fi
 MODE="${1:-baseline}"
 case "$MODE" in baseline|signal|limit) ;; *) printf '%s\n' '仅支持 baseline、signal、limit。' >&2; exit 2 ;; esac
 cd -- "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-PROGRAM=./trackview_race_topology
+PROGRAM=./trackview_race_cropui
 if [ ! -x "$PROGRAM" ]; then
-    printf '%s\n' '缺少可执行的 trackview_race_topology，请先上传并 chmod +x ./trackview_race_topology。' >&2
+    printf '%s\n' '缺少可执行的 trackview_race_cropui，请先上传并 chmod +x ./trackview_race_cropui。' >&2
     exit 1
 fi
 for file in trackview.json race.json; do
@@ -40,11 +40,11 @@ if mode=='limit':
     config['limitedSpeed']=0.15
 Path(config_path).write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8')
 sha=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
-meta={'mode':mode,'no_control':True,'binary':'trackview_race_topology',
-      'binary_sha256':sha('trackview_race_topology'),'trackview_config_sha256':sha(track),
+meta={'mode':mode,'no_control':True,'binary':'trackview_race_cropui',
+      'binary_sha256':sha('trackview_race_cropui'),'trackview_config_sha256':sha(track),
       'source_race_config_sha256':sha(race),'test_race_config':config_path,
       'test_race_config_sha256':sha(config_path),
-      'command':['./trackview_race_topology','--config','./trackview.json',
+      'command':['./trackview_race_cropui','--config','./trackview.json',
                  '--race-config',config_path,'--no-control']}
 Path(meta_path).write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
 PY

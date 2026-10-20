@@ -40,3 +40,11 @@ target_link_libraries(race_topology_regression PRIVATE track nlohmann_json pthre
 add_executable(race_boundary_audit race_boundary_audit.cpp)
 target_include_directories(race_boundary_audit PRIVATE ../src/tool)
 target_link_libraries(race_boundary_audit PRIVATE track nlohmann_json pthread)
+
+add_executable(race_crop_regression race_crop_regression.cpp)
+target_include_directories(race_crop_regression PRIVATE ../src/tool)
+target_link_libraries(race_crop_regression PRIVATE track nlohmann_json pthread)
+
+add_executable(race_ui_regression race_ui_regression.cpp)
+target_include_directories(race_ui_regression PRIVATE ../src/tool)
+target_link_libraries(race_ui_regression PRIVATE tools nlohmann_json pthread)

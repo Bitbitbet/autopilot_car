@@ -19,10 +19,10 @@ class StaticLauncherTests(unittest.TestCase):
         shutil.copy2(self.repo/'tools/run_race_static_test.sh', self.launcher)
         for name in ['race.json', 'trackview.json']:
             shutil.copy2(self.repo/'config'/name, self.bin/name)
-        (self.bin/'trackview_race_topology').write_text(
+        (self.bin/'trackview_race_cropui').write_text(
             '#!/usr/bin/env python3\nimport json,sys\n'
             'open("invocation.json","w").write(json.dumps(sys.argv[1:]))\n', encoding='utf-8')
-        (self.bin/'trackview_race_topology').chmod(0o755)
+        (self.bin/'trackview_race_cropui').chmod(0o755)
 
     def tearDown(self):
         self.assertEqual(self.bin.resolve().parent, (self.repo/'.cache').resolve())
@@ -58,7 +58,7 @@ class StaticLauncherTests(unittest.TestCase):
         path.write_text(json.dumps(config))
         self.assertNotEqual(self.invoke('limit').returncode, 0)
         self.assertFalse((self.bin/'invocation.json').exists())
-        (self.bin/'trackview_race_topology').unlink()
+        (self.bin/'trackview_race_cropui').unlink()
         self.assertNotEqual(self.invoke('limit').returncode, 0)
 
 

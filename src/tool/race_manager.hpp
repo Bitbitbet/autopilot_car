@@ -56,6 +56,8 @@ inline std::vector<std::pair<int,int>> raceRoadBlocks(const cv::Mat &bin,int row
 }
 
 // 分叉必须是同一组通路持续延伸至搜索区远端，不能把不相邻的几行相加。
+// 再用搜索区上方直到图像顶边的可见像素复核分隔带，避免裁掉圆环内部的白色。
+// 顶部复核只参与判别，不把这些行送入 v6 的转向路径。
 // 车头图案会在更远处重新合成一片白色；牌面的圆环会分成两个黑边，
 // 都不满足道路分隔带连续的条件。判断使用本帧像素，AI 漏检时也不沿用旧框。
 // 方向只在通过此检查的分叉上生效，不采用看到方向牌就删掉半边线的开环转向。
@@ -73,7 +75,7 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
     std::vector<std::pair<int,int>> previousGaps;
     int missing=0,continuous=0,forkStart=-1;
     bool rejected=false,reachedFarEnd=false;
-    for(int row=start;row>track.rowCutUp;row-=2) {
+    for(int row=start;row>=0;row=(row==0?-1:std::max(0,row-2))) {
         auto blocks=raceRoadBlocks(bin,row,low,high,cfg,signRegions);
         if(blocks.empty()) {
             // 图像断层不能拼成连续分叉，也不能宣称已看清远端。
@@ -97,7 +99,7 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
                     if(middle<gaps[i].first||middle>gaps[i].second) rejected=true;
                 }
             }
-            if(!rejected) {
+            if(!rejected&&row>track.rowCutUp) {
                 if(continuous==0) forkStart=row;
                 ++continuous;
             }
@@ -105,8 +107,8 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
         }
         // 几何检查保留所有连通支路，避免先选了牌面内部的白色而丢失两侧路面。
         low=blocks.front().first; high=blocks.back().second;
-        rows.push_back({row,std::move(blocks)});
-        reachedFarEnd=row-2<=track.rowCutUp;
+        if(row>track.rowCutUp) rows.push_back({row,std::move(blocks)});
+        reachedFarEnd=row==0;
     }
     if(reachedFarEnd&&!rejected) out.splitRows=continuous;
 
