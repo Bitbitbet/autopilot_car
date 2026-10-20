@@ -1,0 +1,4 @@
+start_frame,end_frame,expected_label,road_layout,notes
+1,100,,straight,仅示例；替换为你实际核对过的范围
+101,150,limit,straight,牌面持续完整出现在这些图像帧里
+151,200,none,straight,确认无牌的画面

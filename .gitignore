@@ -7,3 +7,5 @@ CMakeUserPresets.json
 arm64-linux-gnu.toolchain.cmake
 res
 trackview_logs/
+__pycache__/
+race_reports/
