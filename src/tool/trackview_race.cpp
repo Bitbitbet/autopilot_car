@@ -5,6 +5,7 @@
 #include "race_preview.hpp"
 #include "race_trace.hpp"
 #include "race_ui.hpp"
+#include "race_trial.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
 #include "predeal.hpp"
@@ -172,6 +173,7 @@ int main(int argc,char **argv) {
         std::string raceConfigPath="race.json", detectionPath;
         bool noControl=false, headless=false, replay=false, configRequired=false,legacyWindows=false;
         int displayFps=5;
+        double trialSeconds=0;
         for(int i=1;i<argc;++i) {
             const std::string arg=argv[i];
             auto value=[&]() { if(++i>=argc) throw std::invalid_argument("Missing argument for "+arg); return std::string(argv[i]); };
@@ -182,6 +184,11 @@ int main(int argc,char **argv) {
             else if(arg=="--no-control") noControl=true;
             else if(arg=="--headless") headless=true;
             else if(arg=="--legacy-windows") legacyWindows=true;
+            else if(arg=="--trial-seconds") {
+                const auto text=value(); size_t used=0; trialSeconds=std::stod(text,&used);
+                if(used!=text.size()||!std::isfinite(trialSeconds)||trialSeconds<.5||trialSeconds>3)
+                    throw std::invalid_argument("--trial-seconds must be 0.5..3");
+            }
             else if(arg=="--display-fps") {
                 const auto text=value(); size_t used=0;
                 displayFps=std::stoi(text,&used);
@@ -191,13 +198,15 @@ int main(int argc,char **argv) {
             else if(arg=="--help") {
                 std::cout<<"trackview_race [--config trackview.json] [--race-config race.json] [--no-control] [--headless] [--replay video --detections records.jsonl] [--display-fps 1..10] [--legacy-windows]\n"
                     <<"Default MANUAL; press a in image window. ESC/q quits; v toggles AI/binary.\n"
-                    <<"Default one compact window at 5 FPS; Ctrl+C in terminal also requests stop. Replay never opens serial/gamepad.\n"; return 0;
+                    <<"Default one compact window at 5 FPS; Ctrl+C in terminal also requests stop. Replay never opens serial/gamepad.\n"
+                    <<"--trial-seconds 0.5..3: one-shot low-speed stop timer; requires configured speeds <=0.10 m/s.\n"; return 0;
             } else if(arg.rfind("--",0)==0) throw std::invalid_argument("Unknown option: "+arg);
             else source=arg;
         }
         if(!noControl && source.rfind("/dev/video",0)!=0)
             throw std::invalid_argument("Video files require --replay (no vehicle commands)");
         TrackviewConfig config; config.load(configPath,configRequired);
+        if(trialSeconds>0) RaceTrialDeadline::requireLowSpeed(config.maxSpeed,config.cruiseSpeed,config.curveSpeed,config.degradedSpeed);
         if(!detectionPath.empty()&&!replay)
             throw std::invalid_argument("Recorded detections require --replay; never use them to drive a car");
         if(replay&&detectionPath.empty())
@@ -220,7 +229,7 @@ int main(int argc,char **argv) {
             raceLog.open(log->outputDirectory()/"race.csv");
             detectionLog.open(log->outputDirectory()/"detections.jsonl");
             std::ofstream(log->outputDirectory()/"race-config.json") << nlohmann::json(raceConfig).dump(2);
-            raceLog << "frame,state,reason,ai_sequence,ai_age_s,fresh,stop,cap,branch_selected,command_speed\n";
+            raceLog << "frame,state,reason,ai_sequence,ai_age_s,fresh,stop,cap,branch_selected,command_speed,geometry_split_rows,red_cap_components\n";
         }
         uint64_t raceFrame=0,loggedSequence=0;
         std::string previousRaceState;
@@ -254,12 +263,25 @@ int main(int argc,char **argv) {
         std::ofstream displayTiming;
         if(!log->displayTimingPath().empty()) {
             displayTiming.open(log->displayTimingPath());
-            displayTiming << "render,display_ms,key,render_ms,wait_key_ms,raw_key\n";
+            displayTiming << "render,display_ms,key,render_ms,wait_key_ms,raw_key,time_s\n";
         }
-        std::cout<<"trackview_race cropui 2026-10-20 | "<<(noControl?"NO CONTROL":"MANUAL START")
+        std::cout<<"trackview_race | "<<(noControl?"NO CONTROL":"MANUAL START")
             <<" | default limit="<<cruise<<" m/s | max="<<config.maxSpeed
             <<" | turn="<<pilot.curveSpeed()<<" quality="<<pilot.degradedSpeed()<<"\n";
         if(forkTrace) std::cout<<"[Trace] AUTO FORK CAPTURE | NO CONTROL ONLY | up to 12 episodes\n";
+        std::atomic_bool trialStop{false};
+        std::atomic_int trialSerialStop{-1};
+        RaceTrialDeadline trial(trialSeconds,[&] {
+            trialStop=true; stopping=true;
+            // 先锁定零速，再打印和等待诊断结束；不依赖 GUI 线程返回。
+            if(car) {
+                try { car->latchStop(); trialSerialStop=1; }
+                catch(...) { trialSerialStop=0; std::cerr<<"[Trial] Serial stop failed; use physical stop."<<std::endl; }
+            }
+            std::cout<<"[Trial] Timed stop requested; restart program for another trial."<<std::endl;
+        });
+        if(trial.enabled()) std::cout<<"[Trial] ONE SHOT | <=0.10 m/s | "<<trialSeconds
+            <<"s after AUTO; manual throttle disabled."<<std::endl;
         auto ms=[](auto end,auto begin) { return std::chrono::duration<double,std::milli>(end-begin).count(); };
         std::jthread driving([&] {
         std::string stage="startup";
@@ -349,7 +371,8 @@ int main(int argc,char **argv) {
                     mode=Mode::Manual; pilot.resetControl();
                 }
             }
-            const auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track);
+            if(mode==Mode::Auto&&trial.arm()) std::cout<<"[Trial] Timer armed."<<std::endl;
+            const auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image);
             if(forkTrace) forkTrace->observe(raceFrame,observationTime,image,bin,track,observation,racePlan);
             const auto &pathLeft=racePlan.selectedBranch?racePlan.path.left:track.pointsEdgeLeft;
             const auto &pathRight=racePlan.selectedBranch?racePlan.path.right:track.pointsEdgeRight;
@@ -365,7 +388,7 @@ int main(int argc,char **argv) {
                     if(racePlan.stop) pilot.resetControl();
                     else { speed=pilot.speedFor(std::min(cruise,racePlan.speedCap),dt); servo=pilot.servo; }
                 }
-                else { speed=std::clamp(jsSpeed,-config.maxSpeed,config.maxSpeed); servo=jsServo; }
+                else if(!trial.enabled()) { speed=std::clamp(jsSpeed,-config.maxSpeed,config.maxSpeed); servo=jsServo; }
             }
             if(car) {
                 if(car->hasFault()) throw std::runtime_error("Serial command timeout during processing");
@@ -379,11 +402,16 @@ int main(int argc,char **argv) {
             }
             if(raceLog) raceLog<<raceFrame<<','<<racePlan.state<<','<<racePlan.reason<<','
                 <<observation.sequence<<','<<racePlan.detectionAge<<','<<racePlan.fresh<<','
-                <<racePlan.stop<<','<<racePlan.speedCap<<','<<racePlan.selectedBranch<<','<<speed<<'\n';
+                <<racePlan.stop<<','<<racePlan.speedCap<<','<<racePlan.selectedBranch<<','<<speed<<','
+                <<racePlan.geometrySplitRows<<','<<racePlan.colorRejectedComponents<<'\n';
             if(detectionLog&&observation.sequence>loggedSequence) {
                 nlohmann::json entries=nlohmann::json::array();
-                for(const auto &d:observation.detections) entries.push_back({{"type",d.type},{"score",d.score},
-                    {"x",d.x},{"y",d.y},{"width",d.width},{"height",d.height}});
+                for(const auto &d:observation.detections) {
+                    const auto review=reviewRaceDetection(d,observation.image,raceConfig);
+                    entries.push_back({{"type",d.type},{"score",d.score},{"x",d.x},{"y",d.y},
+                        {"width",d.width},{"height",d.height},{"accepted",review.accepted},
+                        {"checked_stop",review.checkedStop},{"acceptance_reason",review.reason}});
+                }
                 detectionLog<<nlohmann::json({{"frame",observation.sequence},{"captured",observation.captured},
                     {"detections",entries},{"direction_checks",raceDirectionJson(observation)}}).dump()<<'\n';
                 loggedSequence=observation.sequence;
@@ -399,7 +427,7 @@ int main(int argc,char **argv) {
             log->recordTiming(captureMs,preprocessMs,trackMs,controlMs,ms(Clock::now(),controlled));
         }
         if(car) car->resetVelocity();
-        log->event(stopping.load()?"signal or UI stop":"normal exit",pilot,lastOverlay);
+        log->event(trialStop.load()?"timed low-speed trial stop":stopping.load()?"signal or UI stop":"normal exit",pilot,lastOverlay);
         } catch(const std::exception &e) {
             if(car) { try { car->latchStop(); } catch(...) {} }
             const std::string detail=std::string(e.what())+"; stage="+stage+
@@ -408,7 +436,7 @@ int main(int argc,char **argv) {
                 " preprocess_ms="+std::to_string(preprocessMs)+
                 " track_ms="+std::to_string(trackMs);
             if(stopping.load() && !display.failed.load()) {
-                log->event("operator requested exit",pilot,lastOverlay);
+                log->event(trialStop.load()?"timed low-speed trial stop":"operator requested exit",pilot,lastOverlay);
             } else {
                 log->event(detail,pilot,lastOverlay);
                 std::cerr<<"[Error] "<<detail<<'\n'; display.failed=true;
@@ -431,7 +459,7 @@ int main(int argc,char **argv) {
         int flushedRender=-1;
         while(!stopping.load() && !display.finished.load()) {
             // 图形界面由主线程处理，线程之间只传递最新的只读图像快照。
-            if(car && car->hasFault()) { display.failed=true; break; }
+            if(car && car->hasFault() && !stopping.load()) { display.failed=true; break; }
             if(headless) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
@@ -466,7 +494,7 @@ int main(int argc,char **argv) {
             if(displayTiming && render>0) {
                 displayTiming << render << ',' << std::chrono::duration<double,std::milli>(Clock::now()-rendered).count()
                     << ',' << key << ',' << ms(waitingKey,rendered) << ',' << ms(receivedKey,waitingKey)
-                    << ',' << rawKey << '\n';
+                    << ',' << rawKey << ',' << std::chrono::duration<double>(receivedKey-start).count() << '\n';
                 if(key>=0||render!=flushedRender) { displayTiming.flush(); flushedRender=render; }
             }
             if(quit) {
@@ -491,6 +519,13 @@ int main(int argc,char **argv) {
         stopping=true;
         if(car) { try { car->latchStop(); } catch(...) {} }
         driving.join();
+        trial.finish();
+        if(trial.enabled()&&!log->outputDirectory().empty()) {
+            std::ofstream(log->outputDirectory()/"trial-stop.json")<<nlohmann::json({
+                {"limit_s",trialSeconds},{"armed",trial.armed()},{"expired",trial.expired()},
+                {"no_control",noControl},{"serial_zero_request_result",trialSerialStop.load()},
+                {"serial_result_meaning","-1:not attempted; 0:failed; 1:API completed, not measured wheel stop"}}).dump(2);
+        }
         if(forkTrace) {
             forkTrace->finish();
             std::cout<<"[Trace] saved="<<forkTrace->savedCount()<<" failed="<<forkTrace->failedCount()

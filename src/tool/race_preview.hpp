@@ -1,5 +1,6 @@
 #pragma once
 #include "race_perception.hpp"
+#include "race_detection_review.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -11,9 +12,7 @@ inline const char *raceLabel(int type) {
     return type>=0&&type<15?names[type]:"unknown";
 }
 inline bool raceBoxValid(const PredictResult &d) {
-    return d.type>=0&&d.type<15&&std::isfinite(d.score)&&d.score>=0&&d.score<=1&&
-        d.x>=0&&d.y>=0&&d.width>0&&d.height>0&&d.x<320&&d.y<240&&
-        d.width<=320-d.x&&d.height<=240-d.y;
+    return raceDetectionBoxValid(d);
 }
 inline nlohmann::json raceDirectionJson(const RaceSnapshot &s) {
     nlohmann::json checks=nlohmann::json::array();
@@ -23,15 +22,23 @@ inline nlohmann::json raceDirectionJson(const RaceSnapshot &s) {
         {"reason",c.reason},{"x",c.box.x},{"y",c.box.y},{"width",c.box.width},{"height",c.box.height}});
     return checks;
 }
-inline nlohmann::json raceDetectionJson(const RaceSnapshot &s,double time,float threshold) {
+inline nlohmann::json raceDetectionJson(const RaceSnapshot &s,double time,const RaceConfig &config) {
     nlohmann::json boxes=nlohmann::json::array();
-    for(const auto &d:s.detections) if(raceBoxValid(d)) boxes.push_back({
+    for(const auto &d:s.detections) if(raceBoxValid(d)) {
+        const auto review=reviewRaceDetection(d,s.image,config);
+        boxes.push_back({
         {"type",d.type},{"label",raceLabel(d.type)},{"score",d.score},
         {"x",d.x},{"y",d.y},{"width",d.width},{"height",d.height},
-        {"passes_threshold",d.score>=threshold}});
+        {"passes_threshold",d.score>=config.confidence},{"accepted",review.accepted},
+        {"checked_stop",review.checkedStop},{"acceptance_reason",review.reason},{"red_fraction",review.redFraction}});
+    }
     return {{"frame",s.sequence},{"captured",s.captured},{"age_s",time-s.captured},
-        {"failed",s.failed},{"error",s.error},{"confidence_threshold",threshold},{"detections",boxes},
+        {"failed",s.failed},{"error",s.error},{"confidence_threshold",config.confidence},
+        {"stop_candidate_threshold",config.stopCandidateConfidence},{"detections",boxes},
         {"direction_checks",raceDirectionJson(s)}};
+}
+inline nlohmann::json raceDetectionJson(const RaceSnapshot &s,double time,float threshold) {
+    RaceConfig config;config.confidence=threshold;return raceDetectionJson(s,time,config);
 }
 inline cv::Mat racePreviewImage(const RaceSnapshot &s,double time,const RaceConfig &config) {
     cv::Mat canvas=cv::Mat::zeros(300,640,CV_8UC3);
@@ -45,12 +52,16 @@ inline cv::Mat racePreviewImage(const RaceSnapshot &s,double time,const RaceConf
         s.image.copyTo(canvas(cv::Rect(0,0,320,240)));
     int count=0,line=65;
     for(const auto &d:s.detections) {
-        if(!raceBoxValid(d)||d.score<config.confidence) continue;
-        ++count;
-        cv::rectangle(canvas,{d.x,d.y,d.width,d.height},status,1);
+        if(!raceBoxValid(d)) continue;
+        const auto review=reviewRaceDetection(d,s.image,config);
+        if(!review.accepted&&!review.checkedStop) continue;
+        const auto color=review.accepted?status:cv::Scalar(0,140,255);
+        if(review.accepted) ++count;
+        cv::rectangle(canvas,{d.x,d.y,d.width,d.height},color,1);
         std::ostringstream label; label<<raceLabel(d.type)<<' '<<std::fixed<<std::setprecision(2)<<d.score;
-        cv::putText(canvas,label.str(),{d.x,std::max(12,d.y-3)},cv::FONT_HERSHEY_PLAIN,.8,status,1);
-        if(line<280) { text(label.str(),line,status); line+=15; }
+        if(review.checkedStop) label<<(review.accepted?" CHECKED":" REJECT");
+        cv::putText(canvas,label.str(),{d.x,std::max(12,d.y-3)},cv::FONT_HERSHEY_PLAIN,.8,color,1);
+        if(line<280) { text(label.str(),line,color); line+=15; }
     }
     for(const auto &c:s.directionChecks) {
         const cv::Scalar color=c.finalType<0?cv::Scalar(0,180,255):status;
@@ -99,7 +110,7 @@ inline bool saveRaceSample(const std::filesystem::path &directory,const RaceSnap
        !cv::imwrite((path/"detections.png").string(),racePreviewImage(s,time,config)))
         throw std::runtime_error("Cannot save AI sample image");
     std::ofstream result(path/"detections.json");
-    result<<raceDetectionJson(s,time,config.confidence).dump(2);
+    result<<raceDetectionJson(s,time,config).dump(2);
     if(!result) throw std::runtime_error("Cannot save AI sample metadata");
     return true;
 }

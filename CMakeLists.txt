@@ -44,6 +44,20 @@ add_executable(trackview_race src/tool/trackview_race.cpp src/tool/race_backend_
 target_link_libraries(trackview_race PRIVATE control track predeal tools nlohmann_json PkgConfig::evdev PkgConfig::udev pthread dl)
 add_dependencies(trackview_race race_npu_backend)
 
+# 保存图片的诊断后端：只链接检测器，不连接相机、手柄或车辆控制接口。
+add_executable(race_image_probe src/tool/race_image_probe.cpp src/tool/race_image_probe_main.cpp)
+target_link_libraries(race_image_probe PRIVATE detection nlohmann_json)
+target_link_options(race_image_probe PRIVATE -static-libstdc++ -static-libgcc)
+if(CAR_CXX_RUNTIME)
+    target_link_options(race_image_probe PRIVATE "-L${CAR_CXX_RUNTIME}/lib")
+endif()
+add_executable(stop_candidate_preview src/tool/stop_candidate_preview.cpp)
+target_link_libraries(stop_candidate_preview PRIVATE detection predeal nlohmann_json)
+target_link_options(stop_candidate_preview PRIVATE -static-libstdc++ -static-libgcc)
+if(CAR_CXX_RUNTIME)
+    target_link_options(stop_candidate_preview PRIVATE "-L${CAR_CXX_RUNTIME}/lib")
+endif()
+
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)
 target_link_libraries(calibration PRIVATE show tools)

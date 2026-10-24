@@ -1,6 +1,8 @@
 #pragma once
 #include "race_perception.hpp"
 #include "track.hpp"
+#include "race_appearance.hpp"
+#include "race_detection_review.hpp"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -19,9 +21,7 @@ inline std::vector<cv::Rect> raceSignRegions(const RaceSnapshot &snap,const Race
             d.type==LABEL_STOP||d.type==LABEL_FLOW||d.type==LABEL_PARK||
             d.type==LABEL_FORK||d.type==LABEL_LEFT||d.type==LABEL_CHOICE||
             d.type==LABEL_YLEFT||d.type==LABEL_YRIGHT;
-        if(!sign||!std::isfinite(d.score)||d.score<cfg.confidence||d.score>1||
-           d.x<0||d.y<0||d.width<=0||d.height<=0||d.x>=320||d.y>=240||
-           d.width>320-d.x||d.height>240-d.y) continue;
+        if(!sign||!reviewRaceDetection(d,snap.image,cfg).accepted) continue;
         // 原始图像为 320×240；留出少量检测抖动和异步帧位移的余量。
         constexpr int margin=12;
         regions.push_back(cv::Rect(d.x-margin,d.y-margin,d.width+2*margin,d.height+2*margin)&
@@ -136,6 +136,7 @@ struct RacePlan {
     float speedCap=10.f;
     bool stop=false,buzzer=false,fresh=false;
     bool selectedBranch=false;
+    int colorRejectedComponents=0,geometrySplitRows=0;
     double detectionAge=-1;
     const char *state="AI_WAIT",*reason="AI_WAIT";
     RacePath path;
@@ -165,9 +166,7 @@ class RaceManager {
         lastSequence=snap.sequence; lastCapture=snap.captured;
         std::array<bool,15> present{};
         for(const auto &d:snap.detections) {
-            if(d.type<0||d.type>=15||!std::isfinite(d.score)||d.score<cfg.confidence||d.score>1||
-               d.x<0||d.y<0||d.width<=0||d.height<=0||d.x>319||d.y>239||
-               d.width>320-d.x||d.height>240-d.y) continue;
+            if(!reviewRaceDetection(d,snap.image,cfg).accepted) continue;
             if(!present[d.type]||d.score>boxes[d.type].score) boxes[d.type]=d;
             present[d.type]=true;
         }
@@ -179,14 +178,20 @@ public:
     bool aiReady(const RaceSnapshot &s,double time) const {
         return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
     }
-    RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track) {
+    RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track,
+                    const cv::Mat &currentImage={}) {
         now=time;
         RacePlan p;
         p.detectionAge=snap.sequence?time-snap.captured:-1;
         p.fresh=aiReady(snap,time);
         const bool newFrame=updateObservation(snap,p.fresh);
         const auto signRegions=p.fresh?raceSignRegions(snap,cfg):std::vector<cv::Rect>{};
-        const auto geometry=raceBranchPath(bin,track,0,cfg,signRegions);
+        auto geometry=raceBranchPath(bin,track,0,cfg,signRegions);
+        // 只在原几何规则将要判为分叉时检查颜色，避免正常巡线增加连通域分析。
+        const auto geometryBin=geometry.splitRows>=cfg.minBranchRows?
+            raceAppearanceGeometry(bin,currentImage,p.colorRejectedComponents):bin;
+        if(p.colorRejectedComponents) geometry=raceBranchPath(geometryBin,track,0,cfg,signRegions);
+        p.geometrySplitRows=geometry.splitRows;
         if(active!=lastActive) {
             // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
             if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0; }
@@ -274,6 +279,9 @@ public:
             p.stop=true; p.state="SIGNAL_WAIT"; p.reason="WAIT_FRESH_FLOW";
             if(newFrame&&seen(LABEL_FLOW)&&counts[LABEL_STOP]==0&&now-stateSince>=cfg.stopHoldTime) {
                 enter(State::Lane); cooldownUntil=now+cfg.cooldown; p.stop=false;
+                // 放行当帧同步更新显示，避免日志仍写等待、速度却已开始恢复。
+                p.state=limited?"LIMIT_ZONE":"LANE";
+                p.reason=limited?"LIMIT_SIGN":"CRUISE";
             }
             return p;
         }
@@ -300,7 +308,7 @@ public:
         if(state==State::ForkSelect) {
             p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
             p.state=direction<0?"FORK_LEFT":"FORK_RIGHT"; p.reason="CONNECTED_BRANCH";
-            p.path=raceBranchPath(bin,track,direction,cfg,signRegions); p.selectedBranch=true;
+            p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions); p.selectedBranch=true;
             if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
             else if(now-stateSince>cfg.forkMaxTime) { enter(State::Fault); reviewReason="FORK_TIMEOUT"; }
             else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0) {

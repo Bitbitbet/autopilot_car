@@ -10,19 +10,22 @@ import unittest
 
 @unittest.skipUnless(os.name == 'posix', '需要 Linux bash；使用离线 WSL 环境测试')
 class StaticLauncherTests(unittest.TestCase):
+    program = 'trackview_race_cropui'
+    source_launcher = 'run_race_static_test.sh'
+
     def setUp(self):
         self.repo = Path(__file__).parents[1]
         cache = self.repo/'.cache'; cache.mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=cache)
         self.bin = Path(self.temp.name)
         self.launcher = self.bin/'run_race_static_test.sh'
-        shutil.copy2(self.repo/'tools/run_race_static_test.sh', self.launcher)
+        shutil.copy2(self.repo/'tools'/self.source_launcher, self.launcher)
         for name in ['race.json', 'trackview.json']:
             shutil.copy2(self.repo/'config'/name, self.bin/name)
-        (self.bin/'trackview_race_cropui').write_text(
+        (self.bin/self.program).write_text(
             '#!/usr/bin/env python3\nimport json,sys\n'
             'open("invocation.json","w").write(json.dumps(sys.argv[1:]))\n', encoding='utf-8')
-        (self.bin/'trackview_race_cropui').chmod(0o755)
+        (self.bin/self.program).chmod(0o755)
 
     def tearDown(self):
         self.assertEqual(self.bin.resolve().parent, (self.repo/'.cache').resolve())
@@ -58,8 +61,13 @@ class StaticLauncherTests(unittest.TestCase):
         path.write_text(json.dumps(config))
         self.assertNotEqual(self.invoke('limit').returncode, 0)
         self.assertFalse((self.bin/'invocation.json').exists())
-        (self.bin/'trackview_race_cropui').unlink()
+        (self.bin/self.program).unlink()
         self.assertNotEqual(self.invoke('limit').returncode, 0)
+
+
+class AppearanceLauncherTests(StaticLauncherTests):
+    program = 'trackview_race_appearance'
+    source_launcher = 'run_race_static_test_v3.sh'
 
 
 if __name__ == '__main__':

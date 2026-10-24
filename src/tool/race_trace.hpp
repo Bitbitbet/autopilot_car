@@ -18,6 +18,7 @@ public:
         std::string state,reason;
         bool stop=false;
         int rawSplitRows=0,maskedSplitRows=0,rowCutUp=0,rowCutBottom=0;
+        int colorFilteredSplitRows=0,colorRejectedComponents=0;
         std::vector<PointX> left,right;
         std::vector<cv::Rect> signRegions;
     };
@@ -67,6 +68,7 @@ private:
             for(const auto &r:f.signRegions) regions.push_back({r.x,r.y,r.width,r.height});
             frames.push_back({{"frame",f.number},{"time",f.time},{"state",f.state},{"reason",f.reason},
                 {"stop",f.stop},{"raw_split_rows",f.rawSplitRows},{"masked_split_rows",f.maskedSplitRows},
+                {"color_filtered_split_rows",f.colorFilteredSplitRows},{"red_cap_components",f.colorRejectedComponents},
                 {"row_cut_up",f.rowCutUp},{"row_cut_bottom",f.rowCutBottom},{"left",left},{"right",right},
                 {"sign_regions",regions},{"camera",prefix+"-camera.png"},{"binary",prefix+"-binary.png"},
                 {"ai_image",f.ai.image.empty()?"":aiName},
@@ -109,6 +111,8 @@ public:
         if(plan.fresh) f.signRegions=raceSignRegions(snapshot,config);
         f.rawSplitRows=raceBranchPath(bin,track,0,config).splitRows;
         f.maskedSplitRows=raceBranchPath(bin,track,0,config,f.signRegions).splitRows;
+        f.colorFilteredSplitRows=plan.geometrySplitRows;
+        f.colorRejectedComponents=plan.colorRejectedComponents;
         if(collecting) {
             collecting->frames.push_back(f);
             if(--remaining==0) enqueue();

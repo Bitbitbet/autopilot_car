@@ -23,11 +23,14 @@ struct RaceConfig {
     float gateOpenAspect=0.75f;
     bool verifyForkArrows=true; // 对左右岔路类别增加蓝底白箭头几何复核。
     std::string modelDirectory="../res/models/yolov3_mobilenet_v1";
+    bool verifyStopCandidates=true;
+    float stopCandidateConfidence=.35f; // 仅停车牌的候选采集下限，不能用于放行或其他类别。
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(RaceConfig,confidence,maxDetectionAge,confirmGap,
         confirmFrames,limitedSpeed,forkSpeed,approachSpeed,directionMemory,
         forkConfirmTime,forkMinTime,forkMaxTime,forkExitTime,cooldown,minBranchWidth,
         minBranchGap,minBranchRows,triggerRow,obstacleRow,clearTime,stopAfterCross,
-        crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,verifyForkArrows,modelDirectory)
+        crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,verifyForkArrows,modelDirectory,
+        verifyStopCandidates,stopCandidateConfidence)
     void validate() const {
         auto range=[](float v,float lo,float hi) { return std::isfinite(v)&&v>=lo&&v<=hi; };
         if(!range(confidence,0.1f,1.f)||!range(maxDetectionAge,0.05f,1.f)||
@@ -41,7 +44,8 @@ struct RaceConfig {
            triggerRow<50||triggerRow>220||obstacleRow<50||obstacleRow>230||
            !range(clearTime,0.2f,3.f)||crossPassedRow<150||crossPassedRow>235||
            !range(crossClearTime,0.1f,2.f)||!range(stopHoldTime,0.1f,10.f)||
-           !range(gateOpenAspect,0.1f,1.f)||modelDirectory.empty())
+           !range(gateOpenAspect,0.1f,1.f)||modelDirectory.empty()||
+           !range(stopCandidateConfidence,.30f,.50f))
             throw std::invalid_argument("Invalid race configuration");
     }
     void load(const std::string &path) {

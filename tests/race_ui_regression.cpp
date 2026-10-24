@@ -23,6 +23,12 @@ int main() {
         check(raceUiQuit(raceUiKey(0xff1b)),"X11 Escape must be accepted");
         check(raceUiQuit('q')&&raceUiQuit('Q')&&!raceUiQuit('a'),"quit key mapping");
         check(raceUiKey(0x100020)==' ',"emergency space mapping");
+        for(int raw:{0xff51,0xff52,0xff53,0xff54,0xffe9,0xffe1,0xffbe,
+                     0x01000012,0x01000013,0x01000014,0x01000015,0x10ff51,0x03000012})
+            check(raceUiKey(raw)==-1,"backend special key aliased an application command");
+        check(raceUiQuit(raceUiKey(0x03000000))&&raceUiQuit(raceUiKey(0x10ff1b)),"modified backend Escape lost");
+        for(int key:{'a','A','s','S','v','V','q','Q','+','-','[',']',',','.'})
+            check(raceUiKey(key)==key,"ordinary command key changed");
         std::cout<<"PASS compact matched frames, view toggle, immutable images, Escape/Q and emergency key mapping\n";
     } catch(const std::exception &e) { std::cerr<<"FAIL "<<e.what()<<'\n'; return 1; }
 }

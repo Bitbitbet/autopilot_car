@@ -110,7 +110,32 @@ int main(int argc,char **argv) {
         p=signal.repeat({box(LABEL_GATE,80,20,100,130)},14);
         check(p.stop&&std::string(p.state)=="SIGNAL_WAIT","gate clearing must not discard signal-stop obligation");
         check(signal.repeat({box(LABEL_FLOW),box(LABEL_STOP)},18).stop,"stop beats simultaneous flow");
-        check(!signal.repeat({box(LABEL_FLOW)},5).stop,"fresh confirmed flow resumes after minimum stop");
+        bool released=false;
+        for(int i=0;i<5;++i) {
+            p=signal.step({box(LABEL_FLOW)});
+            if(!p.stop) {
+                check(std::string(p.state)=="LANE"&&std::string(p.reason)=="CRUISE",
+                      "released flow must update state text in the same frame");
+                released=true;
+            }
+        }
+        check(released,"fresh confirmed flow resumes after minimum stop");
+        // 等待期间的限速义务不能随绿牌一起解除，放行文字也必须与之相符。
+        Fixture limitedSignal;
+        limitedSignal.repeat({box(LABEL_LIMIT)});
+        limitedSignal.repeat({box(LABEL_STOP)});
+        limitedSignal.repeat({box(LABEL_CROSS,190,60,30)});
+        limitedSignal.repeat({},20);
+        bool limitedReleased=false;
+        for(int i=0;i<5;++i) {
+            p=limitedSignal.step({box(LABEL_FLOW)});
+            if(!p.stop) {
+                check(std::string(p.state)=="LIMIT_ZONE"&&std::string(p.reason)=="LIMIT_SIGN"&&p.speedCap==.4f,
+                      "flow release must preserve speed cap and matching state text");
+                limitedReleased=true;
+            }
+        }
+        check(limitedReleased,"limited signal release fixture did not release");
 
         Fixture invalid;
         auto d=box(LABEL_LIMIT); d.x=-1;
@@ -168,6 +193,16 @@ int main(int argc,char **argv) {
                 if(frame>=96) ds.push_back({{"type",LABEL_LIMIT},{"score",.95f},
                     {"x",200},{"y",80},{"width",30},{"height",40}});
                 labels<<nlohmann::json({{"frame",frame},{"detections",ds}}).dump()<<'\n';
+            }
+            // 长直道供一次性定时模式验证整程序退出，不连接真实车辆设备。
+            cv::VideoWriter longVideo((dir/"trial-long.avi").string(),
+                cv::VideoWriter::fourcc('M','J','P','G'),15,{320,240});
+            check(longVideo.isOpened(),"create timed entry fixture");
+            std::ofstream empty(dir/"trial-long.jsonl");
+            cv::Mat straight; cv::cvtColor(road(),straight,cv::COLOR_GRAY2BGR);
+            for(int frame=1;frame<=1000;++frame) {
+                longVideo.write(straight);
+                empty<<nlohmann::json({{"frame",frame},{"detections",nlohmann::json::array()}}).dump()<<'\n';
             }
         }
         std::cout<<"PASS race limits/fork geometry/AI freshness/signal/gate/task boundaries/asynchronous queue/matched preview and samples\n";
