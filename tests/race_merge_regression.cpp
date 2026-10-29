@@ -25,5 +25,22 @@ int main(){try{
         if(!space.parked(p)&&space.parkedObserved(p))noiseCase=true;}
     check(noiseCase,"Dwell still confuses planned clearance with physical containment");
     auto outside=goal;outside.x-=.15f;check(!space.parkedObserved(outside),"Large actual bay violation accepted");
+    RaceParkingControl control(space);RaceParkingObservation observation{route.entry.front(),1,1,1,true};
+    check(control.arm(route,observation,1,true),"Cannot arm settle test");double time=1;RaceParkingCommand command;
+    for(int i=0;i<1500;++i){time+=.08;observation.captured=time;++observation.sequence;command=control.update(observation,time,.08f,true);
+        if(std::string(command.state)=="PARK_DWELL")break;
+        observation.pose=raceParkingAdvance(observation.pose,command.speed*.08f,command.curvature,d);}
+    check(std::string(command.state)=="PARK_DWELL","Settle test did not park");
+    auto lastInside=observation.pose;bool found=false;
+    // Smooth visual drift up to the edge, then one transient outside sample;
+    // all inter-frame displacements remain below continuity limits.
+    for(int i=0;i<40&&!found;++i){lastInside=observation.pose;observation.pose.x-=.003f;
+        time+=.08;observation.captured=time;++observation.sequence;command=control.update(observation,time,.08f,true);
+        found=!space.parkedObserved(observation.pose);}
+    check(found,"No near-boundary drift case");
+    check(!control.failed()&&command.speed==0&&std::string(command.reason)=="WAIT_DWELL_POSE_SETTLE","Single jitter frame faults parked vehicle");
+    observation.pose=lastInside;
+    for(int i=0;i<25;++i){time+=.08;observation.captured=time;++observation.sequence;command=control.update(observation,time,.08f,true);
+        check(!control.failed()&&command.speed==0&&std::string(command.state)=="PARK_DWELL","Jitter counted toward completed dwell");}
     std::cout<<"PASS 640 capture normalization, aspect rejection, GUI latest-only/throttle, OpenCV worker limit, FPS-independent reverse samples and dwell observation margin\n";
 }catch(const std::exception &e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}
