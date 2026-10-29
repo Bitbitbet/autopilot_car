@@ -10,7 +10,7 @@
 #include <mutex>
 #include <thread>
 
-struct RaceSnapshot {
+struct DetectionSnapshot {
     uint64_t sequence = 0;
     double captured = 0;
     std::vector<PredictResult> detections;
@@ -35,7 +35,7 @@ class RacePerception {
     cv::Mat pending;
     double pendingTime = 0;
     uint64_t pendingSequence = 0;
-    RaceSnapshot latest;
+    DetectionSnapshot latest;
     bool stop = false;
     std::thread worker;
 
@@ -91,7 +91,7 @@ class RacePerception {
         }
         wake.notify_one();
     }
-    RaceSnapshot snapshot() {
+    DetectionSnapshot snapshot() {
         std::lock_guard lock(mutex);
         return latest;
     }

@@ -16,6 +16,8 @@
 #include <opencv2/opencv.hpp>
 
 using Clock = std::chrono::steady_clock;
+using cv::Mat;
+using cv::Point;
 using std::cerr;
 using std::cout;
 using std::greater;
@@ -122,7 +124,7 @@ int main(int argc, char **argv) {
             dt = cfg::kReferenceDt;
 
         perception->submit(image, uint64_t(t * 1000), t);
-        const RaceSnapshot observation = perception->snapshot();
+        const DetectionSnapshot observation = perception->snapshot();
         RacePlan race = raceManager.update(
             observation, t, dt, mode == Mode::Auto, bin, rows, image);
 

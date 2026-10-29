@@ -15,6 +15,7 @@ pkg_search_module(onnx REQUIRED IMPORTED_TARGET onnx)
 add_subdirectory(third_party/nlohmann_json)
 
 add_subdirectory(src/control)
+add_subdirectory(src/joystick)
 add_subdirectory(src/camera)
 add_subdirectory(src/tools)
 add_subdirectory(src/detection)
@@ -31,7 +32,7 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 
 # 查看轨道
 add_executable(trackview src/tool/track_view.cpp)
-target_link_libraries(trackview PRIVATE control track camera tools PkgConfig::evdev PkgConfig::udev pthread)
+target_link_libraries(trackview PRIVATE camera track)
 
 # 比赛集成：巡线 + AI 检测 + 任务状态机
 add_subdirectory(src/racing)
@@ -54,7 +55,7 @@ target_link_libraries(my_own_detection PRIVATE camera PkgConfig::onnx ${OpenCV_L
 
 # 图像采集
 add_executable(collection src/tool/collection.cpp)
-target_link_libraries(collection PRIVATE control camera tools pthread PkgConfig::evdev PkgConfig::udev ${OpenCV_LIBRARIES})
+target_link_libraries(collection PRIVATE control camera tools joystick ${OpenCV_LIBRARIES})
 
 # # 主程序
 # add_subdirectory(src/icar)

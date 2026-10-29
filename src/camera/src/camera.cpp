@@ -1,5 +1,6 @@
 #include "camera.hpp"
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <opencv2/core/persistence.hpp>
 #include <opencv2/imgproc.hpp>
@@ -54,7 +55,6 @@ void Camera::initialize(const char *capture_source) {
                   FileStorage::READ)) { // 读取本地保存的标定文件
         file["cameraMatrix"] >> camera_matrix;
         file["distCoeffs"] >> dist_coeffs;
-        // 地面单应（由 calibrate_homography 工具写入；可能还没标定过）
         Mat h_img2gnd, h_gnd2img;
         file["ground_H_img2gnd"] >> h_img2gnd;
         file["ground_H_gnd2img"] >> h_gnd2img;
@@ -71,9 +71,8 @@ void Camera::initialize(const char *capture_source) {
     }
     if (H_img2gnd.empty() || H_gnd2img.empty()) {
         // 地面单应只影响 image_to_ground/ground_to_image，不阻塞取图
-        cerr << "校准文件中没有地面单应 ground_H_*，需要地面坐标时先用 "
-                "calibrate_homography 标定一次"
-             << endl;
+        cerr << "[Fatal] 校准文件中没有地面单应 ground_H_*" << endl;
+        abort();
     }
 
     Size camera_size{capture_width, capture_height};

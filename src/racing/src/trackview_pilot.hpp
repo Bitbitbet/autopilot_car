@@ -1,16 +1,20 @@
 #pragma once
 
 #include "control.hpp"
-#include "tools.hpp"
+#include "race_config.hpp"
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <opencv2/opencv.hpp>
 #include <string>
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
+using cv::Point2i;
 using std::greater;
 using std::map;
+using std::max;
+using std::min;
 using std::pair;
 using std::string;
 using std::vector;
@@ -42,10 +46,9 @@ constexpr float kHighSpeedGain = 1.f;
 constexpr float kCurveStart = 0.20f;        // severity 超过它开始减速
 constexpr float kMaxSingleFraction = 0.35f; // 单边点占比上限
 // 路径判定（原生像素）
-constexpr int kBorderMargin = 6; // 图像左右边界余量
-constexpr int kMinPoints = 16;   // 至少多少行才算可信路径
-constexpr int kMinSpan = 60;     // 中心线最小纵向跨度
-constexpr int kMinWidth = 60;    // 双边路宽的合理范围
+constexpr int kMinPoints = 16; // 至少多少行才算可信路径
+constexpr int kMinSpan = 60;   // 中心线最小纵向跨度
+constexpr int kMinWidth = 60;  // 双边路宽的合理范围
 constexpr int kMaxWidth = 600;
 constexpr int kCurveLookaheadRow = 20; // 速度预判用的近处行
 constexpr float kWidthAlpha = 0.1f;    // 宽度 profile 学习率
@@ -75,7 +78,7 @@ class AutoPilot {
     // 运行时可调的限速（键盘 [ ] , . 修改），初值来自 cfg
     float curveLimit = cfg::kCurveSpeed;
     float qualityLimit = cfg::kDegradedSpeed;
-    int imageCols = IMAGE_COL, imageRows = IMAGE_ROW; // 实际帧尺寸
+    int imageCols = RACE_COLS, imageRows = RACE_ROWS; // 实际帧尺寸
     vector<Width> widths;                             // 逐行宽度，原生像素
     float filteredDerivative = 0, previousError = 0, commandedSpeed = 0;
     double now = 0, missingTime = 0, stableTime = 0;
@@ -83,10 +86,6 @@ class AutoPilot {
     bool qualityRestricted = false;
     bool hadPath = false;
 
-    bool trusted(const Point2i &p) const {
-        return p.x >= 0 && p.x < imageRows && p.y > cfg::kBorderMargin &&
-               p.y < imageCols - 1 - cfg::kBorderMargin;
-    }
     float widthAt(int row) const {
         // Interpolate local observations only: no constant-width extrapolation.
         int lower = -1, upper = -1;
@@ -140,7 +139,7 @@ class AutoPilot {
     bool valid = false, ready = false, lost = false, degraded = false;
     WeightMode weightMode = WeightMode::FarFull;
 
-    explicit AutoPilot(int frameCols = IMAGE_COL, int frameRows = IMAGE_ROW)
+    explicit AutoPilot(int frameCols = RACE_COLS, int frameRows = RACE_ROWS)
         : imageCols(frameCols), imageRows(frameRows) {
         widths.assign(imageRows, Width{});
     }
@@ -222,8 +221,7 @@ class AutoPilot {
         float previousCenter = 0;
         for (const auto &[row, edges] : rows) {
             const auto [l, r] = edges;
-            bool lOk = l >= 0 && trusted({row, l}),
-                 rOk = r >= 0 && trusted({row, r});
+            bool lOk = l >= 0, rOk = r >= 0;
             float c = 0, w = r - l;
             bool dual = lOk && rOk;
             if (dual) {
