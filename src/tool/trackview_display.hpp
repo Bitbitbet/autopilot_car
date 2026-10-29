@@ -10,6 +10,8 @@
 class TrackviewDisplay {
     std::mutex imageMutex, keyMutex;
     cv::Mat latestImage, latestBinary;
+    uint64_t published=0,shown=0;
+    long long lastPublishedMs=-1000;
     std::deque<int> keys;
     std::atomic_bool emergency{false};
     std::atomic<long long> progressMs{0};
@@ -23,18 +25,20 @@ public:
     void progress() { progressMs.store(clockMs()); }
     long long ageMs() const { return clockMs()-progressMs.load(); }
     bool stalled(int timeoutMs=2000) const { return ageMs()>=timeoutMs; }
+    // One producer, one GUI consumer. Avoid constructing/copying HUDs at camera FPS.
+    bool frameDue(int intervalMs=100) const {return clockMs()-lastPublishedMs>=intervalMs;}
     void publish(const cv::Mat &image,const cv::Mat &binary) {
         // 在锁外复制图像；只保留最新帧，不积压队列，也不在持锁期间绘图。
         cv::Mat a=image.clone(), b=binary.clone();
         std::unique_lock lock(imageMutex,std::try_to_lock);
         if (!lock.owns_lock()) return;
-        latestImage=std::move(a); latestBinary=std::move(b);
+        latestImage=std::move(a); latestBinary=std::move(b);++published;lastPublishedMs=clockMs();
     }
     bool snapshot(cv::Mat &image,cv::Mat &binary) {
         std::lock_guard lock(imageMutex);
-        if (latestImage.empty()) return false;
+        if (latestImage.empty()||shown==published) return false;
         // 快照通过引用计数保持有效，发布新图像不会使旧快照失效。
-        image=latestImage; binary=latestBinary;
+        image=latestImage; binary=latestBinary;shown=published;
         return true;
     }
     void post(int key) {

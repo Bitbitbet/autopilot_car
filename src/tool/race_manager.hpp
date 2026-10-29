@@ -201,7 +201,7 @@ public:
         return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
     }
     RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track,
-                    const cv::Mat &currentImage={},bool calibratedConeBypass=false) {
+                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false) {
         now=time;
         RacePlan p;
         p.detectionAge=snap.sequence?time-snap.captured:-1;
@@ -237,7 +237,7 @@ public:
 
         // 施工区和泊车不能仅凭标签就宣称已完成；基础版明确停车等待专项规划验证。
         if(state!=State::ReviewStop&&state!=State::Fault&&newFrame&&
-           (near(LABEL_PARK,cfg.triggerRow)||near(LABEL_BUSY,cfg.triggerRow))) {
+           ((!taughtParkingManeuver&&near(LABEL_PARK,cfg.triggerRow))||near(LABEL_BUSY,cfg.triggerRow))) {
             reviewReason=seen(LABEL_PARK)?"PARK_PLANNER_PENDING":"CONSTRUCTION_PLANNER_PENDING";
             enter(State::ReviewStop);
         }

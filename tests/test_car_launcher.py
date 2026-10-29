@@ -95,4 +95,39 @@ class UnifiedCarLauncher(unittest.TestCase):
         self.assertEqual(ground.read_bytes(),before)
         self.assertNotEqual(self.invoke('bypass','signal').returncode,0)
 
+    def test_parking_preview_has_no_control_and_reverse_check_is_explicit(self):
+        self.assertNotEqual(self.invoke('parking-preview','competition','black').returncode,0)
+        ground=self.root/'ground-calibration.json';ground.write_text('{"test_only":true}')
+        result=self.invoke('parking-preview','competition','black');self.assertEqual(result.returncode,0,result.stderr)
+        argv=json.loads((self.root/'invoked.json').read_text())
+        self.assertIn('--parking-preview',argv);self.assertIn('--no-control',argv)
+        self.assertNotIn('--obstacle-bypass',argv)
+        result=self.invoke('reverse-check','competition','black');self.assertEqual(result.returncode,0,result.stderr)
+        argv=json.loads((self.root/'invoked.json').read_text())
+        self.assertIn('--reverse-check',argv);self.assertNotIn('--no-control',argv)
+        launch=max((self.root/'run-records').glob('*-launch.json'),key=lambda p:p.stat().st_mtime_ns)
+        record=json.loads(launch.read_text());self.assertEqual(record['reverse_check']['duration_s'],.5)
+        self.assertTrue(record['reverse_check']['operator_trigger_required'])
+
+    def test_parking_drive_requires_real_reverse_and_explicit_competition_mode(self):
+        self.assertNotEqual(self.invoke('parking-drive','competition','black').returncode,0)
+        (self.root/'ground-calibration.json').write_text('{"test_only":true}')
+        self.assertNotEqual(self.invoke('parking-drive','competition','black').returncode,0)
+        p=self.root/'release-manifest.json';manifest=json.loads(p.read_text())
+        manifest['parking_control']={'reverse_verified_by_user':True};p.write_text(json.dumps(manifest))
+        result=self.invoke('parking-drive','competition','black');self.assertEqual(result.returncode,0,result.stderr)
+        argv=json.loads((self.root/'invoked.json').read_text())
+        self.assertIn('--parking-drive',argv);self.assertIn('--reverse-verified',argv);self.assertNotIn('--no-control',argv)
+        capability=self.root/'parking-reverse-check.json';capability.write_text('{"reverse_verified":false,"pending":true}')
+        self.assertNotEqual(self.invoke('parking-drive','competition','black').returncode,0)
+        manifest['parking_control']['reverse_report_epoch_s']=capability.stat().st_mtime+1
+        p.write_text(json.dumps(manifest))
+        self.assertEqual(self.invoke('parking-drive','competition','black').returncode,0)
+        manifest['parking_control']['reverse_report_epoch_s']=capability.stat().st_mtime-1
+        p.write_text(json.dumps(manifest))
+        self.assertNotEqual(self.invoke('parking-drive','competition','black').returncode,0)
+        capability.write_text('{"reverse_verified":true}')
+        self.assertEqual(self.invoke('parking-drive','competition','black').returncode,0)
+        self.assertNotEqual(self.invoke('parking-drive','signal','black').returncode,0)
+
 if __name__=='__main__':unittest.main()

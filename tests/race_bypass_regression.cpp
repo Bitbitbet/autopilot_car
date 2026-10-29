@@ -537,6 +537,18 @@ static void timingOnly() {
 // captured/previous），gap 涨到超过 horizon 后每帧只能报 REFERENCE_TOO_OLD，
 // 540 帧无法恢复、只能锁停。要求连续无效 3 帧后重锚，画面正常时能重新测出位移。
 static void reanchorOnly() {
+    {
+        Scene strictScene;RaceGroundMotion strict(calibration());strict.update(strictScene.frame());
+        auto held=strict.update(strictScene.frame(.005f),true,false);
+        check(held.valid,"parking strict odometry cannot initialize");const auto origin=held.pose;
+        for(int i=0;i<12;++i) {
+            auto blank=strictScene.frame(.010f);blank.image.setTo(cv::Scalar(120,120,120));
+            held=strict.update(blank,true,false);
+            check(!held.valid&&held.coordinatesHeld&&held.reason!="REFERENCE_REANCHORED"&&
+                std::hypot(held.pose.x-origin.x,held.pose.z-origin.z)<1e-6,
+                "strict parking odometry silently reanchored or advanced through missing motion");
+        }
+    }
     Scene scene;RaceGroundMotion motion(calibration());
     motion.update(scene.frame());
     auto odo=motion.update(scene.frame(.005f),true);

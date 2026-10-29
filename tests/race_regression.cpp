@@ -120,6 +120,18 @@ int main(int argc,char **argv) {
         p=park.repeat({box(LABEL_PARK)});
         check(p.stop&&std::string(p.reason)=="PARK_PLANNER_PENDING","parking is explicitly pending real planner validation");
         check(park.repeat({box(LABEL_FLOW)},15).stop,"flow cannot release unvalidated parking task");
+        Fixture taught;
+        auto taughtStep=[&](std::vector<PredictResult> detections) {
+            taught.time+=.07;taught.track.handle(taught.image);
+            taught.snapshot={++taught.sequence,taught.time,std::move(detections),false,{},{}};
+            return taught.manager.update(taught.snapshot,taught.time,.07f,true,taught.image,taught.track,{},false,true);
+        };
+        for(int i=0;i<5;++i)p=taughtStep({box(LABEL_PARK)});
+        check(!p.stop,"explicit taught-bay mode still blocks on its own parking sign");
+        for(int i=0;i<5;++i)p=taughtStep({box(LABEL_GATE,130,90,20)});
+        check(p.stop&&std::string(p.state)=="GATE_WAIT","taught-bay authorization bypasses gate stop");
+        for(int i=0;i<15;++i)p=taughtStep({});
+        check(p.stop,"taught parking treats missing gate as open");
 
         Fixture signal;
         p=signal.repeat({box(LABEL_STOP)});

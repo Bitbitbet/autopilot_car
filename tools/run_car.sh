@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 固定入口：相同程序通过参数切换预览/实跑及测试场景。
 set -euo pipefail
-if [ "$#" -gt 3 ]; then printf '%s\n' '用法: bash run_car.sh [preview|drive|calibrate|bypass] [lane|signal|limit|competition] [white|black]' >&2;exit 2;fi
+if [ "$#" -gt 3 ]; then printf '%s\n' '用法: bash run_car.sh [preview|drive|calibrate|bypass|parking-preview|parking-drive|reverse-check] [lane|signal|limit|competition] [white|black]' >&2;exit 2;fi
 MODE="${1:-preview}"
 PROFILE="${2:-lane}"
 SURFACE="${3:-config}"
-case "$MODE" in preview|drive|calibrate|bypass) ;; *) printf '%s\n' '模式支持 preview、drive、calibrate、bypass。' >&2;exit 2 ;; esac
+case "$MODE" in preview|drive|calibrate|bypass|parking-preview|parking-drive|reverse-check) ;; *) printf '%s\n' '模式支持 preview、drive、calibrate、bypass、parking-preview、parking-drive、reverse-check。' >&2;exit 2 ;; esac
 case "$PROFILE" in lane|signal|limit|competition) ;; *) printf '%s\n' '未知测试场景。' >&2;exit 2 ;; esac
 case "$SURFACE" in config|white|black) ;; *) printf '%s\n' '路面模式支持 white、black。' >&2;exit 2 ;; esac
 cd -- "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -47,12 +47,35 @@ navigation=Path('navigation.json')
 if navigation.is_file():command+=['--navigation-config',str(navigation)]
 if mode=='preview':command+=['--no-control']
 if mode=='calibrate':command+=['--calibrate-ground','--no-control']
+if mode=='reverse-check':command+=['--reverse-check']
+if mode=='parking-preview':
+    if not Path('ground-calibration.json').is_file():raise SystemExit('停车路径预览需要当前车辆 ground-calibration.json，请先做地面标定。')
+    command+=['--parking-preview','--ground-calibration','ground-calibration.json','--no-control']
 ground=Path('ground-calibration.json')
+reverse_source=None
+if mode=='parking-drive':
+    if profile!='competition':raise SystemExit('停车实跑请使用 parking-drive competition，保留比赛停车任务。')
+    if not ground.is_file():raise SystemExit('停车实跑需要当前车辆 ground-calibration.json。')
+    capability=Path('parking-reverse-check.json')
+    if capability.is_file():
+        confirmation=json.loads(capability.read_text(encoding='utf-8-sig'))
+        if confirmation.get('reverse_verified') is not True or confirmation.get('pending',False):
+            report=manifest.get('parking_control',{})
+            # The current human report can complete an older unfinished pulse.
+            # A newer failed/pending check still invalidates that earlier report.
+            if report.get('reverse_verified_by_user') is True and capability.stat().st_mtime<report.get('reverse_report_epoch_s',0):
+                reverse_source='current_project_user_report_supersedes_older_check'
+            else:raise SystemExit('最新倒车记录未确认成功；请先核实该车实际后退并保存y确认。')
+        else:reverse_source='saved_current_vehicle_operator_observation'
+    elif manifest.get('parking_control',{}).get('reverse_verified_by_user') is True:
+        reverse_source='current_project_user_report_2026_10_29'
+    else:raise SystemExit('缺少当前车辆实际倒车成功的确认。')
+    command+=['--parking-drive','--reverse-verified','--ground-calibration',str(ground)]
 if mode=='bypass':
     if profile!='competition':raise SystemExit('绕行实验请使用 bypass competition，保留完整比赛任务优先级。')
     if not ground.is_file():raise SystemExit('请先执行 bash ./run_car.sh calibrate competition，生成当前车辆的地面标定。')
     command+=['--obstacle-bypass','--ground-calibration',str(ground)]
-record={'mode':profile,'run_mode':mode,'no_control':mode in ('preview','calibrate'),'binary':'trackview_race',
+record={'mode':profile,'run_mode':mode,'no_control':mode in ('preview','calibrate','parking-preview'),'binary':'trackview_race',
         'road_surface':track.get('roadSurface','white'),
         'binary_sha256':sha('trackview_race'),'plugin_sha256':sha('librace_npu_backend.so'),
         'source_trackview_config_sha256':sha(source),'source_race_config_sha256':sha(source_race),
@@ -65,8 +88,12 @@ record['navigation_config_sha256']=sha(navigation) if navigation.is_file() else 
 record['obstacle_planning_preview_only']=mode!='bypass'
 record['obstacle_route_controls_vehicle']=mode=='bypass'
 record['bypass_hard_speed_cap_mps']=track['maxSpeed'] if mode=='bypass' else None
-record['ground_calibration_sha256']=sha(ground) if mode=='bypass' else None
+record['ground_calibration_sha256']=sha(ground) if mode in ('bypass','parking-drive') else None
 record['sample_write_mode']='bounded_background_queue'
+record['parking_geometry_preview_only']=mode=='parking-preview'
+record['parking_control']={'enabled':mode=='parking-drive','reverse_source':reverse_source,'bay':None,'selection_policy':'fully visible left bay, all assumed empty',
+    'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':3,'entrance_exit_turns_integrated':False}
+record['reverse_check']={'operator_trigger_required':True,'speed_command_mps':-.08,'duration_s':.5,'command_is_not_measured_motion':True} if mode=='reverse-check' else None
 Path(prefix+'-launch.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
 print('启动记录: '+prefix+'-launch.json')
 print('路面模式: '+track.get('roadSurface','white')+'；寻路二值图统一为白色道路。')
@@ -78,7 +105,13 @@ PY
 )
 if [ "${#COMMAND[@]}" -eq 0 ];then printf '%s\n' '无法读取启动记录。' >&2;exit 1;fi
 printf '模式: %s；场景: %s；初始巡航/弯道/降级速度0.10 m/s；最高可调上限10 m/s；默认MANUAL。\n' "$MODE" "$PROFILE"
-if [ "$MODE" = calibrate ]; then
+if [ "$MODE" = reverse-check ]; then
+    printf '%s\n' '倒车短测：按r才发送一次0.5秒倒车指令，之后自动停车；y确认实际后退，n记录未后退；空格/q退出。不执行自动停车任务。'
+elif [ "$MODE" = parking-drive ]; then
+    printf '%s\n' '停车实跑：自动找左侧完整可见车位并规划，出现黄线和绿线后按a执行，不需每次点选。g重新识别；f手动诊断；空格停。车尾不越过起始后沿，入口/出口左转尚未接入。'
+elif [ "$MODE" = parking-preview ]; then
+    printf '%s\n' 'NO MOTOR 停车几何预览：2号车位，41cm边长/38cm进深/45cm通道。f冻结，点近/远两个口角，p规划，s保存，q退出。'
+elif [ "$MODE" = calibrate ]; then
     printf '%s\n' '地面四点标定：仅摄像头，不打开电机或AI后端。终端会显示摆点和点击顺序。'
 elif [ "$MODE" = preview ]; then
     printf '%s\n' 'NO CONTROL。识别无需按a；按a只开始计算比赛状态，不驱动车轮。s保存样本，q/Esc或终端Ctrl+C退出。'

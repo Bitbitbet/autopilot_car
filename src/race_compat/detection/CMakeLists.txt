@@ -1,0 +1,7 @@
+pkg_search_module(ppnc REQUIRED IMPORTED_TARGET ppnc)
+pkg_search_module(onnx REQUIRED IMPORTED_TARGET onnx)
+
+add_library(race_compat_detection STATIC src/detection.cpp)
+target_include_directories(race_compat_detection PUBLIC include)
+target_link_libraries(race_compat_detection PUBLIC race_compat_tools PkgConfig::ppnc PkgConfig::onnx)
+target_link_libraries(race_compat_detection PRIVATE nlohmann_json)

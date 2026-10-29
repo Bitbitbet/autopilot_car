@@ -1,7 +1,10 @@
+#include "race_runtime.hpp"
 #include "race_obstacle.hpp"
 #include "race_navigation_worker.hpp"
 #include "race_sample_writer.hpp"
 #include "race_fork_evidence.hpp"
+#include "race_parking_tools.hpp"
+#include "race_parking_drive.hpp"
 #include "race_bypass_control.hpp"
 /** 比赛集成入口：继承 v6 巡线，叠加异步感知、选路和任务仲裁。
  * 与 track_view.cpp 分开维护，避免改变已验证的 v6 程序。 */
@@ -168,6 +171,7 @@ static void drawHud(cv::Mat &image,const AutoPilot &pilot,Mode mode,bool panic,
 }
 
 int main(int argc,char **argv) {
+    raceConfigureRuntime();
     std::signal(SIGINT,onSignal); std::signal(SIGTERM,onSignal); std::signal(SIGHUP,onSignal);
     std::shared_ptr<CarControl> car;
     std::unique_ptr<Diagnostics> log;
@@ -177,7 +181,7 @@ int main(int argc,char **argv) {
         std::string source="/dev/video0", configPath="trackview.json";
         std::string raceConfigPath="race.json", detectionPath,navigationConfigPath="navigation.json";
         bool navigationConfigRequired=false;
-        bool calibrateGround=false,bypassEnabled=false;
+        bool calibrateGround=false,bypassEnabled=false,reverseCheck=false,parkingPreview=false,parkingDrive=false,reverseVerified=false;
         bool replayCorrected=false;
         std::string groundPath="ground-calibration.json";
         bool noControl=false, headless=false, replay=false, configRequired=false,legacyWindows=false;
@@ -189,6 +193,10 @@ int main(int argc,char **argv) {
             if(arg=="--race-config") raceConfigPath=value();
             else if(arg=="--navigation-config") { navigationConfigPath=value();navigationConfigRequired=true; }
             else if(arg=="--calibrate-ground") {calibrateGround=true;noControl=true;}
+            else if(arg=="--reverse-check") reverseCheck=true;
+            else if(arg=="--parking-preview") {parkingPreview=true;noControl=true;}
+            else if(arg=="--parking-drive") parkingDrive=true;
+            else if(arg=="--reverse-verified") reverseVerified=true;
             else if(arg=="--obstacle-bypass") bypassEnabled=true;
             else if(arg=="--replay-corrected") replayCorrected=true;
             else if(arg=="--ground-calibration") groundPath=value();
@@ -216,6 +224,9 @@ int main(int argc,char **argv) {
                     <<"--trial-seconds 0.5..3: one-shot low-speed stop timer; requires configured speeds <=0.10 m/s.\n"
                     <<"--navigation-config navigation.json: background pixel route preview in preview/drive modes.\n"
                     <<"--calibrate-ground: camera-only four-point ground calibration, never opens serial/NPU.\n"
+                    <<"--parking-preview: camera-only taught bay-2 geometry and in/out route preview; never opens serial/NPU.\n"
+                    <<"--reverse-check: one operator-triggered -0.08 m/s, 0.5s pulse; independent stop timer; no AI.\n"
+                    <<"--parking-drive --reverse-verified: auto-locate a fully visible left bay; a starts entry/3s dwell/reverse exit/lane rejoin; f manual, g rescan.\n"
                     <<"--obstacle-bypass --ground-calibration ground-calibration.json: calibrated straight-cone trial; uses configured maxSpeed.\n"; return 0;
             } else if(arg.rfind("--",0)==0) throw std::invalid_argument("Unknown option: "+arg);
             else source=arg;
@@ -231,13 +242,22 @@ int main(int argc,char **argv) {
             throw std::invalid_argument("Race replay requires --detections JSONL");
         RaceConfig raceConfig; raceConfig.load(raceConfigPath);
         RaceNavigationConfig navigationConfig;navigationConfig.load(navigationConfigPath,navigationConfigRequired);
-        if(calibrateGround) {
-            if(replay||headless||bypassEnabled)throw std::invalid_argument("Ground calibration needs live camera and image window only");
+        if(reverseVerified&&!parkingDrive)throw std::invalid_argument("--reverse-verified requires --parking-drive");
+        if(calibrateGround||reverseCheck||parkingPreview||parkingDrive) {
+            if(replay||headless||bypassEnabled||trialSeconds>0||
+               int(calibrateGround)+int(reverseCheck)+int(parkingPreview)+int(parkingDrive)!=1||((reverseCheck||parkingDrive)&&noControl))
+                throw std::invalid_argument("Calibration/parking preview/reverse check require separate live-camera window modes");
+            if(parkingDrive&&!reverseVerified)throw std::invalid_argument("Parking drive needs physically observed reverse verification");
+            std::optional<RaceGroundCalibration> parkingGround;
+            if(parkingPreview||parkingDrive){parkingGround.emplace();parkingGround->load(groundPath);}
             auto preprocessing=config.binary<0?std::make_shared<Predeal>():std::make_shared<Predeal>(config.binary);
             preprocessing->blackRoad=config.roadSurface=="black";
             cv::VideoCapture video;video.open(source,cv::CAP_V4L2);if(!video.isOpened())video.open(source);
             if(!video.isOpened())throw std::runtime_error("Cannot open calibration camera");
-            video.set(cv::CAP_PROP_FRAME_WIDTH,320);video.set(cv::CAP_PROP_FRAME_HEIGHT,240);video.set(cv::CAP_PROP_BUFFERSIZE,1);
+            video.set(cv::CAP_PROP_FRAME_WIDTH,640);video.set(cv::CAP_PROP_FRAME_HEIGHT,480);video.set(cv::CAP_PROP_BUFFERSIZE,1);
+            if(reverseCheck)return raceCheckReverse(video,*preprocessing,stopping);
+            if(parkingPreview)return racePreviewParking(video,*preprocessing,*parkingGround,stopping);
+            if(parkingDrive)return raceDriveParking(video,*preprocessing,*parkingGround,config,raceConfig,reverseVerified,stopping);
             return raceCalibrateGround(video,*preprocessing,groundPath,stopping);
         }
         std::optional<RaceGroundCalibration> ground;
@@ -304,7 +324,7 @@ int main(int argc,char **argv) {
         if(!replay) capture.open(source,cv::CAP_V4L2);
         if(!capture.isOpened()) capture.open(source);
         if(!capture.isOpened()) throw std::runtime_error("Cannot open video source: "+source);
-        capture.set(cv::CAP_PROP_FRAME_WIDTH,IMAGE_COL); capture.set(cv::CAP_PROP_FRAME_HEIGHT,IMAGE_ROW);
+        capture.set(cv::CAP_PROP_FRAME_WIDTH,640); capture.set(cv::CAP_PROP_FRAME_HEIGHT,480);
         capture.set(cv::CAP_PROP_BUFFERSIZE,1); // 摄像头后端可能忽略此缓冲区设置。
         std::atomic_bool joyLost{false}; // 生命周期必须覆盖手柄回调的整个使用过程。
         std::shared_ptr<JoyStick> js;
@@ -379,7 +399,7 @@ int main(int argc,char **argv) {
             stage="preprocess"; stageStarted=captured;
             // 标定参数对应 320×240 图像；分辨率不一致时先缩放，再进行去畸变。
             if(image.size()!=cv::Size(IMAGE_COL,IMAGE_ROW))
-                cv::resize(image,image,{IMAGE_COL,IMAGE_ROW},0,0,cv::INTER_AREA);
+                raceNormalizeFrame(image);
             if(!replayCorrected)predeal->correct(image);
             cv::Mat bin=predeal->binarize(image);
             ++raceFrame;
@@ -608,7 +628,7 @@ int main(int argc,char **argv) {
             lastOverlay=image;
             log->record(std::chrono::duration<double>(now-start).count(),dt,mode,panic,pilot,cruise,speed,servo,displayAge);
             if(!stopReason.empty()) log->event(stopReason,pilot,image);
-            if(!headless) display.publish(image,bin);
+            if(!headless&&display.frameDue()) display.publish(image,bin);
             log->recordTiming(captureMs,preprocessMs,trackMs,controlMs,ms(Clock::now(),controlled));
         }
         if(car) car->resetVelocity();

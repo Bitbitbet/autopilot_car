@@ -77,7 +77,9 @@ struct Config {
     bool obstacle = true;       // 避障使能
     float overlap = 0.3;        // 智能车与车道线重合度(%)
     float score = 0.5;          // AI检测置信度
-    int binary = -1;            // 图像二值化阈值
+    bool use_otsu;              // 是否使用大津法
+    uint8_t threshold_value;    // 不适用大津法时图像二值化的阈值
+
     std::string model = "../res/models/yolov3_mobilenet_v1"; // 模型路径
     std::string video = "../res/samples/sample.mp4";         // 视频路径
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(Config, velLow, velHigh, velSlow, velPark,
@@ -85,8 +87,9 @@ struct Config {
                                    runP2, turnP, turnD, debug, saveImg, saveIpm,
                                    rowCutUp, rowCutBottom, fork, fine, park,
                                    spot, parkSpot, busy, slow, stop, yfork,
-                                   cross, obstacle, overlap, score, binary,
-                                   model, video); // 添加构造函数
+                                   cross, obstacle, overlap, score, use_otsu,
+                                   threshold_value, model,
+                                   video); // 添加构造函数
 };
 
 /**

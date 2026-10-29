@@ -1,3 +1,4 @@
+#include "camera.hpp"
 #include "center.hpp"
 #include "control.hpp"
 #include "detection.hpp"
@@ -12,7 +13,6 @@
 #include "latest_result.hpp"
 #include "loop.hpp"
 #include "motion.hpp"
-#include "predeal.hpp"
 #include "show.hpp"
 #include <condition_variable>
 #include <exception>
@@ -30,8 +30,10 @@ using std::cout;
 using std::endl;
 using std::lock_guard;
 using std::make_shared;
+using std::make_unique;
 using std::mutex;
 using std::shared_ptr;
+using std::unique_ptr;
 using std::vector;
 namespace this_thread = std::this_thread;
 namespace chrono = std::chrono;
@@ -52,18 +54,17 @@ struct FsmFactory {
 
 class Icar {
   private:
-    FsmFactory fsmFactory;       // 状态机管理
-    bool parkWasActive = false;  // 上一帧停车场是否激活（检测退出过渡）
-    int yforkLock = 0;           // 停车场退出后锁定 yfork 的剩余帧数
-    shared_ptr<Predeal> predeal; // 图像预处理类
-    shared_ptr<Show> show;       // 初始化UI显示窗口
-    shared_ptr<cv::VideoCapture> capture; // Opencv相机类
-    shared_ptr<Detection> detection;      // 目标检测类
-    shared_ptr<CarControl> control;       // UART通信类
-    shared_ptr<Params> params;            // 车辆状态参数（FSM共享传递）
-    shared_ptr<Loops> runModelThread;     // 子线程循环
-    shared_ptr<Center> center;            // 控制中心处理类
-    shared_ptr<Motion> motion;            // 运动控制器
+    FsmFactory fsmFactory;           // 状态机管理
+    bool parkWasActive = false;      // 上一帧停车场是否激活（检测退出过渡）
+    int yforkLock = 0;               // 停车场退出后锁定 yfork 的剩余帧数
+    shared_ptr<Show> show;           // 初始化UI显示窗口
+    shared_ptr<Detection> detection; // 目标检测类
+    shared_ptr<CarControl> control;  // UART通信类
+    unique_ptr<Camera> camera;
+    shared_ptr<Params> params;        // 车辆状态参数（FSM共享传递）
+    shared_ptr<Loops> runModelThread; // 子线程循环
+    shared_ptr<Center> center;        // 控制中心处理类
+    shared_ptr<Motion> motion;        // 运动控制器
 
     // 全局共享数据链
     cv::Mat imgShare;
@@ -86,8 +87,7 @@ class Icar {
     void handleMouse(int event, int, int, int flags) {
         double value;
         switch (event) {
-        case cv::EVENT_MOUSEWHEEL: // 鼠标滑球
-        {
+        case cv::EVENT_MOUSEWHEEL: {               // 鼠标滑球
             value = cv::getMouseWheelDelta(flags); // 获取滑球滚动值
             if (value > 0)
                 show->index++;
@@ -206,10 +206,6 @@ class Icar {
         params = make_shared<Params>(); // 初始化参数
         center = make_shared<Center>(); // 控制中心处理类
         motion = make_shared<Motion>(); // 运动控制器
-        predeal =
-            params->config.binary < 0
-                ? make_shared<Predeal>()
-                : make_shared<Predeal>(params->config.binary); // 图像预处理类
         detection =
             make_shared<Detection>(params->config.model,
                                    params->config.score); // AI模型初始化
@@ -218,23 +214,26 @@ class Icar {
 
         // 相机初始化
         // USB摄像头初始化
-        if (params->config.debug)
-            capture = make_shared<cv::VideoCapture>(
-                params->config.video); // 打开本地视频
-        else
-            capture =
-                make_shared<cv::VideoCapture>("/dev/video0"); // 打开摄像头
-        if (!capture->isOpened()) {
-            cerr << "[Error]: Can not open video device!" << endl;
-            throw std::runtime_error("Cannot open video device");
+        if (params->config.debug) {
+            if (params->config.use_otsu) {
+                camera = make_unique<Camera>(
+                    params->config.video.c_str()); // 打开本地视频
+            } else {
+                camera = make_unique<Camera>(params->config.video.c_str(),
+                                             params->config.threshold_value);
+            }
+        } else {
+            if (params->config.use_otsu) {
+                camera = make_unique<Camera>();
+            } else {
+                camera = make_unique<Camera>(params->config.threshold_value);
+            }
         }
-        capture->set(cv::CAP_PROP_FRAME_WIDTH, CAMERA_COL);  // 设置图像分辨率
-        capture->set(cv::CAP_PROP_FRAME_HEIGHT, CAMERA_ROW); // 设置图像分辨率
-        capture->set(cv::CAP_PROP_FPS, 30);                  // 设置帧率
 
         if (params->config.debug) {
             show = make_shared<Show>(4); // 调试UI初始化
-            show->frameMax = capture->get(cv::CAP_PROP_FRAME_COUNT) - 1;
+            show->frameMax =
+                camera->get_capture().get(cv::CAP_PROP_FRAME_COUNT) - 1;
             cv::createTrackbar("Frame", "ICAR", &show->index, show->frameMax,
                                [](int, void *) {}); // 创建Opencv图像滑条控件
             cv::setMouseCallback("ICAR",
@@ -302,14 +301,15 @@ class Icar {
                 return;
             }
 
-            capture->set(cv::CAP_PROP_POS_FRAMES, show->index); // 设置读取帧
-            if (!capture->read(img) || img.empty()) {
+            camera->get_capture().set(cv::CAP_PROP_POS_FRAMES,
+                                      show->index); // 设置读取帧
+            if (!camera->read(img)) {
                 params->quit = true;
                 stop();
                 return;
             }
             show->indexLast = show->index;
-        } else if (!capture->read(img) || img.empty()) {
+        } else if (!camera->read(img)) {
             cerr << "[Error]: Camera frame unavailable; stopping." << endl;
             params->quit = true;
             stop();
@@ -323,8 +323,7 @@ class Icar {
             show->save = true;
 
         //[03] 图像预处理
-        cv::Mat imgBin;
-        predeal->correct(img); // 图像矫正
+        Mat imgBin;
         /*---------------子线程共享数据，避免浅拷贝-----------------*/
         {
             lock_guard lock(mtxImg);
@@ -333,7 +332,7 @@ class Icar {
         }
         cvImg.notify_one();
         /*-------------------------------------------------------*/
-        imgBin = predeal->binarize(img); // 图像二值化
+        imgBin = camera->binarize(img); // 图像二值化
 
         //[04] 赛道识别
         params->track->handle(imgBin);

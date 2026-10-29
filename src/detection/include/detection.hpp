@@ -1,19 +1,30 @@
 #pragma once
 
 #include "predictor_api.h"
-#include "tools.hpp"
 #include <memory>
 #include <onnxruntime_cxx_api.h>
-#include <stdlib.h>
+#include <opencv2/opencv.hpp>
 #include <string>
 #include <sys/time.h>
-#include <unordered_map>
 #include <vector>
+
+/**
+ * @brief 目标检测结果
+ *
+ */
+struct PredictResult {
+    int type;          // ID
+    std::string label; // 标签
+    float score;       // 置信度
+    int x;             // 坐标(左下角点)
+    int y;             // 坐标
+    int width;         // 尺寸
+    int height;        // 尺寸
+};
 
 class Detection {
   public:
     std::vector<PredictResult> results; // AI推理结果
-    float score = 0.5;                  // AI检测置信度
     std::vector<int>
         drawSkipLabels; // 调试画面需跳过的标签(type)：normal态滤掉fork不画
 
@@ -22,24 +33,39 @@ class Detection {
      *
      * @param pathModel
      */
-    Detection(const std::string pathModel, float score_nms);
+    Detection(const std::string pathModel, float minimum_confidence);
 
     /**
      * @brief AI模型推理
      */
-    void inference(cv::Mat img);
+    void inference(const cv::Mat &img);
 
-    void transposeAndCopyToTensor(const Mat &src, NDTensor &dst);
+    void drawBox(cv::Mat &img);
+    void drawBox(cv::Mat &img, const std::vector<PredictResult> &snapshot);
 
-    std::shared_ptr<std::unordered_map<std::string, NDTensor>>
-    preprocess(cv::Mat frame, const std::vector<int64_t> &input_size);
+  private:
+    std::vector<std::string> labels;
+    // onnx info
+    std::vector<std::string> onnx_input_names;
+    std::vector<const char *> onnx_input_names_cstr;
+    std::vector<std::string> onnx_output_names;
+    std::vector<const char *> onnx_output_names_cstr;
 
-    void run(const std::unordered_map<std::string, NDTensor> &feeds);
+    Ort::Env onnx_env;
 
-    NDTensor get_output(int index);
+    // predictor
+    PPNCPredictor predictor_nna;
+    PPNCPredictor predictor_nms;
+    std::unique_ptr<Ort::Session> predictor_onnx;
 
-    void drawBox(Mat &img);
-    void drawBox(Mat &img, const std::vector<PredictResult> &snapshot);
+    // 推理相关 helper
+    float minimum_confidence = 0.5;
+    static constexpr size_t PREPROCESS_DST_W = 320;
+    static constexpr size_t PREPROCESS_DST_H = 320;
+    NDTensor image, im_shape, scale_factor;
+    void preprocess(const cv::Mat &frame);
+    void run();
+    void render();
 
     /**
      * @brief 获取Opencv颜色
@@ -48,19 +74,4 @@ class Detection {
      * @return cv::Scalar
      */
     cv::Scalar getCvcolor(int index);
-
-  private:
-    std::vector<std::string> labels;
-    // onnx info
-    std::pair<std::vector<std::string>, std::vector<const char *>>
-        onnx_input_names_;
-    std::pair<std::vector<std::string>, std::vector<const char *>>
-        onnx_out_names_;
-    Ort::Env onnx_env_;
-    // predictor
-    std::shared_ptr<PPNCPredictor> predictor_nna_;
-    std::shared_ptr<PPNCPredictor> predictor_nms_;
-    std::shared_ptr<Ort::Session> predictor_onnx_;
-
-    void render();
 };

@@ -1,0 +1,3 @@
+add_library(race_compat_track STATIC src/track.cpp)
+target_include_directories(race_compat_track PUBLIC include)
+target_link_libraries(race_compat_track PUBLIC race_compat_tools)

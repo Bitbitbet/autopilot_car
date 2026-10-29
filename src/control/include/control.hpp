@@ -2,8 +2,8 @@
 
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <libserial/SerialPort.h>
 #include <memory>
 #include <mutex>
@@ -21,27 +21,9 @@
 #define USB_ADDR_LED 5     // LED灯效控制
 #define USB_ADDR_KEY 0x10  // 按键信息
 
-constexpr size_t PWMSERVOMAX = 1900; // 舵机PWM最大值（左）1840
-constexpr size_t PWMSERVOMID = 1500; // 舵机PWM中值 1520
-constexpr size_t PWMSERVOMIN = 1100; // 舵机PWM最小值（右）1200
-
-/**
- * @brief 32位数据内存对齐/联合体
- */
-typedef union {
-    uint8_t buff[4];
-    float float32;
-    int int32;
-} Bit32Union;
-
-/**
- * @brief 16位数据内存对齐/联合体
- */
-typedef union {
-    uint8_t buff[2];
-    int int16;
-    uint16_t uint16;
-} Bit16Union;
+constexpr size_t PWMSERVOMAX = 1900; // 舵机PWM最大值（左）
+constexpr size_t PWMSERVOMID = 1500; // 舵机PWM中值
+constexpr size_t PWMSERVOMIN = 1100; // 舵机PWM最小值（右）
 
 /**
  * @brief 蜂鸣器音效
@@ -56,21 +38,17 @@ enum class Buzzer : uint8_t {
 
 class CarControl {
   private:
-    std::unique_ptr<std::thread> threadRecv; // 串口接收子线程
+    std::unique_ptr<std::thread> recvThread; // 串口接收子线程
     LibSerial::SerialPort serialPort;
     std::atomic_bool recvThreadStop{true};
     std::atomic_bool serialFault{false};
     std::atomic_bool commandExpired{false};
-    std::atomic_bool motionAllowed{true};
-    std::atomic<uint64_t> stopEpoch{0};
     std::mutex writeMutex;
     int serialFd = -1;
-    int commandTimeoutMs = 0;
     bool moving = false;
     std::chrono::steady_clock::time_point lastCommand;
     void writeBufferLocked(const void *buffer, size_t len);
     void carControlLocked(float speed, uint16_t servo);
-    void checkCommandTimeout();
 
     CarControl();
 
@@ -83,12 +61,12 @@ class CarControl {
 
   public:
     ~CarControl() noexcept;
-    bool hasFault() const { return serialFault.load() || commandExpired.load(); }
-    void setCommandTimeout(int milliseconds);
-    void latchStop(); // 退出或界面故障时锁定停车，防止其他线程重新发出行驶指令。
-    void pauseMotion();
-    uint64_t motionEpoch() const { return stopEpoch.load(); }
-    bool resumeMotion(uint64_t expectedEpoch);
+    bool hasFault() const {
+        return serialFault.load() || commandExpired.load();
+    }
+
+    /* Exit/UI failure: prevent any racing worker from restarting. */
+    void latch_stop();
 
     bool exitBoot = false;
     bool keypress = false;

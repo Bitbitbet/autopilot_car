@@ -47,6 +47,7 @@ class RaceGroundMotion {
     struct Reference {cv::Mat image,mask;double captured;RaceGroundPose pose;std::vector<cv::Point2f> features;};
     std::vector<Reference> references;
     size_t backupCursor=0;          // 备用参考轮转起点：每帧最多尝试一张
+    float rigidResidualLimit=.005f;
 
     cv::Mat mask(const RaceSnapshot &s) {
         regions.erase(std::remove_if(regions.begin(),regions.end(),[&](const Region &r){return s.captured-r.captured>.65;}),regions.end());
@@ -69,6 +70,11 @@ class RaceGroundMotion {
     }
 public:
     explicit RaceGroundMotion(const RaceGroundCalibration &c):cfg(c),map(c) {}
+    // Parking's 320x240 field sample has 42/42 consistent tracks and 1.25%
+    // scale variation, but 5.087mm rigid residual. Do not permanently freeze
+    // the reference over that 0.087mm excess. Keep this opt-in for parking;
+    // RANSAC, scale, span and motion-step checks are still applied.
+    void enableParkingNoiseTolerance(){rigidResidualLimit=.008f;}
     // 与绕行规划共用同一米制尺度；里程增量必须与路线在同一个坐标系里。
     void setMetricScale(float s) {
         if(std::abs(s-map.scale())<1e-6f)return;
@@ -78,7 +84,7 @@ public:
     // 也供回归测试验证米制刚体拟合，不接受像素/运动指令冒充位移。
     static bool fit(const std::vector<cv::Point2f> &before,const std::vector<cv::Point2f> &after,
                     RaceGroundPose &pose,int &inliers,float &residual,
-                    RaceGroundFitDiagnostics *diagnostics=nullptr,float referenceAge=.07f) {
+                    RaceGroundFitDiagnostics *diagnostics=nullptr,float referenceAge=.07f,float residualLimit=.005f) {
         RaceGroundFitDiagnostics info;
         auto fail=[&](const char *reason){info.reason=reason;if(diagnostics)*diagnostics=info;return false;};
         inliers=0;residual=0;
@@ -116,13 +122,13 @@ public:
         info.spanX=high.x-low.x;info.spanZ=high.y-low.y;
         if(inliers<8||inliers<int(before.size()*.7))return fail("INLIER_RATIO_LOW");
         if(info.spanX<.08f||info.spanZ<.15f)return fail("GROUND_FEATURE_SPAN_SHORT");
-        residual=sum/inliers;if(residual>.005f)return fail("RIGID_RESIDUAL_HIGH");
+        residual=sum/inliers;if(residual>std::clamp(residualLimit,.005f,.008f))return fail("RIGID_RESIDUAL_HIGH");
         if(!std::isfinite(scale)||scale<.98||scale>1.02)return fail("GROUND_SCALE_CHANGED");
         const auto position=pose.world({float(-c*tx-s*tz),float(s*tx-c*tz)});
         pose.x=position.x;pose.z=position.y;pose.angle-=theta;
         info.reason="GROUND_RIGID_OK";if(diagnostics)*diagnostics=info;return true;
     }
-    RaceGroundMotionResult update(const RaceSnapshot &s,bool preserveCoordinates=false) {
+    RaceGroundMotionResult update(const RaceSnapshot &s,bool preserveCoordinates=false,bool allowReanchor=true) {
         if(s.sequence==sequence)return result;
         result.valid=false;result.inliers=0;result.residual=0;result.features=result.matches=0;
         result.referenceAge=0;result.misses=misses;
@@ -167,7 +173,7 @@ public:
             }
             candidate.matches=int(before.size());auto pose=origin;
             RaceGroundFitDiagnostics info;
-            candidate.valid=fit(before,after,pose,candidate.inliers,candidate.residual,&info,float(age));
+            candidate.valid=fit(before,after,pose,candidate.inliers,candidate.residual,&info,float(age),rigidResidualLimit);
             if(candidate.valid)candidate.pose=pose;
             candidate.reason=info.reason;candidate.fitScale=info.scale;candidate.fitTranslation=info.translation;candidate.fitAngle=info.angle;
             candidate.spanX=info.spanX;candidate.spanZ=info.spanZ;
@@ -220,7 +226,7 @@ public:
                 // 验证（现场 1793190973677 就有 540 帧停在这个状态，只能锁停重启）。
                 // 连续 3 帧无效后把当前帧重锚为新参考：位姿保持不变、不进步数，
                 // 旧关键帧仍留在 references 里供备用恢复，只是不再拿过旧帧做逐帧比对。
-                if(misses>=3){
+                if(misses>=3&&allowReanchor){
                     previous=gray;previousMask=currentMask;captured=s.captured;sequence=s.sequence;
                     result.reason="REFERENCE_REANCHORED";
                 }
