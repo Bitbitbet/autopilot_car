@@ -92,6 +92,9 @@ Camera::~Camera() { capture.release(); }
 /**
  * @brief 图像二值化
  *
+ * 统一约定：可行驶路面为白，背景为黑。白路面直接阈值；黑路面取反，
+ * 并修补被反相成黑的反光/白漆内部空洞（保留连接图像边界的背景排除区）。
+ *
  * @param img  输入图像
  * @return cv::Mat 二值化图像
  */
@@ -99,14 +102,35 @@ Mat Camera::binarize(const Mat &img) {
     Mat gray_img;
     cvtColor(img, gray_img, cv::COLOR_BGR2GRAY); // RGB转灰度图
 
+    const int threshold_value_arg = use_otsu ? -1 : threshold_value;
+    const int polarity = BLACK_ROAD ? cv::THRESH_BINARY_INV : cv::THRESH_BINARY;
     Mat bin_img;
-    if (use_otsu)
-        threshold(gray_img, bin_img, 0, 255,
-                  cv::THRESH_OTSU); //  采用大津法二值化
-    else
-        threshold(gray_img, bin_img, threshold_value, 255,
-                  cv::THRESH_BINARY); // 固定阈值方法
+    threshold(gray_img, bin_img,
+              threshold_value_arg < 0 ? 0 : threshold_value_arg, 255,
+              polarity | (threshold_value_arg < 0 ? cv::THRESH_OTSU : 0));
+    if (!BLACK_ROAD)
+        return bin_img;
 
+    // 只修补有界的内部空洞；与下边界连通的背景、与远边界连通的分隔带保留。
+    Mat exterior;
+    copyMakeBorder(bin_img, exterior, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(0));
+    floodFill(exterior, {0, 0}, cv::Scalar(255));
+    Mat holes;
+    bitwise_not(exterior(cv::Rect(1, 1, bin_img.cols, bin_img.rows)), holes);
+    Mat labels, stats, centers;
+    const int count =
+        connectedComponentsWithStats(holes, labels, stats, centers, 8, CV_32S);
+    for (int component = 1; component < count; ++component) {
+        if (stats.at<int>(component, cv::CC_STAT_AREA) > int(bin_img.total() / 10) ||
+            stats.at<int>(component, cv::CC_STAT_WIDTH) > bin_img.cols * 45 / 100 ||
+            stats.at<int>(component, cv::CC_STAT_HEIGHT) > bin_img.rows * 60 / 100)
+            continue;
+        const cv::Rect box(stats.at<int>(component, cv::CC_STAT_LEFT),
+                           stats.at<int>(component, cv::CC_STAT_TOP),
+                           stats.at<int>(component, cv::CC_STAT_WIDTH),
+                           stats.at<int>(component, cv::CC_STAT_HEIGHT));
+        bin_img(box).setTo(255, labels(box) == component);
+    }
     return bin_img;
 }
 

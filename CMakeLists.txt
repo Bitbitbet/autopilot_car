@@ -32,6 +32,10 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 add_executable(trackview src/tool/track_view.cpp)
 target_link_libraries(trackview PRIVATE control track camera tools PkgConfig::evdev PkgConfig::udev pthread)
 
+# 比赛集成：巡线 + AI 检测 + 任务状态机，与 trackview 同一套 Camera/Track
+add_executable(trackview_race src/tool/trackview_race.cpp src/tool/race_perception.cpp)
+target_link_libraries(trackview_race PRIVATE control track camera tools detection PkgConfig::evdev PkgConfig::udev pthread)
+
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)
 target_link_libraries(calibration PRIVATE show tools)
