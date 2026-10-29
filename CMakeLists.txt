@@ -9,6 +9,8 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui calib3d videoio img
 find_package(PkgConfig)
 pkg_search_module(evdev REQUIRED IMPORTED_TARGET libevdev)
 pkg_search_module(udev REQUIRED IMPORTED_TARGET libudev)
+pkg_search_module(ppnc REQUIRED IMPORTED_TARGET ppnc)
+pkg_search_module(onnx REQUIRED IMPORTED_TARGET onnx)
 
 add_subdirectory(third_party/nlohmann_json)
 
@@ -45,6 +47,10 @@ target_link_libraries(calibrate_homography PRIVATE ${OpenCV_LIBRARIES})
 # 目标检测
 add_executable(detection_tool src/tool/detection_tool.cpp)
 target_link_libraries(detection_tool PRIVATE camera detection)
+
+
+add_executable(my_own_detection src/tool/my_own_detection.cpp)
+target_link_libraries(my_own_detection PRIVATE camera PkgConfig::onnx ${OpenCV_LIBRARIES})
 
 # 图像采集
 add_executable(collection src/tool/collection.cpp)

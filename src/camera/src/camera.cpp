@@ -138,12 +138,6 @@ Mat Camera::binarize(const Mat &img) {
     return bin_img;
 }
 
-/**
- * @brief 矫正图像
- *
- * @param img 输入图像
- * @return cv::Mat 输出图像
- */
 bool Camera::read(Mat &frame) {
     if (!capture.read(frame) || frame.empty()) {
         return false;
