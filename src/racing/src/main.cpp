@@ -1,8 +1,3 @@
-/**
- * 比赛入口：一个循环里完成巡线、AI 检测和模式切换，组织和 icar 一样直白。
- * 图像、标定和识别口径都是 640x480，和 track_view 同一套 Camera / Track。
- * 检测结果只用来改运行模式（限速、停车、选路），不做离线记录。
- */
 #include "camera.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
@@ -31,18 +26,21 @@ namespace {
 std::atomic_bool stopping{false};
 void onSignal(int) { stopping = true; }
 double nowSeconds() {
-    return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+    return std::chrono::duration<double>(Clock::now().time_since_epoch())
+        .count();
 }
 enum class Mode { Manual, Auto };
 } // namespace
 
-static void drawHud(cv::Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
-                    float cruise, float speed, uint16_t servo, const RacePlan &race) {
+static void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
+                    float cruise, float speed, uint16_t servo,
+                    const RacePlan &race) {
     for (const auto &p : pilot.centerEdge)
         cv::circle(image, cv::Point(p.y, p.x), 2, cv::Scalar(0, 0, 255), -1);
     int y = 22;
     auto line = [&](const std::string &s) {
-        cv::putText(image, s, {8, y}, cv::FONT_HERSHEY_PLAIN, 1.2, {0, 255, 255}, 1);
+        cv::putText(image, s, {8, y}, cv::FONT_HERSHEY_PLAIN, 1.2,
+                    {0, 255, 255}, 1);
         y += 20;
     };
     char text[160];
@@ -53,7 +51,8 @@ static void drawHud(cv::Mat &image, const AutoPilot &pilot, Mode mode, bool pani
     snprintf(text, sizeof text, "center=%d err=%.2f quality=%.2f curve=%.2f",
              pilot.center, pilot.error, pilot.confidence, pilot.severity);
     line(text);
-    snprintf(text, sizeof text, "race=%s  ai_age=%.2fs", race.state, race.detectionAge);
+    snprintf(text, sizeof text, "race=%s  ai_age=%.2fs", race.state,
+             race.detectionAge);
     line(text);
     line(race.reason);
     line("a:auto  space:stop  +/-:limit  q:quit");
@@ -65,18 +64,17 @@ int main(int argc, char **argv) {
         if (!std::strcmp(argv[i], "--headless"))
             headless = true;
         else {
-            cerr << "用法: trackview_race [--headless]\n";
+            cerr << "用法: racing [--headless]\n";
             return 2;
         }
     }
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
 
-    // 标定和模型都在构造函数里读，失败会抛异常。
-    std::unique_ptr<Camera> camera;
+    Camera camera;
+
     std::unique_ptr<RacePerception> perception;
     try {
-        camera = std::make_unique<Camera>();
         perception = createRacePerception(RaceConfig{});
     } catch (const std::exception &e) {
         cerr << "[Error] 初始化失败: " << e.what() << '\n';
@@ -93,7 +91,7 @@ int main(int argc, char **argv) {
     if (!js)
         cout << "[Warn] 没有手柄。\n";
 
-    AutoPilot pilot(camera->cols(), camera->rows());
+    AutoPilot pilot(camera.cols(), camera.rows());
     RaceManager raceManager{RaceConfig{}};
 
     Mode mode = Mode::Manual;
@@ -103,17 +101,17 @@ int main(int argc, char **argv) {
     map<int, pair<int, int>, greater<int>> rows;
     double last = nowSeconds();
     std::string lastState;
-    cout << "[Start] " << (headless ? "HEADLESS " : "") << camera->cols() << "x"
-         << camera->rows() << " | 默认 MANUAL，按 a 启动。\n";
+    cout << "[Start] " << (headless ? "HEADLESS " : "") << camera.cols() << "x"
+         << camera.rows() << " | 默认 MANUAL，按 a 启动。\n";
 
     while (!stopping) {
-        cv::Mat image;
-        if (!camera->read(image)) {
+        Mat image;
+        if (!camera.read(image)) {
             cerr << "[Error] 取不到图像\n";
             break;
         }
-        cv::Mat bin = camera->binarize(image);
-        track_identify_from_bin(bin, *camera, rows);
+        Mat bin = camera.binarize(image);
+        track_identify_from_bin(bin, camera, rows);
 
         const double t = nowSeconds();
         float dt = float(t - last);
@@ -123,8 +121,8 @@ int main(int argc, char **argv) {
 
         perception->submit(image, uint64_t(t * 1000), t);
         const RaceSnapshot observation = perception->snapshot();
-        RacePlan race = raceManager.update(observation, t, dt, mode == Mode::Auto, bin,
-                                           rows, image);
+        RacePlan race = raceManager.update(
+            observation, t, dt, mode == Mode::Auto, bin, rows, image);
 
         auto toggle = [&] {
             if (mode == Mode::Auto) {
@@ -132,8 +130,9 @@ int main(int argc, char **argv) {
                 jsSpeed = 0;
                 pilot.resetControl();
                 cout << "[Mode] MANUAL\n";
-            } else if (pilot.ready && raceManager.aiReady(observation, t) && !joyLost &&
-                       (!js || !js->isStopped()) && std::fabs(jsSpeed) <= 0.05f) {
+            } else if (pilot.ready && raceManager.aiReady(observation, t) &&
+                       !joyLost && (!js || !js->isStopped()) &&
+                       std::fabs(jsSpeed) <= 0.05f) {
                 mode = Mode::Auto;
                 panic = false;
                 jsSpeed = 0;
@@ -166,10 +165,12 @@ int main(int argc, char **argv) {
             cruise = std::max(cfg::kMinSpeed, cruise - 0.05f);
             cout << "[Set] limit=" << cruise << " m/s\n";
         } else if (key == '[' || key == ']') {
-            pilot.setCurveSpeed(pilot.curveSpeed() + (key == ']' ? 0.05f : -0.05f));
+            pilot.setCurveSpeed(pilot.curveSpeed() +
+                                (key == ']' ? 0.05f : -0.05f));
             cout << "[Set] curve=" << pilot.curveSpeed() << " m/s\n";
         } else if (key == ',' || key == '.') {
-            pilot.setDegradedSpeed(pilot.degradedSpeed() + (key == '.' ? 0.05f : -0.05f));
+            pilot.setDegradedSpeed(pilot.degradedSpeed() +
+                                   (key == '.' ? 0.05f : -0.05f));
             cout << "[Set] quality=" << pilot.degradedSpeed() << " m/s\n";
         } else if (key == 'w' || key == 'W') {
             pilot.cycleWeight();
@@ -194,7 +195,8 @@ int main(int argc, char **argv) {
                 mode = Mode::Manual;
                 jsSpeed = 0;
                 pilot.resetControl();
-            } else if (mode == Mode::Auto && newCommand && std::fabs(jsSpeed) > 0.05f) {
+            } else if (mode == Mode::Auto && newCommand &&
+                       std::fabs(jsSpeed) > 0.05f) {
                 mode = Mode::Manual;
                 jsSpeed = 0;
                 pilot.resetControl();

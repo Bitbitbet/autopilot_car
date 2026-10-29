@@ -3,7 +3,6 @@ project(autopilot_car)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_options(-Wall -Wextra)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui calib3d videoio imgcodecs dnn)
@@ -32,15 +31,14 @@ target_link_libraries(img2video PRIVATE ${OpenCV_LIBRARIES})
 add_executable(trackview src/tool/track_view.cpp)
 target_link_libraries(trackview PRIVATE control track camera tools PkgConfig::evdev PkgConfig::udev pthread)
 
-# 比赛集成：巡线 + AI 检测 + 任务状态机，与 trackview 同一套 Camera/Track
-add_executable(trackview_race src/tool/trackview_race.cpp src/tool/race_perception.cpp)
-target_link_libraries(trackview_race PRIVATE control track camera tools detection PkgConfig::evdev PkgConfig::udev pthread)
+# 比赛集成：巡线 + AI 检测 + 任务状态机
+add_subdirectory(src/racing)
 
 # 相机矫正
 add_executable(calibration src/tool/calibration.cpp)
 target_link_libraries(calibration PRIVATE show tools)
 
-# 地面坐标投影 相机矫正
+# 地面坐标投影的坐标标定
 add_executable(calibrate_homography src/tool/calibrate_homography.cpp)
 target_link_libraries(calibrate_homography PRIVATE ${OpenCV_LIBRARIES})
 
@@ -52,5 +50,5 @@ target_link_libraries(detection_tool PRIVATE camera detection)
 add_executable(collection src/tool/collection.cpp)
 target_link_libraries(collection PRIVATE control camera tools pthread PkgConfig::evdev PkgConfig::udev ${OpenCV_LIBRARIES})
 
-# 主程序（src/icar 仍在用已删除的 Track 增量搜索重载，暂不构建）
+# # 主程序
 # add_subdirectory(src/icar)

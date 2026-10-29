@@ -1,5 +1,5 @@
 #pragma once
-// 巡线转向与速度规划（640x480 原生像素口径），track_view 与 trackview_race 共用。
+// 巡线转向与速度规划（640x480 原生像素口径），track_view 与 racing 共用。
 #include "tools.hpp"
 #include "track.hpp"
 #include <algorithm>

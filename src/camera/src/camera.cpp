@@ -113,7 +113,8 @@ Mat Camera::binarize(const Mat &img) {
 
     // 只修补有界的内部空洞；与下边界连通的背景、与远边界连通的分隔带保留。
     Mat exterior;
-    copyMakeBorder(bin_img, exterior, 1, 1, 1, 1, cv::BORDER_CONSTANT, cv::Scalar(0));
+    copyMakeBorder(bin_img, exterior, 1, 1, 1, 1, cv::BORDER_CONSTANT,
+                   cv::Scalar(0));
     floodFill(exterior, {0, 0}, cv::Scalar(255));
     Mat holes;
     bitwise_not(exterior(cv::Rect(1, 1, bin_img.cols, bin_img.rows)), holes);
@@ -121,9 +122,12 @@ Mat Camera::binarize(const Mat &img) {
     const int count =
         connectedComponentsWithStats(holes, labels, stats, centers, 8, CV_32S);
     for (int component = 1; component < count; ++component) {
-        if (stats.at<int>(component, cv::CC_STAT_AREA) > int(bin_img.total() / 10) ||
-            stats.at<int>(component, cv::CC_STAT_WIDTH) > bin_img.cols * 45 / 100 ||
-            stats.at<int>(component, cv::CC_STAT_HEIGHT) > bin_img.rows * 60 / 100)
+        if (stats.at<int>(component, cv::CC_STAT_AREA) >
+                int(bin_img.total() / 10) ||
+            stats.at<int>(component, cv::CC_STAT_WIDTH) >
+                bin_img.cols * 45 / 100 ||
+            stats.at<int>(component, cv::CC_STAT_HEIGHT) >
+                bin_img.rows * 60 / 100)
             continue;
         const cv::Rect box(stats.at<int>(component, cv::CC_STAT_LEFT),
                            stats.at<int>(component, cv::CC_STAT_TOP),

@@ -2,8 +2,8 @@
 
 #include <opencv2/opencv.hpp>
 
-// 黑色赛道：路面是暗色。二值图统一成"白=可走"，换场地时改这里重编。
-constexpr bool BLACK_ROAD = false;
+// 黑色赛道：路面是否是暗色。
+constexpr bool BLACK_ROAD = true;
 
 class Camera {
   public:
