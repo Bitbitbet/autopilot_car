@@ -32,20 +32,6 @@ constexpr size_t IMAGE_ROWIPM = 500; // IPM图像的行数
 extern Mapping ipm;
 
 /**
- * @brief 目标检测结果
- *
- */
-struct PredictResult {
-    int type;          // ID
-    std::string label; // 标签
-    float score;       // 置信度
-    int x;             // 坐标(左下角点)
-    int y;             // 坐标
-    int width;         // 尺寸
-    int height;        // 尺寸
-};
-
-/**
  * @brief 构建二维坐标
  *
  */

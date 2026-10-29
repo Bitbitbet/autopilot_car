@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
     // 台架上没有串口时只跑图像和决策，不驱动车轮。
     auto car = CarControl::create();
     if (!car) {
-        cerr << "[Fatel] 打开串口失败" << endl;
+        cerr << "[Fatal] 打开串口失败" << endl;
         return 3;
     }
 

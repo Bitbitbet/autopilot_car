@@ -53,12 +53,12 @@ void buildNms(const string &model_dir) {
     cout << "nms模型编译完成。" << endl;
 }
 
-Detection::Detection(const string pathModel, float score_nms)
+Detection::Detection(const string pathModel, float minimum_confidence)
     : predictor_nna("../res/models/config_ppncnna.json"),
       predictor_nms("../res/models/config_ppncnms.json"),
       image({1, 3, PREPROCESS_DST_H, PREPROCESS_DST_W}), im_shape({1, 2}),
       scale_factor({1, 2}) {
-    score = score_nms;
+    this->minimum_confidence = minimum_confidence;
 
     this->onnx_env =
         Ort::Env(OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING, "test");
@@ -250,7 +250,7 @@ void Detection::render() {
         result.type = data[i];
         result.score = data[i + 1];
 
-        if (result.score < score) // 阈值
+        if (result.score < minimum_confidence) // 阈值
             continue;
 
         // turnning....

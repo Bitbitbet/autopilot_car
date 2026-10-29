@@ -1,7 +1,6 @@
 #pragma once
 
 #include "predictor_api.h"
-#include "tools.hpp"
 #include <memory>
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
@@ -9,10 +8,23 @@
 #include <sys/time.h>
 #include <vector>
 
+/**
+ * @brief 目标检测结果
+ *
+ */
+struct PredictResult {
+    int type;          // ID
+    std::string label; // 标签
+    float score;       // 置信度
+    int x;             // 坐标(左下角点)
+    int y;             // 坐标
+    int width;         // 尺寸
+    int height;        // 尺寸
+};
+
 class Detection {
   public:
     std::vector<PredictResult> results; // AI推理结果
-    float score = 0.5;                  // AI检测置信度
     std::vector<int>
         drawSkipLabels; // 调试画面需跳过的标签(type)：normal态滤掉fork不画
 
@@ -21,7 +33,7 @@ class Detection {
      *
      * @param pathModel
      */
-    Detection(const std::string pathModel, float score_nms);
+    Detection(const std::string pathModel, float minimum_confidence);
 
     /**
      * @brief AI模型推理
@@ -47,6 +59,7 @@ class Detection {
     std::unique_ptr<Ort::Session> predictor_onnx;
 
     // 推理相关 helper
+    float minimum_confidence = 0.5;
     static constexpr size_t PREPROCESS_DST_W = 320;
     static constexpr size_t PREPROCESS_DST_H = 320;
     NDTensor image, im_shape, scale_factor;

@@ -18,11 +18,11 @@ using std::vector;
 // 像素量是 640x480 口径；识别门限是地面坐标（米）。
 namespace cfg {
 // 速度 (m/s)
-constexpr float kCruiseSpeed = 1.0f; // 默认巡航
+constexpr float kCruiseSpeed = 1.5f; // 默认巡航
 constexpr float kMaxSpeed = 1.50f;   // 上限
 constexpr float kMinSpeed = 0.05f;
-constexpr float kCurveSpeed = 0.8f;     // 弯道限速
-constexpr float kDegradedSpeed = 0.12f; // 单边/低置信度限速
+constexpr float kCurveSpeed = 0.8f;    // 弯道限速
+constexpr float kDegradedSpeed = 0.8f; // 单边/低置信度限速
 constexpr float kAcceleration = 0.30f;
 constexpr float kDeceleration = 0.60f;
 constexpr float kQualityDeceleration = 1.20f;

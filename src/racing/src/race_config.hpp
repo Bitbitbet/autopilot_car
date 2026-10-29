@@ -38,11 +38,5 @@ struct RaceConfig {
     float stopHoldTime = 1.f;
     // 道闸：默认要求同一个道闸由横变竖才算抬起
     float gateOpenAspect = 0.75f;
-    // 复核开关
-    bool verifyForkArrows = true;
-    bool verifyStopCandidates = true;
-    float stopCandidateConfidence = 0.35f; // 仅停车牌候选
-    bool verifyCrosswalkGeometry = true;
-    float crossCandidateConfidence = 0.10f; // 仅斑马线候选
     std::string modelDirectory = "../res/models/yolov3_mobilenet_v1";
 };
