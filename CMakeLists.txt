@@ -6,7 +6,7 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_options(-Wall -Wextra)
 
-find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui calib3d videoio imgcodecs dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui calib3d videoio imgcodecs dnn video)
 find_package(PkgConfig)
 pkg_search_module(evdev REQUIRED IMPORTED_TARGET libevdev)
 pkg_search_module(udev REQUIRED IMPORTED_TARGET libudev)

@@ -4,9 +4,9 @@
 #include <fstream>
 
 // 配置结构增加字段后拒绝与旧版插件混用，避免跨动态库解释错误的结构布局。
-extern "C" int raceBackendAbi() { return 2; }
+extern "C" int raceBackendAbi() { return 3; }
 
-extern "C" RacePerception *raceCreatePerceptionV2(const RaceConfig *input) {
+extern "C" RacePerception *raceCreatePerceptionV3(const RaceConfig *input) {
     const RaceConfig &config=*input;
     namespace fs=std::filesystem;
     const fs::path path=config.modelDirectory;
@@ -32,13 +32,15 @@ extern "C" RacePerception *raceCreatePerceptionV2(const RaceConfig *input) {
     }
     if(actual!=expected) throw std::runtime_error("Model label order differs from race label contract");
     // 模型初始化及其旧版 NMS 编译发生在打开电机串口之前。
-    const float floor=config.verifyStopCandidates?std::min(config.confidence,config.stopCandidateConfidence):config.confidence;
+    float floor=config.verifyStopCandidates?std::min(config.confidence,config.stopCandidateConfidence):config.confidence;
+    if(config.verifyCrosswalkGeometry) floor=std::min(floor,config.crossCandidateConfidence);
     auto detector=std::make_shared<Detection>(path.string(),floor);
     return new RacePerception([detector,config](const cv::Mat &frame) {
         detector->inference(frame);
         std::vector<PredictResult> result;
         for(const auto &d:detector->results)
-            if(d.score>=config.confidence||(config.verifyStopCandidates&&d.type==LABEL_STOP&&d.score>=config.stopCandidateConfidence))
+            if(d.score>=config.confidence||(config.verifyStopCandidates&&d.type==LABEL_STOP&&d.score>=config.stopCandidateConfidence)||
+               (config.verifyCrosswalkGeometry&&d.type==LABEL_CROSS&&d.score>=config.crossCandidateConfidence))
                 result.push_back(d);
         return result;
     },config);

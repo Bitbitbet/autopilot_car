@@ -1,6 +1,7 @@
 #pragma once
 #include "race_config.hpp"
 #include "race_direction.hpp"
+#include "race_crosswalk.hpp"
 #include "tools.hpp"
 #include <chrono>
 #include <condition_variable>
@@ -18,6 +19,7 @@ struct RaceSnapshot {
     std::string error;
     cv::Mat image; // 与结果对应的原始推理图像，只读共享，不能用新帧冒充。
     std::vector<ForkDirectionCheck> directionChecks{};
+    CrosswalkGeometry crosswalk{};
 };
 inline double raceTime() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -50,8 +52,9 @@ private:
                 }
                 auto result=infer(frame);
                 auto checks=config.verifyForkArrows?verifyForkDirections(frame,result):std::vector<ForkDirectionCheck>{};
+                auto cross=config.verifyCrosswalkGeometry?detectCrosswalkGeometry(frame):CrosswalkGeometry{};
                 std::lock_guard lock(mutex);
-                latest={sequence,captured,std::move(result),false,{},std::move(frame),std::move(checks)};
+                latest={sequence,captured,std::move(result),false,{},std::move(frame),std::move(checks),std::move(cross)};
             }
         } catch(const std::exception &e) {
             std::lock_guard lock(mutex); latest.failed=true; latest.error=e.what();

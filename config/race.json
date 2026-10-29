@@ -24,5 +24,9 @@
   "stopHoldTime": 1.0,
   "gateOpenAspect": 0.75,
   "modelDirectory": "../res/models/yolov3_mobilenet_v1",
-  "verifyForkArrows": true
+  "verifyForkArrows": true,
+  "verifyStopCandidates": true,
+  "stopCandidateConfidence": 0.35,
+  "verifyCrosswalkGeometry": true,
+  "crossCandidateConfidence": 0.1
 }

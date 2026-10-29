@@ -1,3 +1,8 @@
+#include "race_obstacle.hpp"
+#include "race_navigation_worker.hpp"
+#include "race_sample_writer.hpp"
+#include "race_fork_evidence.hpp"
+#include "race_bypass_control.hpp"
 /** 比赛集成入口：继承 v6 巡线，叠加异步感知、选路和任务仲裁。
  * 与 track_view.cpp 分开维护，避免改变已验证的 v6 程序。 */
 #include "race_manager.hpp"
@@ -116,9 +121,9 @@ public:
                 << " path=" << p.pathIssue << " missing_width=" << p.missingWidthPoints << '\n';
             std::ofstream(path/"runtime-config.json") << p.runtimeConfig().dump(2);
             std::ofstream widths(path/"width-profile.csv");
-            widths << "row,width,observations,pending_observations,age_s,refresh_due\n";
+            widths << "row,width,observations,pending_observations,age_s,refresh_due,calibrated_reference\n";
             for(const auto &w:p.widthProfile()) widths << w.row << ',' << w.width << ','
-                << w.observations << ',' << w.pendingObservations << ',' << w.age << ',' << w.refreshDue << '\n';
+                << w.observations << ',' << w.pendingObservations << ',' << w.age << ',' << w.refreshDue << ',' << w.calibratedReference << '\n';
             for (const auto &f:recent) {
                 cv::imwrite((path/(std::to_string(f.number)+"-camera.jpg")).string(),f.camera);
                 cv::imwrite((path/(std::to_string(f.number)+"-binary.png")).string(),f.binary);
@@ -170,7 +175,11 @@ int main(int argc,char **argv) {
     cv::Mat lastOverlay;
     try {
         std::string source="/dev/video0", configPath="trackview.json";
-        std::string raceConfigPath="race.json", detectionPath;
+        std::string raceConfigPath="race.json", detectionPath,navigationConfigPath="navigation.json";
+        bool navigationConfigRequired=false;
+        bool calibrateGround=false,bypassEnabled=false;
+        bool replayCorrected=false;
+        std::string groundPath="ground-calibration.json";
         bool noControl=false, headless=false, replay=false, configRequired=false,legacyWindows=false;
         int displayFps=5;
         double trialSeconds=0;
@@ -178,6 +187,11 @@ int main(int argc,char **argv) {
             const std::string arg=argv[i];
             auto value=[&]() { if(++i>=argc) throw std::invalid_argument("Missing argument for "+arg); return std::string(argv[i]); };
             if(arg=="--race-config") raceConfigPath=value();
+            else if(arg=="--navigation-config") { navigationConfigPath=value();navigationConfigRequired=true; }
+            else if(arg=="--calibrate-ground") {calibrateGround=true;noControl=true;}
+            else if(arg=="--obstacle-bypass") bypassEnabled=true;
+            else if(arg=="--replay-corrected") replayCorrected=true;
+            else if(arg=="--ground-calibration") groundPath=value();
             else if(arg=="--detections") detectionPath=value();
             else if(arg=="--config") { configPath=value(); configRequired=true; }
             else if(arg=="--replay") { source=value(); replay=noControl=true; }
@@ -199,12 +213,16 @@ int main(int argc,char **argv) {
                 std::cout<<"trackview_race [--config trackview.json] [--race-config race.json] [--no-control] [--headless] [--replay video --detections records.jsonl] [--display-fps 1..10] [--legacy-windows]\n"
                     <<"Default MANUAL; press a in image window. ESC/q quits; v toggles AI/binary.\n"
                     <<"Default one compact window at 5 FPS; Ctrl+C in terminal also requests stop. Replay never opens serial/gamepad.\n"
-                    <<"--trial-seconds 0.5..3: one-shot low-speed stop timer; requires configured speeds <=0.10 m/s.\n"; return 0;
+                    <<"--trial-seconds 0.5..3: one-shot low-speed stop timer; requires configured speeds <=0.10 m/s.\n"
+                    <<"--navigation-config navigation.json: background pixel route preview in preview/drive modes.\n"
+                    <<"--calibrate-ground: camera-only four-point ground calibration, never opens serial/NPU.\n"
+                    <<"--obstacle-bypass --ground-calibration ground-calibration.json: calibrated straight-cone trial; uses configured maxSpeed.\n"; return 0;
             } else if(arg.rfind("--",0)==0) throw std::invalid_argument("Unknown option: "+arg);
             else source=arg;
         }
         if(!noControl && source.rfind("/dev/video",0)!=0)
             throw std::invalid_argument("Video files require --replay (no vehicle commands)");
+        if(replayCorrected&&!replay)throw std::invalid_argument("--replay-corrected is only for offline corrected-frame replay");
         TrackviewConfig config; config.load(configPath,configRequired);
         if(trialSeconds>0) RaceTrialDeadline::requireLowSpeed(config.maxSpeed,config.cruiseSpeed,config.curveSpeed,config.degradedSpeed);
         if(!detectionPath.empty()&&!replay)
@@ -212,6 +230,25 @@ int main(int argc,char **argv) {
         if(replay&&detectionPath.empty())
             throw std::invalid_argument("Race replay requires --detections JSONL");
         RaceConfig raceConfig; raceConfig.load(raceConfigPath);
+        RaceNavigationConfig navigationConfig;navigationConfig.load(navigationConfigPath,navigationConfigRequired);
+        if(calibrateGround) {
+            if(replay||headless||bypassEnabled)throw std::invalid_argument("Ground calibration needs live camera and image window only");
+            auto preprocessing=config.binary<0?std::make_shared<Predeal>():std::make_shared<Predeal>(config.binary);
+            preprocessing->blackRoad=config.roadSurface=="black";
+            cv::VideoCapture video;video.open(source,cv::CAP_V4L2);if(!video.isOpened())video.open(source);
+            if(!video.isOpened())throw std::runtime_error("Cannot open calibration camera");
+            video.set(cv::CAP_PROP_FRAME_WIDTH,320);video.set(cv::CAP_PROP_FRAME_HEIGHT,240);video.set(cv::CAP_PROP_BUFFERSIZE,1);
+            return raceCalibrateGround(video,*preprocessing,groundPath,stopping);
+        }
+        std::optional<RaceGroundCalibration> ground;
+        if(bypassEnabled) {
+            ground.emplace();ground->load(groundPath);
+            if(config.minSpeed>.1f)throw std::invalid_argument("Bypass trial requires minSpeed <=0.10");
+        }
+        const bool navigationEnabled=bypassEnabled||navigationConfig.obstacleMode=="preview";
+        RaceObstaclePreview obstaclePreview(navigationConfig);
+        std::optional<RaceGroundObstacle> groundObstacle;if(ground)groundObstacle.emplace(*ground);
+        RaceBypassControl bypassControl;AutoPilot bypassPilot(config);
         if(std::min({raceConfig.limitedSpeed,raceConfig.forkSpeed,raceConfig.approachSpeed})<config.minSpeed)
             throw std::invalid_argument("Race speed caps must be at least trackview minSpeed");
         RaceManager raceManager(raceConfig);
@@ -220,21 +257,49 @@ int main(int argc,char **argv) {
         if(replay) detectionReplay=std::make_unique<RaceReplay>(detectionPath);
         else perception=createRacePerception(raceConfig);
         pilot=AutoPilot(config);
+        // 普通巡线同样可使用当前车四点标定补冷启动宽度；不启用米制绕行接管。
+        try {
+            std::optional<RaceGroundCalibration> widthReference=ground;
+            if(!widthReference&&fs::is_regular_file(groundPath)) {
+                widthReference.emplace();widthReference->load(groundPath);
+            }
+            if(widthReference)std::cout<<"[Lane] Current-camera calibrated width reference rows="
+                <<pilot.seedCalibratedWidths(raceGroundLaneWidthProfile(*widthReference))
+                <<"; v6 steering unchanged; live dual-edge widths still revalidate reference.\n";
+        }catch(const std::exception &e){std::cerr<<"[Lane] Optional width reference unavailable: "<<e.what()<<'\n';}
         log=std::make_unique<Diagnostics>(config);
         std::unique_ptr<RaceTrace> forkTrace;
         if(noControl&&!log->outputDirectory().empty())
             forkTrace=std::make_unique<RaceTrace>(log->outputDirectory(),raceConfig);
-        std::ofstream raceLog,detectionLog;
+        std::ofstream raceLog,detectionLog,navigationLog,bypassLog;
         if(!log->outputDirectory().empty()) {
             raceLog.open(log->outputDirectory()/"race.csv");
             detectionLog.open(log->outputDirectory()/"detections.jsonl");
             std::ofstream(log->outputDirectory()/"race-config.json") << nlohmann::json(raceConfig).dump(2);
-            raceLog << "frame,state,reason,ai_sequence,ai_age_s,fresh,stop,cap,branch_selected,command_speed,geometry_split_rows,red_cap_components\n";
+            if(navigationEnabled) {
+                if(replay)navigationLog.open(log->outputDirectory()/"navigation.jsonl");
+                std::ofstream(log->outputDirectory()/"navigation-config.json")<<nlohmann::json(navigationConfig).dump(2);
+            }
+            if(ground) {
+                std::ofstream(log->outputDirectory()/"ground-calibration.json")<<nlohmann::json(*ground).dump(2);
+                bypassLog.open(log->outputDirectory()/"bypass-control.csv");
+                bypassLog<<"frame,navigation_frame,navigation_age_s,decision,reason,follow,cone_authorized,race_state,stop,command_speed,pwm,route_center,motion_valid,motion_epoch,motion_inliers,rear_passed,steering_source,lookahead_x_m,lookahead_z_m,requested_pwm,wheelbase_m\n";
+            }
+            raceLog << "frame,state,reason,ai_sequence,ai_age_s,fresh,stop,cap,branch_selected,command_speed,geometry_split_rows,red_cap_components,geometry_reason\n";
         }
+        std::unique_ptr<RaceNavigationWorker> navigationWorker;
+        if(navigationEnabled&&!replay)navigationWorker=std::make_unique<RaceNavigationWorker>(navigationConfig,raceConfig,
+            config.binary,config.rowCutUp,config.rowCutBottom,
+            log->outputDirectory().empty()?fs::path{}:log->outputDirectory()/"navigation.jsonl",RaceNavigationWorker::Process{},ground,config.roadSurface=="black");
+        RaceSampleWriter sampleWriter;
+        RaceForkEvidence forkEvidence;
         uint64_t raceFrame=0,loggedSequence=0;
         std::string previousRaceState;
         // 先加载相机标定参数，再打开车辆控制设备。
         auto predeal=config.binary<0 ? std::make_shared<Predeal>() : std::make_shared<Predeal>(config.binary);
+        predeal->blackRoad=config.roadSurface=="black";
+        std::cout<<"[Road] surface="<<config.roadSurface<<"; normalized road=WHITE, background=BLACK\n";
+        if(predeal->blackRoad)std::cout<<"[Road] bounded interior glare/paint repair ON; border-connected exclusions retained\n";
         cv::VideoCapture capture;
         if(!replay) capture.open(source,cv::CAP_V4L2);
         if(!capture.isOpened()) capture.open(source);
@@ -269,6 +334,9 @@ int main(int argc,char **argv) {
             <<" | default limit="<<cruise<<" m/s | max="<<config.maxSpeed
             <<" | turn="<<pilot.curveSpeed()<<" quality="<<pilot.degradedSpeed()<<"\n";
         if(forkTrace) std::cout<<"[Trace] AUTO FORK CAPTURE | NO CONTROL ONLY | up to 12 episodes\n";
+        if(bypassEnabled)std::cout<<"[Bypass] CALIBRATED STRAIGHT CONE TRIAL | configured max="<<config.maxSpeed<<" m/s | loss of visual motion latches stop | no timed blind pass\n";
+        else if(navigationEnabled)std::cout<<"[Navigation] BACKGROUND ROUTE SHADOW | PIXELS | does not command wheels | physical clearance not calibrated\n";
+        if(!bypassEnabled&&!noControl)std::cout<<"[Mode] 普通巡线与路障停车，不执行自动绕行。绕行入口：bash ./run_car.sh bypass competition\n";
         std::atomic_bool trialStop{false};
         std::atomic_int trialSerialStop{-1};
         RaceTrialDeadline trial(trialSeconds,[&] {
@@ -287,6 +355,14 @@ int main(int argc,char **argv) {
         std::string stage="startup";
         auto stageStarted=Clock::now();
         double captureMs=0, preprocessMs=0, trackMs=0;
+        uint16_t lastBypassServo=PWMSERVOMID;
+        uint64_t navigationSequence=0,loggedNavigationSequence=0;
+        cv::Mat navigationBinary;
+        Track navigationTrack;navigationTrack.rowCutUp=config.rowCutUp;navigationTrack.rowCutBottom=config.rowCutBottom;
+        std::string previousNavigationState;
+        double lastNavigationPrint=-1e30;
+        int automaticBypassSamples=0;
+        double lastAutomaticBypassSample=-1e30;
         try {
         while(!stopping.load()) {
             stage="before_capture"; stageStarted=Clock::now();
@@ -304,7 +380,7 @@ int main(int argc,char **argv) {
             // 标定参数对应 320×240 图像；分辨率不一致时先缩放，再进行去畸变。
             if(image.size()!=cv::Size(IMAGE_COL,IMAGE_ROW))
                 cv::resize(image,image,{IMAGE_COL,IMAGE_ROW},0,0,cv::INTER_AREA);
-            predeal->correct(image);
+            if(!replayCorrected)predeal->correct(image);
             cv::Mat bin=predeal->binarize(image);
             ++raceFrame;
             if(perception) perception->submit(image,raceFrame,
@@ -319,12 +395,62 @@ int main(int argc,char **argv) {
             log->add(image,bin,track);
             const double observationTime=replay?raceFrame*double(replayDt):raceTime();
             auto observation=perception?perception->snapshot():detectionReplay->take(raceFrame,observationTime);
-            if(replay&&observation.sequence==raceFrame) observation.image=image.clone();
-            if(!headless) aiPreview.publish(observation,observationTime);
+            if(replay&&observation.sequence==raceFrame) {
+                observation.image=image.clone();
+                if(raceConfig.verifyCrosswalkGeometry) observation.crosswalk=detectCrosswalkGeometry(observation.image);
+            }
+            RaceObstaclePreviewPlan navigation;
+            RaceSnapshot displayObservation=observation;
+            if(navigationEnabled) {
+                if(navigationWorker) {
+                    if(observation.failed) {
+                        navigation.sequence=observation.sequence;navigation.captured=observation.captured;
+                        navigation.state="OBS_AI_FAILED";navigation.reason=observation.error;
+                    } else {
+                        navigationWorker->submit(observation,observationTime);
+                        auto completed=navigationWorker->view(observationTime);navigation=std::move(completed.plan);
+                        if(completed.ai.sequence)displayObservation=std::move(completed.ai);
+                    }
+                } else {
+                    // 回放按虚拟帧时间同步处理，保留可重复的离线验证。
+                    if(observation.sequence!=navigationSequence&&!observation.image.empty()) {
+                        navigationBinary=predeal->binarize(observation.image);
+                        navigationTrack.handle(navigationBinary);navigationSequence=observation.sequence;
+                    }
+                    navigation=groundObstacle?groundObstacle->update(observation,observationTime,navigationBinary,navigationTrack,raceConfig,bypassControl.engaged(),mode==Mode::Auto):
+                        obstaclePreview.update(observation,observationTime,navigationBinary,navigationTrack,raceConfig);
+                }
+                // 检测抖动时限制终端输出频率；navigation.jsonl 仍保留每次新推理结果。
+                // 停车原因（尤其路宽/尺度）必须和状态一起显示，否则只看到"要直道"却不知为何。
+                const std::string navigationKey=navigation.state+" | "+navigation.reason;
+                if(previousNavigationState!=navigationKey&&observationTime-lastNavigationPrint>=1.) {
+                    std::cout<<"[Navigation] "<<navigation.state<<" | "<<navigation.reason
+                        <<(bypassEnabled?" | CALIBRATED TRIAL":" | PREVIEW ONLY / PIXELS");
+                    if(navigation.metric&&navigation.laneWidthRaw>0) {
+                        std::cout<<" | raw lane "<<std::lround(navigation.laneWidthRaw*100)<<"cm";
+                        // 未锁定时打印"需要的倍数"，这样越界一行就能看出差多少，不必再猜。
+                        if(navigation.laneScaleWanted>navigation.laneScale*1.001f)
+                            std::cout<<" need x"<<std::fixed<<std::setprecision(2)<<navigation.laneScaleWanted<<std::setprecision(6);
+                        else
+                            std::cout<<" x"<<std::fixed<<std::setprecision(2)<<navigation.laneScale<<std::setprecision(6);
+                    }
+                    std::cout<<'\n';
+                    previousNavigationState=navigationKey;
+                    lastNavigationPrint=observationTime;
+                }
+                if(navigationLog&&observation.sequence>loggedNavigationSequence) {
+                    navigationLog<<raceObstacleJson(navigation,navigationConfig).dump()<<'\n';
+                    loggedNavigationSequence=observation.sequence;
+                }
+            }
+            if(!headless) aiPreview.publish(displayObservation,observationTime,navigation);
             const uint64_t motionEpoch=car?car->motionEpoch():0;
             auto toggle=[&]() {
                 if(mode==Mode::Auto) { mode=Mode::Manual; jsSpeed=0; pilot.resetControl(); }
-                else if(pilot.ready && raceManager.aiReady(observation,observationTime) && !joyLost && (!js || !js->isStopped()) && std::fabs(jsSpeed)<=0.05f) {
+                else if(bypassEnabled&&!raceBypassArmReady(navigation,observationTime,raceConfig)) {
+                    std::cout<<"[Wait] 绕行启动需要已确认锥桶和鲜活可执行路线；当前 "<<navigation.state<<" | "<<navigation.reason<<'\n';
+                }
+                else if((pilot.ready||(bypassEnabled&&bypassPilot.ready)) && raceManager.aiReady(observation,observationTime) && !joyLost && (!js || !js->isStopped()) && std::fabs(jsSpeed)<=0.05f) {
                     if(car && !car->resumeMotion(motionEpoch)) return;
                     mode=Mode::Auto; panic=false; jsSpeed=0; pilot.resetControl();
                 } else {
@@ -372,30 +498,82 @@ int main(int argc,char **argv) {
                 }
             }
             if(mode==Mode::Auto&&trial.arm()) std::cout<<"[Trial] Timer armed."<<std::endl;
-            const auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image);
+            const auto bypass=bypassEnabled?bypassControl.update(navigation,observation,raceConfig,observationTime,mode==Mode::Auto):RaceBypassDecision{};
+            if(navigationWorker&&bypassEnabled)navigationWorker->setControlState(mode==Mode::Auto,bypassControl.engaged());
+            auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image,bypass.authorizeCone);
+            const bool laneTask=std::string(racePlan.state)=="LANE"||std::string(racePlan.state)=="LIMIT_ZONE";
+            if(bypassEnabled) {
+                std::vector<PointX> left,right;
+                if(navigation.metric&&navigation.candidate&&!navigation.stop&&navigation.fresh) {
+                    for(const auto &p:navigation.left)left.emplace_back(p.x,int(std::lround(p.y)));
+                    for(const auto &p:navigation.right)right.emplace_back(p.x,int(std::lround(p.y)));
+                }
+                bypassPilot.update(left,right,dt,speed);
+                if(bypass.involved) {
+                    if(bypass.stop||!laneTask||!bypassPilot.ready)racePlan.stop=true;
+                    if(laneTask) {racePlan.state=bypass.state;racePlan.reason=bypass.follow&&!bypassPilot.ready?"BYPASS_CONTROL_PATH_WAIT":bypass.reason;}
+                }
+            }
             if(forkTrace) forkTrace->observe(raceFrame,observationTime,image,bin,track,observation,racePlan);
             const auto &pathLeft=racePlan.selectedBranch?racePlan.path.left:track.pointsEdgeLeft;
             const auto &pathRight=racePlan.selectedBranch?racePlan.path.right:track.pointsEdgeRight;
             pilot.update(pathLeft,pathRight,dt,speed);
+            const bool captureFork=!log->outputDirectory().empty()&&
+                forkEvidence.due(racePlan.state,racePlan.reason,observationTime,observation.sequence);
+            // Retain the unannotated control-frame image separately from the asynchronous AI image.
+            cv::Mat forkCamera;if(captureFork)forkCamera=image.clone();
             track.drawImage(image);
-            if(mode==Mode::Auto && pilot.lost) {
+            if(mode==Mode::Auto && pilot.lost && !(bypassEnabled&&bypassControl.engaged())) {
                 mode=Mode::Manual; panic=true; jsSpeed=0; pilot.resetControl();
                 stopReason=std::string("trusted lane lost; stop latched, press a after recovery; path=")+pilot.pathIssue;
             }
+            const float previousCommandSpeed=speed;
             speed=0; uint16_t servo=PWMSERVOMID;
+            RaceBypassSteering routeSteering;
             if(!panic && !stopping) {
                 if(mode==Mode::Auto) {
-                    if(racePlan.stop) pilot.resetControl();
-                    else { speed=pilot.speedFor(std::min(cruise,racePlan.speedCap),dt); servo=pilot.servo; }
+                    if(racePlan.stop) {pilot.resetControl();bypassPilot.resetControl();}
+                    else if(bypass.follow) {
+                        routeSteering=raceGroundSteering(navigation,navigationConfig,previousCommandSpeed,lastBypassServo,dt);
+                        if(routeSteering.valid) {
+                            speed=bypassPilot.speedFor(std::min(cruise,racePlan.speedCap),dt);servo=routeSteering.pwm;
+                        } else {racePlan.stop=true;racePlan.reason="BYPASS_STEERING_PATH_WAIT";bypassPilot.resetControl();}
+                    }
+                    else {speed=pilot.speedFor(std::min(cruise,racePlan.speedCap),dt);servo=pilot.servo;}
                 }
-                else if(!trial.enabled()) { speed=std::clamp(jsSpeed,-config.maxSpeed,config.maxSpeed); servo=jsServo; }
+                else if(!trial.enabled()&&!bypassEnabled) { speed=std::clamp(jsSpeed,-config.maxSpeed,config.maxSpeed); servo=jsServo; }
             }
+            lastBypassServo=bypass.follow&&speed>0?servo:PWMSERVOMID;
             if(car) {
                 if(car->hasFault()) throw std::runtime_error("Serial command timeout during processing");
                 car->carControl(speed,servo);
                 if(racePlan.buzzer&&!panic&&mode==Mode::Auto) car->buzzerSound(Buzzer::ding);
             }
+            // 在实际零速指令之后异步保存首次故障画面，避免人工按s时只留下十几秒后的静止图。
+            if(bypassEnabled&&bypass.stop&&bypassControl.engaged()&&previousCommandSpeed>.001f&&
+               automaticBypassSamples<8&&observationTime-lastAutomaticBypassSample>=2&&
+               displayObservation.sequence==navigation.sequence&&!log->outputDirectory().empty()) {
+                RaceSampleWriter::Job job{log->outputDirectory()/"bypass-stop-evidence",displayObservation,observationTime,
+                    raceConfig,automaticBypassSamples+1,true,navigation,navigationConfig};
+                if(sampleWriter.submit(std::move(job))) {
+                    ++automaticBypassSamples;lastAutomaticBypassSample=observationTime;
+                    std::cout<<"[Sample] Queued bypass-stop-evidence/ai-sample-"<<automaticBypassSamples<<'\n';
+                }
+            }
             const auto controlled=Clock::now();
+            if(captureFork) {
+                RaceSampleWriter::Job job{log->outputDirectory()/"fork-evidence",observation,observationTime,
+                    raceConfig,forkEvidence.nextIndex(),false,{},navigationConfig};
+                job.context={{"race_frame",raceFrame},{"ai_frame",observation.sequence},
+                    {"ai_captured_s",observation.captured},{"control_time_s",observationTime},
+                    {"state",racePlan.state},{"reason",racePlan.reason},{"selected_branch",racePlan.selectedBranch},
+                    {"geometry_split_rows",racePlan.geometrySplitRows},{"geometry_reason",racePlan.geometryReason},
+                    {"road_surface",config.roadSurface},{"speed_command",speed},{"pwm",servo},
+                    {"lane_image_binding","current control frame; camera.png is asynchronous AI frame"}};
+                job.laneImage=std::move(forkCamera);job.laneBinary=bin.clone();
+                if(sampleWriter.submit(std::move(job)))
+                    forkEvidence.queued(racePlan.state,racePlan.reason,observationTime,observation.sequence);
+            }
             if(previousRaceState!=racePlan.state) {
                 std::cout<<"[Race] "<<racePlan.state<<" | "<<racePlan.reason<<'\n';
                 previousRaceState=racePlan.state;
@@ -403,20 +581,27 @@ int main(int argc,char **argv) {
             if(raceLog) raceLog<<raceFrame<<','<<racePlan.state<<','<<racePlan.reason<<','
                 <<observation.sequence<<','<<racePlan.detectionAge<<','<<racePlan.fresh<<','
                 <<racePlan.stop<<','<<racePlan.speedCap<<','<<racePlan.selectedBranch<<','<<speed<<','
-                <<racePlan.geometrySplitRows<<','<<racePlan.colorRejectedComponents<<'\n';
+                <<racePlan.geometrySplitRows<<','<<racePlan.colorRejectedComponents<<','<<racePlan.geometryReason<<'\n';
+            if(bypassLog) bypassLog<<raceFrame<<','<<navigation.sequence<<','<<observationTime-navigation.captured<<','
+                <<bypass.state<<','<<bypass.reason<<','<<bypass.follow<<','<<bypass.authorizeCone<<','<<racePlan.state<<','
+                <<racePlan.stop<<','<<speed<<','<<servo<<','<<bypassPilot.center<<','<<navigation.motionValid<<','
+                <<navigation.motionEpoch<<','<<navigation.motionInliers<<','<<navigation.passed<<','
+                <<(bypass.follow?"GROUND_LOOKAHEAD":"LANE_OR_STOP")<<','<<routeSteering.targetX<<','<<routeSteering.targetZ<<','
+                <<routeSteering.requested<<','<<navigationConfig.bypassWheelbase<<'\n';
             if(detectionLog&&observation.sequence>loggedSequence) {
                 nlohmann::json entries=nlohmann::json::array();
                 for(const auto &d:observation.detections) {
-                    const auto review=reviewRaceDetection(d,observation.image,raceConfig);
+                    const auto review=reviewRaceDetection(d,observation.image,raceConfig,&observation.crosswalk);
                     entries.push_back({{"type",d.type},{"score",d.score},{"x",d.x},{"y",d.y},
                         {"width",d.width},{"height",d.height},{"accepted",review.accepted},
-                        {"checked_stop",review.checkedStop},{"acceptance_reason",review.reason}});
+                        {"checked_stop",review.checkedStop},{"checked_cross",review.checkedCross},{"acceptance_reason",review.reason}});
                 }
                 detectionLog<<nlohmann::json({{"frame",observation.sequence},{"captured",observation.captured},
-                    {"detections",entries},{"direction_checks",raceDirectionJson(observation)}}).dump()<<'\n';
+                    {"detections",entries},{"crosswalk_geometry",raceCrosswalkJson(observation,raceConfig)},
+                    {"direction_checks",raceDirectionJson(observation)}}).dump()<<'\n';
                 loggedSequence=observation.sequence;
             }
-            if(raceFrame%15==0) { raceLog.flush(); detectionLog.flush(); }
+            if(raceFrame%15==0) { raceLog.flush(); detectionLog.flush();navigationLog.flush();bypassLog.flush(); }
             const double controlMs=ms(controlled,stageStarted);
             stage="record_publish"; stageStarted=controlled;
             drawHud(image,pilot,mode,panic,cruise,speed,servo,1/dt,displayAge>=2000,racePlan);
@@ -452,6 +637,7 @@ int main(int argc,char **argv) {
         int render=0;
         int savedAiSamples=0;
         RaceSnapshot shownAi;
+        RaceObstaclePreviewPlan shownNavigation;
         double shownAiTime=0;
         const auto displayInterval=std::chrono::milliseconds(1000/displayFps);
         auto lastRender=Clock::now()-displayInterval;
@@ -471,13 +657,14 @@ int main(int argc,char **argv) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     display.progress(); continue;
                 }
-                auto snapshot=aiPreview.snapshot();
-                shownAi=std::move(snapshot.first);
-                shownAiTime=replay?snapshot.second:raceTime();
+                auto snapshot=aiPreview.view();
+                shownAi=std::move(snapshot.ai);shownNavigation=std::move(snapshot.navigation);
+                shownAiTime=replay?snapshot.time:raceTime();
                 if(legacyWindows) {
                     cv::imshow("track_view",image); cv::imshow("binarized",bin);
                     cv::imshow("AI detections",racePreviewImage(shownAi,shownAiTime,raceConfig));
-                } else cv::imshow("track_view",raceCompactView(image,bin,shownAi,shownAiTime,raceConfig,showBinary));
+                } else cv::imshow("track_view",raceCompactView(image,bin,shownAi,shownAiTime,raceConfig,showBinary,
+                    navigationEnabled?&shownNavigation:nullptr));
                 lastRender=Clock::now(); ++render;
             }
             const auto waitingKey=Clock::now();
@@ -503,15 +690,13 @@ int main(int argc,char **argv) {
             }
             if(key=='v'||key=='V') { showBinary=!showBinary; lastRender=Clock::now()-displayInterval; continue; }
             if(key=='s'||key=='S') {
-                if(!noControl) std::cout<<"[Sample] Use --no-control to save AI images.\n";
-                else {
-                    try {
-                        // 保存当前屏幕对应的 AI 帧；采样不占用巡线线程。
-                        if(saveRaceSample(log->outputDirectory(),shownAi,shownAiTime,raceConfig,++savedAiSamples))
-                            std::cout<<"[Sample] Saved ai-sample-"<<savedAiSamples<<'\n';
-                        else std::cout<<"[Sample] Wait for AI image; diagnostics must be enabled.\n";
-                    } catch(const std::exception &e) { std::cerr<<"[Sample] "<<e.what()<<'\n'; }
-                }
+                const int index=savedAiSamples+1;
+                const double sampleTime=replay?shownAiTime:raceTime();
+                RaceSampleWriter::Job job{log->outputDirectory(),shownAi,sampleTime,raceConfig,index,
+                    navigationEnabled,shownNavigation,navigationConfig};
+                if(sampleWriter.submit(std::move(job))) {
+                    savedAiSamples=index;std::cout<<"[Sample] Queued ai-sample-"<<index<<'\n';
+                } else std::cout<<"[Sample] Wait for matched AI image or available save queue.\n";
                 continue;
             }
             display.post(key);
@@ -519,6 +704,10 @@ int main(int argc,char **argv) {
         stopping=true;
         if(car) { try { car->latchStop(); } catch(...) {} }
         driving.join();
+        if(navigationWorker)navigationWorker->finish();
+        sampleWriter.finish();
+        std::cout<<"[Sample] saved="<<sampleWriter.savedCount()<<" failed="<<sampleWriter.failedCount()
+            <<" dropped="<<sampleWriter.droppedCount()<<'\n';
         trial.finish();
         if(trial.enabled()&&!log->outputDirectory().empty()) {
             std::ofstream(log->outputDirectory()/"trial-stop.json")<<nlohmann::json({

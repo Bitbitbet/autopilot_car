@@ -13,8 +13,8 @@ std::unique_ptr<RacePerception> createRacePerception(const RaceConfig &config) {
     using Create=RacePerception*(*)(const RaceConfig*);
     using Abi=int(*)();
     const auto abi=reinterpret_cast<Abi>(dlsym(handle,"raceBackendAbi"));
-    if(!abi||abi()!=2) throw std::runtime_error("AI backend version mismatch; install trackview_race and librace_npu_backend.so from the same release");
-    auto create=reinterpret_cast<Create>(dlsym(handle,"raceCreatePerceptionV2"));
+    if(!abi||abi()!=3) throw std::runtime_error("AI backend version mismatch; install trackview_race and librace_npu_backend.so from the same release");
+    auto create=reinterpret_cast<Create>(dlsym(handle,"raceCreatePerceptionV3"));
     if(!create) throw std::runtime_error("Vehicle AI backend entry point missing");
     // 回调与析构代码属于动态库，句柄保留到进程退出，不能在线程结束前 dlclose。
     return std::unique_ptr<RacePerception>(create(&config));

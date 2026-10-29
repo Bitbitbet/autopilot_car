@@ -25,12 +25,14 @@ struct RaceConfig {
     std::string modelDirectory="../res/models/yolov3_mobilenet_v1";
     bool verifyStopCandidates=true;
     float stopCandidateConfidence=.35f; // 仅停车牌的候选采集下限，不能用于放行或其他类别。
+    bool verifyCrosswalkGeometry=true;
+    float crossCandidateConfidence=.10f; // 仅斑马线：低分结果须同帧条纹复核；远处可单独提供几何证据。
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(RaceConfig,confidence,maxDetectionAge,confirmGap,
         confirmFrames,limitedSpeed,forkSpeed,approachSpeed,directionMemory,
         forkConfirmTime,forkMinTime,forkMaxTime,forkExitTime,cooldown,minBranchWidth,
         minBranchGap,minBranchRows,triggerRow,obstacleRow,clearTime,stopAfterCross,
         crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,verifyForkArrows,modelDirectory,
-        verifyStopCandidates,stopCandidateConfidence)
+        verifyStopCandidates,stopCandidateConfidence,verifyCrosswalkGeometry,crossCandidateConfidence)
     void validate() const {
         auto range=[](float v,float lo,float hi) { return std::isfinite(v)&&v>=lo&&v<=hi; };
         if(!range(confidence,0.1f,1.f)||!range(maxDetectionAge,0.05f,1.f)||
@@ -45,7 +47,7 @@ struct RaceConfig {
            !range(clearTime,0.2f,3.f)||crossPassedRow<150||crossPassedRow>235||
            !range(crossClearTime,0.1f,2.f)||!range(stopHoldTime,0.1f,10.f)||
            !range(gateOpenAspect,0.1f,1.f)||modelDirectory.empty()||
-           !range(stopCandidateConfidence,.30f,.50f))
+           !range(stopCandidateConfidence,.30f,.50f)||!range(crossCandidateConfidence,.05f,.35f))
             throw std::invalid_argument("Invalid race configuration");
     }
     void load(const std::string &path) {

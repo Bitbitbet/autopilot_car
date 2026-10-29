@@ -7,7 +7,7 @@ int main(int argc,char **argv) {
     try {
         RaceConfig cfg;auto result=createRacePerception(cfg);
         if(reject||result) { std::cerr<<"FAIL unexpected backend acceptance\n";return 1; }
-        std::cout<<"PASS matching V2 backend contract\n";return 0;
+        std::cout<<"PASS matching V3 backend contract\n";return 0;
     }catch(const std::exception &e) {
         if(!reject) { std::cerr<<"FAIL "<<e.what()<<'\n';return 1; }
         std::cout<<"PASS incompatible backend rejected: "<<e.what()<<'\n';return 0;

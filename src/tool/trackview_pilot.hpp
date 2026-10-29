@@ -20,6 +20,7 @@ class AutoPilot {
         float value = 0, pendingValue = 0;
         double time = -1;
         int observations = 0, pendingObservations = 0;
+        bool calibratedReference = false;
     };
     std::array<Width, IMAGE_ROW> widths{};
     TrackviewConfig config;
@@ -62,13 +63,14 @@ public:
         float width;
         double age;
         bool refreshDue;
+        bool calibratedReference;
     };
     std::vector<WidthReading> widthProfile() const {
         std::vector<WidthReading> result;
         for (int row=0; row<int(IMAGE_ROW); ++row) {
             const auto &w=widths[row];
             if(w.observations) result.push_back({row,w.observations,w.pendingObservations,
-                w.value,now-w.time,now-w.time>config.widthLifetime});
+                w.value,now-w.time,now-w.time>config.widthLifetime,w.calibratedReference});
         }
         return result;
     }
@@ -89,6 +91,17 @@ public:
     bool valid = false, ready = false, lost = false, degraded = false;
     WeightMode weightMode = WeightMode::FarFull;
     explicit AutoPilot(const TrackviewConfig &cfg = {}) : config(cfg) { config.validate(); }
+    // 当前车相机标定给出的逐行投影宽度，仅补冷启动空行；直道实测仍可校验/更新。
+    // 不从单边或满屏白色凭空学习宽度，也不改变v6的转向公式。
+    int seedCalibratedWidths(const std::vector<std::pair<int,float>> &profile) {
+        int seeded=0;
+        for(const auto &[row,width]:profile)if(row>=0&&row<int(IMAGE_ROW)&&std::isfinite(width)&&
+            width>=config.minWidth&&width<=config.maxWidth&&widths[row].observations==0) {
+            widths[row].value=width;widths[row].time=now;widths[row].observations=3;
+            widths[row].calibratedReference=true;++seeded;
+        }
+        return seeded;
+    }
     void cycleWeight() { weightMode = WeightMode((int(weightMode)+1)%3); }
     const char *weightName() const {
         if (weightMode == WeightMode::FarFull) return "far-full";
@@ -251,6 +264,7 @@ public:
                     sample.value+=config.widthAlpha*(w-sample.value);
                     sample.time=now;
                     sample.observations=std::min(sample.observations+1,100);
+                    if(sample.observations>=6)sample.calibratedReference=false;
                     sample.pendingObservations=0;
                 } else {
                     // 需要多次一致的双边观测，才允许重新学习宽度。
@@ -264,6 +278,7 @@ public:
                     if(sample.pendingObservations>=3) {
                         sample.value=sample.pendingValue; sample.time=now;
                         sample.observations=1; sample.pendingObservations=0;
+                        sample.calibratedReference=false;
                     }
                 }
             }

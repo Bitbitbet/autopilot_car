@@ -4,6 +4,11 @@ target_compile_definitions(trackview_regression PRIVATE _DEBUG)
 target_link_libraries(trackview_regression PRIVATE track control nlohmann_json)
 add_test(NAME trackview_regression COMMAND trackview_regression)
 
+add_executable(road_surface_check road_surface_check.cpp)
+target_include_directories(road_surface_check PRIVATE ../src/tool ../src/predeal/include)
+target_compile_definitions(road_surface_check PRIVATE _DEBUG)
+target_link_libraries(road_surface_check PRIVATE track control nlohmann_json)
+
 # 使用真实控制代码和成对套接字模拟串口，不连接车辆设备。
 add_executable(serial_regression serial_regression.cpp ../src/control/src/control.cpp)
 target_include_directories(serial_regression BEFORE PRIVATE mock ../src/control/include)
@@ -64,6 +69,31 @@ target_include_directories(stop_candidate_review_regression PRIVATE ../src/tool)
 target_link_libraries(stop_candidate_review_regression PRIVATE tools nlohmann_json)
 add_test(NAME stop_candidate_review_regression COMMAND stop_candidate_review_regression)
 
+add_executable(race_crosswalk_regression race_crosswalk_regression.cpp)
+target_include_directories(race_crosswalk_regression PRIVATE ../src/tool)
+target_link_libraries(race_crosswalk_regression PRIVATE track tools nlohmann_json pthread)
+add_test(NAME race_crosswalk_regression COMMAND race_crosswalk_regression)
+
+add_executable(race_obstacle_regression race_obstacle_regression.cpp)
+target_include_directories(race_obstacle_regression PRIVATE ../src/tool)
+target_link_libraries(race_obstacle_regression PRIVATE track tools nlohmann_json pthread)
+add_test(NAME race_obstacle_regression COMMAND race_obstacle_regression)
+
+add_executable(race_async_navigation_regression race_async_navigation_regression.cpp)
+target_include_directories(race_async_navigation_regression PRIVATE ../src/tool)
+target_link_libraries(race_async_navigation_regression PRIVATE track tools nlohmann_json pthread)
+add_test(NAME race_async_navigation_regression COMMAND race_async_navigation_regression)
+
+add_executable(race_bypass_regression race_bypass_regression.cpp)
+target_include_directories(race_bypass_regression PRIVATE ../src/tool)
+target_link_libraries(race_bypass_regression PRIVATE track tools control nlohmann_json pthread)
+add_test(NAME race_bypass_regression COMMAND race_bypass_regression)
+
+# 仅现场固定图片诊断，不注册为无硬件自动测试。
+add_executable(race_saved_backend_check race_saved_backend_check.cpp ../src/tool/race_backend_loader.cpp)
+target_include_directories(race_saved_backend_check PRIVATE ../src/tool)
+target_link_libraries(race_saved_backend_check PRIVATE tools nlohmann_json pthread dl)
+
 add_executable(race_stop_regression race_stop_regression.cpp)
 target_include_directories(race_stop_regression PRIVATE ../src/tool)
 target_link_libraries(race_stop_regression PRIVATE track tools nlohmann_json pthread)
@@ -74,6 +104,6 @@ target_link_libraries(race_backend_contract_regression PRIVATE tools nlohmann_js
 add_library(race_mock_backend_legacy SHARED race_mock_backend.cpp)
 target_compile_definitions(race_mock_backend_legacy PRIVATE LEGACY_ONLY=1)
 add_library(race_mock_backend_wrong SHARED race_mock_backend.cpp)
-target_compile_definitions(race_mock_backend_wrong PRIVATE PROBE_ABI=1)
+target_compile_definitions(race_mock_backend_wrong PRIVATE PROBE_ABI=2)
 add_library(race_mock_backend_good SHARED race_mock_backend.cpp)
-target_compile_definitions(race_mock_backend_good PRIVATE PROBE_ABI=2)
+target_compile_definitions(race_mock_backend_good PRIVATE PROBE_ABI=3)

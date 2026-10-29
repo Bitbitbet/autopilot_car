@@ -85,6 +85,27 @@ int main(int argc,char **argv) {
         interrupted.step({},true,false,.5f);
         check(interrupted.repeat({}).stop,"AI loss during branch latches review stop");
 
+        Fixture expired;
+        expired.repeat({box(LABEL_YLEFT)});
+        for(int i=0;i<65;++i)p=expired.step({});
+        check(p.stop&&std::string(p.reason)=="DIRECTION_MEMORY_EXPIRED"&&!p.selectedBranch,
+              "unresolved direction silently resumed ordinary lane following");
+        expired.step({},false);p=expired.repeat({},4);
+        check(p.stop&&std::string(p.reason)=="DIRECTION_MEMORY_EXPIRED","manual toggle cleared unresolved direction fault");
+
+        Fixture renewed;
+        renewed.repeat({box(LABEL_YLEFT)});
+        for(int i=0;i<65;++i)p=renewed.step({box(LABEL_YLEFT)});
+        check(!p.stop&&std::string(p.state)=="FORK_ARMED","fresh same-direction evidence did not renew memory");
+        renewed.image=road(true);p=renewed.repeat({box(LABEL_YLEFT)},4);
+        check(p.selectedBranch&&std::string(p.state)=="FORK_LEFT","renewed direction cannot select a later real split");
+
+        Fixture neverSplit;
+        neverSplit.repeat({box(LABEL_YRIGHT)});
+        for(int i=0;i<125;++i)p=neverSplit.step({box(LABEL_YRIGHT)});
+        check(p.stop&&std::string(p.reason)=="FORK_NOT_CONFIRMED_TIMEOUT",
+              "continuous direction sign permits indefinite unconfirmed forward approach");
+
         Fixture gate;
         p=gate.repeat({box(LABEL_GATE,130,90,20)});
         check(p.stop&&std::string(p.state)=="GATE_WAIT","horizontal gate stops");

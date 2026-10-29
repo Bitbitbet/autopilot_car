@@ -1,4 +1,5 @@
 #include "predeal.hpp"
+#include "road_binary.hpp"
 #include "tools.hpp"
 #include <iostream>
 #include <stdexcept>
@@ -59,17 +60,7 @@ void Predeal::initialize() {
  * @return cv::Mat 二值化图像
  */
 Mat Predeal::binarize(const Mat &img) {
-    Mat imgGray, imgBin;
-    cvtColor(img, imgGray, cv::COLOR_BGR2GRAY); // RGB转灰度图
-
-    if (use_otsu)
-        threshold(imgGray, imgBin, 0, 255,
-                  cv::THRESH_OTSU); //  采用大津法二值化
-    else
-        threshold(imgGray, imgBin, threshold_value, 255,
-                  cv::THRESH_BINARY); // 固定阈值方法
-
-    return imgBin;
+    return roadBinary(img, use_otsu ? -1 : threshold_value, blackRoad);
 }
 
 /**

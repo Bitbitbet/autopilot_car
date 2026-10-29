@@ -1,0 +1,10 @@
+{
+  "obstacleMode": "preview",
+  "previewVehicleWidthFraction": 0.4,
+  "previewClearanceFraction": 0.03,
+  "maxLateralSlope": 0.8,
+  "rowStep": 2,
+  "minRows": 35,
+  "minLookaheadRow": 35,
+  "startTolerance": 8
+}

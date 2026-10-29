@@ -24,6 +24,7 @@ struct TrackviewConfig {
     int minWidth = 30, maxWidth = 300, rowCutUp = 10, rowCutBottom = 20;
     int commandTimeoutMs = 250, binary = -1;
     bool diagnostics = true;
+    std::string roadSurface = "white";
     std::string logDirectory = "trackview_logs";
 
     void validate() const {
@@ -53,7 +54,7 @@ struct TrackviewConfig {
             maxWidth <= minWidth || maxWidth >= 320 || rowCutUp < 0 || rowCutUp > 60 ||
             rowCutBottom < 0 || rowCutBottom > 60 || commandTimeoutMs < 100 ||
             commandTimeoutMs > 1000 || binary < -1 || binary > 255 ||
-            logDirectory.empty())
+            (roadSurface != "white" && roadSurface != "black") || logDirectory.empty())
             throw std::invalid_argument("Invalid trackview configuration values");
     }
     void load(const std::string &path, bool required = false) {
@@ -85,6 +86,7 @@ struct TrackviewConfig {
         TV_READ(minPoints); TV_READ(minSpan); TV_READ(minWidth); TV_READ(maxWidth);
         TV_READ(rowCutUp); TV_READ(rowCutBottom); TV_READ(commandTimeoutMs);
         TV_READ(binary); TV_READ(diagnostics); TV_READ(logDirectory);
+        TV_READ(roadSurface);
 #undef TV_READ
         validate();
     }
@@ -105,7 +107,7 @@ struct TrackviewConfig {
             {"minPoints", minPoints}, {"minSpan", minSpan}, {"minWidth", minWidth},
             {"maxWidth", maxWidth}, {"rowCutUp", rowCutUp},
             {"rowCutBottom", rowCutBottom}, {"commandTimeoutMs", commandTimeoutMs},
-            {"binary", binary}, {"diagnostics", diagnostics},
+            {"binary", binary}, {"diagnostics", diagnostics}, {"roadSurface", roadSurface},
             {"logDirectory", logDirectory}};
     }
 };

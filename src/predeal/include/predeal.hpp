@@ -12,6 +12,7 @@ class Predeal {
     void cutImage(cv::Mat &img);
     uint8_t threshold_value = 127;
     bool use_otsu;
+    bool blackRoad = false;
 
   private:
     cv::Mat cameraMatrix; // 摄像机内参矩阵
