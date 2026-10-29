@@ -1,28 +1,25 @@
 #include "camera.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
+#include "pilot.hpp"
 #include "race_manager.hpp"
+#include "race_display.hpp"
 #include "race_perception.hpp"
+#include "terminal_keys.hpp"
 #include "track.hpp"
-#include "trackview_pilot.hpp"
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <opencv2/opencv.hpp>
 
 using Clock = std::chrono::steady_clock;
 using cv::Mat;
-using cv::Point;
 using std::cerr;
 using std::cout;
-using std::greater;
-using std::map;
-using std::pair;
 
 namespace {
 std::atomic_bool stopping{false};
@@ -38,7 +35,7 @@ static void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
                     float cruise, float speed, uint16_t servo,
                     const RacePlan &race) {
     for (const auto &p : pilot.centerEdge)
-        cv::circle(image, cv::Point(p.y, p.x), 2, cv::Scalar(0, 0, 255), -1);
+        cv::circle(image, cv::Point(p.x, p.y), 2, cv::Scalar(0, 0, 255), -1);
     int y = 22;
     auto line = [&](const std::string &s) {
         cv::putText(image, s, {8, y}, cv::FONT_HERSHEY_PLAIN, 1.2,
@@ -100,13 +97,22 @@ int main(int argc, char **argv) {
 
     Mode mode = Mode::Manual;
     bool panic = false;
-    float cruise = cfg::kCruiseSpeed, jsSpeed = 0, speed = 0;
+    float cruise = cfg::CRUISE_SPEED, jsSpeed = 0, speed = 0;
     uint16_t jsServo = PWMSERVOMID;
-    map<int, pair<int, int>, greater<int>> rows;
+    TrackRows rows;
     double last = nowSeconds();
     string lastState;
     cout << "[Start] " << (headless ? "HEADLESS " : "") << camera.cols() << "x"
-         << camera.rows() << " | 默认 MANUAL，按 a 启动。\n";
+         << camera.rows()
+         << " | 默认 MANUAL，按 a 启动（终端或图像窗口都行，q 退出）\n";
+
+    TerminalKeys terminal; // 终端也能按键：headless 下同样可以操作
+
+    // 窗口单独一个线程：控制回路只丢图，不等 X11
+    RaceDisplay display;
+    std::thread displayThread;
+    if (!headless)
+        displayThread = std::thread([&] { display.run(); });
 
     while (!stopping) {
         Mat image;
@@ -120,8 +126,6 @@ int main(int argc, char **argv) {
         const double t = nowSeconds();
         float dt = float(t - last);
         last = t;
-        if (dt <= 0 || dt > cfg::kMaxFrameGap)
-            dt = cfg::kReferenceDt;
 
         perception->submit(image, uint64_t(t * 1000), t);
         const DetectionSnapshot observation = perception->snapshot();
@@ -134,7 +138,7 @@ int main(int argc, char **argv) {
                 jsSpeed = 0;
                 pilot.resetControl();
                 cout << "[Mode] MANUAL\n";
-            } else if (pilot.ready && raceManager.aiReady(observation, t) &&
+            } else if (pilot.valid && raceManager.aiReady(observation, t) &&
                        !joyLost && (!js || !js->isStopped()) &&
                        std::fabs(jsSpeed) <= 0.05f) {
                 mode = Mode::Auto;
@@ -144,16 +148,18 @@ int main(int argc, char **argv) {
                 cout << "[Mode] AUTO\n";
             } else if (!raceManager.aiReady(observation, t)) {
                 cout << "[Wait] 还没有可用的检测结果\n";
-            } else if (!pilot.ready) {
+            } else if (!pilot.valid) {
                 cout << "[Wait] 路径未稳定: " << pilot.pathIssue << '\n';
             } else {
                 cout << "[Wait] 先松开油门或重新连接手柄\n";
             }
         };
 
-        int key = -1;
-        if (!headless)
-            key = cv::waitKey(1);
+        int key = terminal.poll();
+        if (key < 0)
+            key = display.takeKey(); // 窗口线程收上来的键
+        if (key == 27 || key == 'q' || key == 'Q')
+            break;
         if (key == 'a' || key == 'A') {
             toggle();
         } else if (key == ' ') {
@@ -163,10 +169,10 @@ int main(int argc, char **argv) {
             pilot.resetControl();
             cout << "[Stop] 键盘停车\n";
         } else if (key == '+' || key == '=') {
-            cruise = std::min(cfg::kMaxSpeed, cruise + 0.05f);
+            cruise = std::min(cfg::MAX_SPEED, cruise + 0.05f);
             cout << "[Set] limit=" << cruise << " m/s\n";
         } else if (key == '-' || key == '_') {
-            cruise = std::max(cfg::kMinSpeed, cruise - 0.05f);
+            cruise = std::max(cfg::MIN_SPEED, cruise - 0.05f);
             cout << "[Set] limit=" << cruise << " m/s\n";
         } else if (key == '[' || key == ']') {
             pilot.setCurveSpeed(pilot.curveSpeed() +
@@ -208,13 +214,15 @@ int main(int argc, char **argv) {
             }
         }
 
-        pilot.update(race.selectedBranch ? race.path.rows : rows, dt, speed);
+        pilot.update(race.selectedBranch ? race.path.rows : rows, camera, dt,
+                     speed);
         if (mode == Mode::Auto && pilot.lost) {
             mode = Mode::Manual;
             panic = true;
             jsSpeed = 0;
             pilot.resetControl();
-            cout << "[Stop] 丢线: " << pilot.pathIssue << "；恢复后按 a\n";
+            cout << "[Stop] 丢线: " << pilot.pathIssue << " (dt=" << dt
+                 << " s)；恢复后按 a\n";
         }
 
         speed = 0;
@@ -228,7 +236,7 @@ int main(int argc, char **argv) {
                     servo = pilot.servo;
                 }
             } else {
-                speed = std::clamp(jsSpeed, -cfg::kMaxSpeed, cfg::kMaxSpeed);
+                speed = std::clamp(jsSpeed, -cfg::MAX_SPEED, cfg::MAX_SPEED);
                 servo = jsServo;
             }
         }
@@ -250,9 +258,7 @@ int main(int argc, char **argv) {
         if (!headless) {
             track_draw_result(rows, image);
             drawHud(image, pilot, mode, panic, cruise, speed, servo, race);
-            cv::imshow("track_view", image);
-            if (key == 27 || key == 'q' || key == 'Q')
-                break;
+            display.publish(image);
         }
     }
 
@@ -262,8 +268,9 @@ int main(int argc, char **argv) {
         } catch (...) {
         }
     }
-    if (!headless)
-        cv::destroyAllWindows();
+    display.stop = true;
+    if (displayThread.joinable())
+        displayThread.join();
     cout << "[Stop] 程序退出\n";
     return 0;
 }

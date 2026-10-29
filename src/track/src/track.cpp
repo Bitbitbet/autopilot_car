@@ -54,26 +54,6 @@ void find_connected_blocks(const Blocks &blocks, int last_left, int last_right,
     }
 }
 
-/**
- * @brief 多个色块时，取中心与上一行最近的那个
- */
-pair<int, int> selectClosestBlock(const Blocks &connected_blocks, int last_left,
-                                  int last_right) {
-    const int prevCenter = last_left + last_right;
-    size_t bestIdx = 0;
-    int bestDist = std::abs(connected_blocks[0].first +
-                            connected_blocks[0].second - prevCenter);
-    for (size_t i = 1; i < connected_blocks.size(); ++i) {
-        const int dist = std::abs(connected_blocks[i].first +
-                                  connected_blocks[i].second - prevCenter);
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestIdx = i;
-        }
-    }
-    return connected_blocks[bestIdx];
-}
-
 } // namespace
 
 void track_identify_from_bin(const Mat &bin_img, Camera &camera,
@@ -83,7 +63,7 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
     // 行中心处的纵向距离：同一行上各列的距离差可以忽略
     const auto distanceAt = [&](int row) {
         return float(
-            camera.image_to_ground({double(row), bin_img.cols / 2.0}).y);
+            camera.image_to_ground({bin_img.cols / 2.0, double(row)}).y);
     };
     // 同一行上左右边界的实际横向间距，就是色块在路面上的宽度
     const auto widthAt = [&](int row, int left, int right) {
@@ -119,13 +99,12 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
         }
 
         if (isSearchingFirstRow) {
-            const auto widest = std::max_element(
-                blocks.begin(), blocks.end(), [](const auto &a, const auto &b) {
-                    return (a.second - a.first) < (b.second - b.first);
-                });
-            if (widthAt(r, widest->first, widest->second) < TRACK_MIN_WIDTH)
-                continue; // 还不够宽，继续往上找起始行
-            appendEdge(r, widest->first, widest->second);
+            // 白色标记会把路面切成几块，取并集；还不够宽就继续往上找起始行
+            const int left = blocks.front().first;
+            const int right = blocks.back().second;
+            if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
+                continue;
+            appendEdge(r, left, right);
             isSearchingFirstRow = false;
             lastDistance = distance;
             continue;
@@ -139,21 +118,11 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
         if (connected_blocks.empty())
             break; // 没有联通色块，图像搜索完成
 
-        if (connected_blocks.size() == 1) {
-            // 只存在单个色块，正常情况，提取边缘信息
-            const auto [left, right] = connected_blocks.front();
-            if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
-                break; // 路面已经收窄到不可信，结束搜索
-            appendEdge(r, left, right);
-            lastDistance = distance;
-            continue;
-        }
-
-        // 存在多个色块，则需要择优处理：选取与上一行最近的色块
-        const auto [left, right] =
-            selectClosestBlock(connected_blocks, last_left, last_right);
+        // 白色标记会把路面切成几块：取并集，别把标记边缘当路面边缘
+        const int left = connected_blocks.front().first;
+        const int right = connected_blocks.back().second;
         if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
-            continue;
+            break; // 路面已经收窄到不可信，结束搜索
         appendEdge(r, left, right);
         lastDistance = distance;
     }
@@ -166,35 +135,4 @@ void track_draw_result(const map<int, pair<int, int>, greater<int>> &rows,
         circle(result, Point(left, row), 2, Scalar(0, 255, 0), -1);    // 绿色点
         circle(result, Point(right, row), 2, Scalar(0, 255, 255), -1); // 黄色点
     }
-}
-
-/**
- * Hint: DEAD CODE
- * @brief 边缘斜率方差计算
- *
- * @param v_edge 边缘点集（x=行, y=列）
- * @return double 点太少时返回 1000 表示未知
- */
-double stdevEdgeCal(const vector<Point2i> &v_edge) {
-    const size_t n = v_edge.size();
-    if (n < 10) {
-        return 1000;
-    }
-    double mean = 0.0, m2 = 0.0;
-    const auto STEP = std::max<size_t>(v_edge.size() / 5, 1);
-    size_t k = 0;
-    for (size_t i = STEP; i < n; i += STEP) {
-        const int dx = v_edge[i].x - v_edge[i - STEP].x;
-        if (dx == 0)
-            continue;
-        const double s =
-            static_cast<double>(v_edge[i].y - v_edge[i - STEP].y) * 100.0 / dx;
-        ++k;
-        const double delta = s - mean;
-        mean += delta / k;
-        m2 += delta * (s - mean);
-    }
-    if (k < 2)
-        return 0.0;
-    return std::sqrt(m2 / (k - 1));
 }
