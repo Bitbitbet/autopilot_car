@@ -1,7 +1,7 @@
 #pragma once
-// 巡线转向与速度规划（640x480 原生像素口径），track_view 与 racing 共用。
+
+#include "control.hpp"
 #include "tools.hpp"
-#include "track.hpp"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -15,14 +15,13 @@ using std::pair;
 using std::string;
 using std::vector;
 
-
 // 像素量是 640x480 口径；识别门限是地面坐标（米）。
 namespace cfg {
 // 速度 (m/s)
-constexpr float kCruiseSpeed = 0.25f; // 默认巡航
-constexpr float kMaxSpeed = 1.50f;    // 上限
+constexpr float kCruiseSpeed = 1.0f; // 默认巡航
+constexpr float kMaxSpeed = 1.50f;   // 上限
 constexpr float kMinSpeed = 0.05f;
-constexpr float kCurveSpeed = 0.15f;    // 弯道限速
+constexpr float kCurveSpeed = 0.8f;     // 弯道限速
 constexpr float kDegradedSpeed = 0.12f; // 单边/低置信度限速
 constexpr float kAcceleration = 0.30f;
 constexpr float kDeceleration = 0.60f;

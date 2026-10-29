@@ -83,8 +83,10 @@ int main(int argc, char **argv) {
 
     // 台架上没有串口时只跑图像和决策，不驱动车轮。
     auto car = CarControl::create();
-    if (!car)
-        cout << "[Warn] 没有串口控制，本次不驱动车轮。\n";
+    if (!car) {
+        cerr << "[Fatel] 打开串口失败" << endl;
+        return 3;
+    }
 
     std::atomic_bool joyLost{false};
     auto js = JoyStick::create([&joyLost] { joyLost = true; });
@@ -100,7 +102,7 @@ int main(int argc, char **argv) {
     uint16_t jsServo = PWMSERVOMID;
     map<int, pair<int, int>, greater<int>> rows;
     double last = nowSeconds();
-    std::string lastState;
+    string lastState;
     cout << "[Start] " << (headless ? "HEADLESS " : "") << camera.cols() << "x"
          << camera.rows() << " | 默认 MANUAL，按 a 启动。\n";
 
@@ -228,17 +230,16 @@ int main(int argc, char **argv) {
                 servo = jsServo;
             }
         }
-        if (car) {
-            // 串口写失败是致命故障，直接停住并发后退出。
-            try {
-                car->carControl(speed, servo);
-                if (race.buzzer && !panic && mode == Mode::Auto)
-                    car->buzzerSound(Buzzer::ding);
-            } catch (const std::exception &e) {
-                cerr << "[Error] 串口: " << e.what() << '\n';
-                break;
-            }
+        // 串口写失败是致命故障，直接停住并发后退出。
+        try {
+            car->carControl(speed, servo);
+            if (race.buzzer && !panic && mode == Mode::Auto)
+                car->buzzerSound(Buzzer::ding);
+        } catch (const std::exception &e) {
+            cerr << "[Error] 串口: " << e.what() << '\n';
+            break;
         }
+
         if (lastState != race.state) {
             cout << "[Race] " << race.state << " | " << race.reason << '\n';
             lastState = race.state;
