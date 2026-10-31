@@ -7,6 +7,34 @@ struct RaceParkingMouthCandidate {
     cv::Point2f nearImage,farImage,nearGround,farGround;
     float support=0;
 };
+// Rejected bays remain rejected in the current camera ground frame. Applied
+// command integration only prevents retry loops; it is not measured odometry.
+class RaceParkingBaySearch {
+    std::vector<RaceParkingMouthCandidate> rejected;
+public:
+    void reset(){rejected.clear();}
+    bool hasRejected()const{return !rejected.empty();}
+    void advance(float distance,float yaw) {
+        if(!std::isfinite(distance)||!std::isfinite(yaw))return;
+        const cv::Point2f translation{-std::sin(yaw*.5f)*distance,std::cos(yaw*.5f)*distance};
+        auto transform=[&](cv::Point2f q){q-=translation;return cv::Point2f{
+            std::cos(yaw)*q.x+std::sin(yaw)*q.y,-std::sin(yaw)*q.x+std::cos(yaw)*q.y};};
+        for(auto &m:rejected){m.nearGround=transform(m.nearGround);m.farGround=transform(m.farGround);}
+        rejected.erase(std::remove_if(rejected.begin(),rejected.end(),[](const auto &m){return m.farGround.y<-.1f;}),rejected.end());
+    }
+    bool accepts(const RaceParkingMouthCandidate &m)const {
+        for(const auto &old:rejected)if(cv::norm(m.nearGround-old.nearGround)<.12f&&
+            cv::norm(m.farGround-old.farGround)<.12f)return false;
+        return true;
+    }
+    void reject(cv::Point2f near,cv::Point2f far) {
+        RaceParkingMouthCandidate m{};m.nearGround=near;m.farGround=far;
+        if(accepts(m))rejected.push_back(m);
+    }
+    void filter(std::vector<RaceParkingMouthCandidate> &mouths)const {
+        mouths.erase(std::remove_if(mouths.begin(),mouths.end(),[&](const auto &m){return !accepts(m);}),mouths.end());
+    }
+};
 // Geometric paint detector, not an AI class or an occupancy detector. Only uses
 // the live corrected image and this car's ground map. Never reuses old clicks.
 inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouths(const cv::Mat &image,const RaceGroundMap &map,

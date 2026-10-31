@@ -17,6 +17,12 @@ add_executable(race_merge_regression race_merge_regression.cpp)
 target_include_directories(race_merge_regression PRIVATE ../src/tool ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(race_merge_regression PRIVATE ${OpenCV_LIBRARIES})
 add_test(NAME race_merge_regression COMMAND race_merge_regression)
+add_executable(race_virtual_boundary_regression race_virtual_boundary_regression.cpp)
+target_include_directories(race_virtual_boundary_regression PRIVATE ../src/tool)
+target_link_libraries(race_virtual_boundary_regression PRIVATE race_compat_track race_compat_control nlohmann_json pthread)
+add_executable(race_mission_regression race_mission_regression.cpp)
+target_include_directories(race_mission_regression PRIVATE ../src/tool)
+target_link_libraries(race_mission_regression PRIVATE race_compat_track race_compat_control nlohmann_json pthread)
 
 # 使用真实控制代码和成对套接字模拟串口，不连接车辆设备。
 add_executable(serial_regression serial_regression.cpp ../src/race_compat/control/src/control.cpp)

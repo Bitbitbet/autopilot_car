@@ -23,6 +23,8 @@ struct RaceObstaclePreviewPlan {
     std::vector<int> leftBoundarySeen,rightBoundarySeen;
     // 标定后的绕行实验与像素预览严格分开。真正发出的指令见 bypass-control.csv。
     bool metric=false,motionValid=false,passed=false;
+    bool virtualBoundary=false,virtualVisualReturn=false;
+    bool virtualLineCrossing=false,virtualWidthUncertain=false;
     int motionEpoch=0,motionInliers=0;
     int motionFeatures=0,motionMatches=0,motionMisses=0;
     float motionReferenceAge=0;
@@ -59,8 +61,12 @@ inline nlohmann::json raceObstacleJson(const RaceObstaclePreviewPlan &p,const Ra
     for(const auto &r:p.obstacles)obstacles.push_back({r.x,r.y,r.width,r.height});
     return {{"frame",p.sequence},{"captured",p.captured},{"state",p.state},{"reason",p.reason},
         {"fresh",p.fresh},{"has_target",p.hasTarget},{"candidate",p.candidate},{"would_stop",p.stop},
-        {"direction",p.direction},{"confirmed_targets",p.confirmedTargets},{"preview_only",!p.metric},
+        {"direction",p.direction},{"confirmed_targets",p.confirmedTargets},{"preview_only",!p.metric&&!p.virtualBoundary},
+        {"control_capable_algorithm",p.metric||p.virtualBoundary},
         {"units",p.metric?"ground_meters_with_image_overlay":"image_pixels"},
+        {"algorithm",p.virtualBoundary?"virtual_boundary_v6":p.metric?"metric_ground_route":"pixel_shadow"},
+        {"virtual_visual_return",p.virtualVisualReturn},{"virtual_exit_is_rear_clearance_proof",false},
+          {"virtual_line_crossing_allowed",p.virtualLineCrossing},{"virtual_width_uncertain",p.virtualWidthUncertain},
         {"physical_clearance_verified",false},{"drives_vehicle",false},{"metric_route",p.metric},
         {"motion_valid",p.motionValid},{"motion_epoch",p.motionEpoch},{"motion_inliers",p.motionInliers},
         {"motion_features",p.motionFeatures},{"motion_matches",p.motionMatches},{"motion_misses",p.motionMisses},{"motion_reference_age_s",p.motionReferenceAge},
@@ -87,8 +93,8 @@ inline nlohmann::json raceObstacleJson(const RaceObstaclePreviewPlan &p,const Ra
         {"visible_near_row",p.visibleNearRow},{"visible_far_row",p.visibleFarRow},
         {"visible_left",points(p.visibleLeft)},{"visible_right",points(p.visibleRight)},
         {"left_boundary_seen",p.leftBoundarySeen},{"right_boundary_seen",p.rightBoundarySeen},
-        {"assumed_vehicle_width_fraction",cfg.previewVehicleWidthFraction},
-        {"assumed_clearance_fraction",cfg.previewClearanceFraction},
+        {"assumed_vehicle_width_fraction",p.virtualBoundary?.18/.45:cfg.previewVehicleWidthFraction},
+        {"assumed_clearance_fraction",p.virtualBoundary?.005/.45:cfg.previewClearanceFraction},
         {"obstacles",obstacles},{"center",points(p.centers)},{"left",points(p.left)},{"right",points(p.right)}};
 }
 
@@ -100,5 +106,5 @@ inline void drawRaceObstaclePreview(cv::Mat &image,const RaceObstaclePreviewPlan
         cv::line(image,{int(std::lround(p.centers[i-1].y)),p.centers[i-1].x},{int(std::lround(p.centers[i].y)),p.centers[i].x},color,2);
     for(const auto *edge:{&p.left,&p.right})for(size_t i=1;i<edge->size();++i)
         cv::line(image,{int(std::lround((*edge)[i-1].y)),(*edge)[i-1].x},{int(std::lround((*edge)[i].y)),(*edge)[i].x},color,1);
-    cv::putText(image,p.metric?"CALIBRATED BYPASS TRIAL":p.visibilityLimited?"VISIBLE ONLY / PIXELS":"PATH PREVIEW / PIXELS",{4,232},cv::FONT_HERSHEY_PLAIN,.8,color,1);
+    cv::putText(image,p.virtualBoundary?"VIRTUAL BOUNDARY TRIAL":p.metric?"CALIBRATED BYPASS TRIAL":p.visibilityLimited?"VISIBLE ONLY / PIXELS":"PATH PREVIEW / PIXELS",{4,232},cv::FONT_HERSHEY_PLAIN,.8,color,1);
 }

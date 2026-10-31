@@ -301,6 +301,13 @@ public:
                    s>=e ? "CURVE_STEERING" : "CURVE_ERROR";
         previousError = error; hadPath = true;
     }
+    float speedForDirection(float cruise,float dt,float previous) {
+        if(!std::isfinite(dt)||dt<=0||dt>config.maxFrameGap||
+           !std::isfinite(cruise)||!std::isfinite(previous))return 0;
+        const float limit=std::clamp(cruise,0.f,config.maxSpeed);
+        speedTarget=limit;speedReason="CONFIRMED_SIGN_SEEK";
+        return commandedSpeed=std::min(limit,std::max(0.f,previous)+config.acceleration*dt);
+    }
     float speedFor(float cruise, float dt) {
         if (!std::isfinite(cruise) || !std::isfinite(dt) || dt <= 0 ||
             dt > config.maxFrameGap || !valid || !ready || lost) {
@@ -323,3 +330,22 @@ public:
         return commandedSpeed;
     }
 };
+
+// Direction commitment is separate from geometric branch selection. A left
+// sign must not allow ordinary lane PD to steer right while seeking that road.
+template<class Plan> inline bool raceDirectionSeeking(const Plan &p) {
+    return !p.stop&&p.fresh&&!p.selectedBranch&&p.guideDirection!=0&&p.guidePwm>0;
+}
+// Confirmed sign seeking has its own bounded lifetime in RaceManager. The road
+// being sought may be outside the camera, so ordinary lane readiness is not a
+// prerequisite during this phase. Retain frame timing and task speed limits.
+template<class Plan> inline float raceDirectionSpeed(const Plan &p,AutoPilot &pilot,float cruise,float dt,float previous) {
+    if(!raceDirectionSeeking(p))return 0;
+    return pilot.speedForDirection(std::min(cruise,p.speedCap),dt,previous);
+}
+template<class Plan> inline uint16_t raceDirectionServo(const Plan &p,uint16_t laneServo) {
+    if(p.stop||!p.fresh||!p.guideDirection)return laneServo;
+    const float directed=p.guideDirection*(float(laneServo)-PWMSERVOMID);
+    return uint16_t(std::clamp(PWMSERVOMID+p.guideDirection*std::max(directed,p.guidePwm),
+        float(PWMSERVOMIN),float(PWMSERVOMAX)));
+}

@@ -8,6 +8,184 @@
 static void require(bool value,const char *why){if(!value)throw std::runtime_error(why);}
 int main(int argc,char **argv) {
     try {
+        if(argc==1) {
+            RaceParkingBaySearch search;
+            RaceParkingMouthCandidate failed{},next{};failed.nearGround={-.22f,.30f};failed.farGround={-.22f,.80f};
+            next.nearGround={-.22f,.80f};next.farGround={-.22f,1.30f};
+            search.reject(failed.nearGround,failed.farGround);
+            for(int i=0;i<100;++i)search.advance(0,0);
+            require(!search.accepts(failed),"Stationary waiting retries same failed bay");
+            std::vector<RaceParkingMouthCandidate> candidates{failed,next};search.filter(candidates);
+            require(candidates.size()==1&&search.accepts(next),"Failed bay also excludes adjacent available bay");
+            // At 0.5m/s, a 0.1s frame changes ground coordinates by 5cm.
+            for(int i=0;i<5;++i){search.advance(.05f,0);failed.nearGround.y-=.05f;failed.farGround.y-=.05f;}
+            require(!search.accepts(failed),"Forward travel allows retry of same failed bay");
+            search.reject({-.22f,.55f},{-.22f,1.05f});
+            search.advance(.10f,.1f);
+            search.reset();require(search.accepts(failed)&&!search.hasRejected(),"Explicit reset retains old bay rejection");
+            std::cout<<"PASS failed-bay exclusion, adjacent-bay selection, stationary retention and 0.5m/s command-travel tracking\n";
+        }
+        if(argc==3&&std::string(argv[1])=="--exit-release-field") {
+            const auto folder=std::filesystem::path(argv[2]);nlohmann::json saved;
+            std::ifstream(folder/"parking-route.json")>>saved;
+            RaceParkingRoute route;route.valid=true;route.entryCurvaturePreview=saved.at("entry_curvature_preview_m");
+            for(auto p:saved.at("entry"))route.entry.push_back({p[0].get<float>(),p[1].get<float>(),p[2].get<float>()});
+            route.exit=route.entry;std::reverse(route.exit.begin(),route.exit.end());
+            RaceParkingSpace space;space.keepRearWithinStart(route.entry.front());RaceParkingControl control(space);
+            std::ifstream input(folder/"parking-control.jsonl");std::string line;double previous=0;bool armed=false,done=false;
+            while(std::getline(input,line)) {
+                auto row=nlohmann::json::parse(line);if(!row.at("armed").get<bool>())continue;
+                auto p=row.at("pose");bool estimated=row.value("pose_estimated",false);
+                RaceParkingObservation o{{p[0].get<float>(),p[1].get<float>(),p[2].get<float>()},row.at("captured").get<double>(),
+                    row.at("frame").get<uint64_t>(),row.at("motion_epoch").get<int>(),row.at("motion_valid").get<bool>()||estimated,estimated};
+                double now=row.at("time");
+                if(!armed){require(control.arm(route,o,now,true),"Cannot arm long-exit replay");armed=true;previous=now;continue;}
+                auto c=control.update(o,now,float(now-previous),true);previous=now;
+                require(!control.failed(),c.reason);
+                if(control.done()) {
+                    for(auto q:space.body(o.pose))require(std::abs(q.x)<=space.dimensions().aisle/2,"Exit released before full body cleared bay");
+                    require(std::abs(raceParkingAngle(o.pose.yaw-route.entry.front().yaw))<.15f,"Exit released without alignment");
+                    require(o.pose.z>route.entry.front().z+.20f&&row.at("frame").get<int>()<678,"Exit still reverses all the way to initial start");
+                    std::cout<<"PASS actual exit release frame="<<row.at("frame")<<" pose_z="<<o.pose.z<<" old_start_z="<<route.entry.front().z
+                             <<"; full body clear and aligned; logged pose estimate="<<estimated<<'\n';done=true;break;
+                }
+            }
+            require(done,"Long reverse field replay never released");return 0;
+        }
+        if(argc==3&&std::string(argv[1])=="--terminal-field") {
+            const auto folder=std::filesystem::path(argv[2]);nlohmann::json saved;
+            std::ifstream(folder/"parking-route.json")>>saved;
+            RaceParkingRoute route;route.valid=true;route.entryCurvaturePreview=saved.at("entry_curvature_preview_m");
+            for(auto p:saved.at("entry"))route.entry.push_back({p[0].get<float>(),p[1].get<float>(),p[2].get<float>()});
+            route.exit=route.entry;std::reverse(route.exit.begin(),route.exit.end());
+            RaceParkingSpace space;space.keepRearWithinStart(route.entry.front());RaceParkingControl control(space);
+            std::ifstream input(folder/"parking-control.jsonl");std::string line;double previous=0,stoppedAt=-1;
+            bool armed=false;RaceParkingObservation o;RaceParkingCommand command;int stopFrame=0;
+            while(std::getline(input,line)) {
+                const auto row=nlohmann::json::parse(line);if(!row.at("armed").get<bool>())continue;
+                const auto p=row.at("pose");o={{p[0].get<float>(),p[1].get<float>(),p[2].get<float>()},
+                    row.at("captured").get<double>(),row.at("frame").get<uint64_t>(),row.at("motion_epoch").get<int>(),row.at("motion_valid").get<bool>()};
+                const double now=row.at("time");
+                if(!armed){require(control.arm(route,o,now,true),"Cannot arm terminal field replay");armed=true;previous=now;continue;}
+                command=control.update(o,now,float(now-previous),true);previous=now;
+                require(!control.failed(),command.reason);
+                if(std::string(command.state)=="PARK_DWELL") {
+                    stopFrame=row.at("frame");stoppedAt=now;
+                    require(command.speed==0&&control.terminalRecoveryUsed(),"Missed entry not stopped as terminal recovery");
+                    require(!space.parked(o.pose),"Field case does not exercise missed containment");
+                    require(o.pose.x>-.605f&&stopFrame<270,"Terminal stop still beyond outer bay depth");break;
+                }
+            }
+            require(stoppedAt>0,"Recorded run still drives past entry terminal");
+            double reverseAt=-1;int dwellFrames=0;const auto stopPose=o.pose;
+            for(int step=0;step<80;++step) {
+                previous+=.08;o.captured=previous;++o.sequence;
+                // Remain outside strict containment. The arrival latch must
+                // survive this for longer than the old one-second restart.
+                command=control.update(o,previous,.08f,true);
+                require(!control.failed()&&command.speed<=0,"Terminal dwell restarted forward entry");
+                if(std::string(command.state)=="PARK_DWELL")++dwellFrames;
+                if(command.speed<0){reverseAt=previous;break;}
+            }
+            require(reverseAt-stoppedAt>=3&&reverseAt-stoppedAt<4.5&&dwellFrames>30,"Terminal dwell did not lead to reverse after three seconds");
+            RaceParkingTestReport report;report.start();
+            report.observe("PARK_DWELL","ENTRY_TERMINAL_REACHED_STOPPING",0,"CONTROLLER_STOP",true,true);
+            report.observe("PARK_EXIT","reverse",-.08f,"TRACKING",true,true);
+            report.observe("PARK_COMPLETE","returned",0,"STOPPED",true,true);
+            const auto a=report.toJson()["retained_attempts"][0];
+            require(!a["parking_validated"].get<bool>()&&!a["full_body_inside_observed"].get<bool>(),"Terminal recovery falsely reported as valid parking");
+            std::cout<<"PASS actual terminal replay stop_frame="<<stopFrame<<" stop_pose="<<stopPose.x<<','<<stopPose.z
+                     <<" dwell_s="<<reverseAt-stoppedAt<<" reverse_speed="<<command.speed<<"; no forward restart and no false parking success\n";return 0;
+        }
+        if(argc==3&&std::string(argv[1])=="--parking-continue-field") {
+            const auto folder=std::filesystem::path(argv[2]);nlohmann::json saved;
+            std::ifstream(folder/"parking-route.json")>>saved;
+            RaceParkingRoute route;route.valid=true;route.entryCurvaturePreview=saved.at("entry_curvature_preview_m");
+            for(auto p:saved.at("entry"))route.entry.push_back({p[0].get<float>(),p[1].get<float>(),p[2].get<float>()});
+            route.exit=route.entry;std::reverse(route.exit.begin(),route.exit.end());
+            RaceParkingSpace space;space.keepRearWithinStart(route.entry.front());RaceParkingControl control(space);
+            RaceParkingPoseFallback fallback;RaceParkingCommand command;
+            std::ifstream input(folder/"parking-control.jsonl");std::string line;bool armed=false,oldFault=false;
+            double previous=0;int continued=0,estimated=0;RaceParkingObservation effective;
+            while(std::getline(input,line)) {
+                auto row=nlohmann::json::parse(line);
+                if(armed&&row.at("state")=="PARK_READY")break;
+                if(!armed&&!row.at("armed").get<bool>())continue;
+                auto p=row.at("pose");RaceParkingObservation raw{{p[0].get<float>(),p[1].get<float>(),p[2].get<float>()},
+                    row.at("captured").get<double>(),row.at("frame").get<uint64_t>(),row.at("motion_epoch").get<int>(),row.at("motion_valid").get<bool>()};
+                double now=row.at("time");
+                if(!armed){require(control.arm(route,raw,now,true),"Cannot arm continuity replay");armed=true;previous=now;fallback.update(raw,now,0,0,space.dimensions());continue;}
+                effective=fallback.update(raw,now,command.speed,command.curvature,space.dimensions());
+                command=control.update(effective,now,float(now-previous),true);previous=now;
+                oldFault|=row.at("state")=="PARK_FAULT";
+                if(oldFault){require(!control.failed()&&command.speed>0,"Recorded fault still stops parking entry");++continued;}
+                estimated+=effective.estimated;
+                if(continued>=25)break;
+            }
+            require(oldFault&&continued>=5,"Recorded fault was not exercised");
+            auto stale=effective;stale.valid=false;stale.captured+=.08;++stale.sequence;
+            auto rejected=fallback.update(stale,stale.captured+.3,command.speed,command.curvature,space.dimensions());
+            require(!rejected.valid,"Fresh-frame fallback hides stale camera");
+            auto restored=effective;restored.captured+=.08;++restored.sequence;restored.estimated=false;restored.valid=true;
+            auto joined=fallback.update(restored,restored.captured,0,0,space.dimensions());
+            require(joined.valid&&!joined.estimated,"Valid matching visual pose does not end fallback");
+            auto changed=joined;changed.epoch++;changed.valid=false;changed.captured+=.08;++changed.sequence;
+            require(!fallback.update(changed,changed.captured,0,0,space.dimensions()).valid,"Estimate crosses odometry reset epoch");
+            auto stopped=control.update(effective,previous+.04,.04f,false);
+            require(stopped.speed==0,"Traffic priority lost during estimate recovery");
+            if(estimated) {
+                // Independent continuation from the last replayed pose: keep
+                // visual odometry unavailable but supply fresh camera frames.
+                // This checks estimated dwell/exit, not physical parking.
+                RaceParkingPoseFallback continuation;continuation.update(effective,previous,0,0,space.dimensions());
+                previous+=.04;command=stopped;
+                for(int step=0;step<3500&&!control.done()&&!control.failed();++step) {
+                    previous+=.08;auto raw=effective;raw.valid=false;raw.estimated=false;
+                    raw.captured=previous;++raw.sequence;
+                    effective=continuation.update(raw,previous,command.speed,command.curvature,space.dimensions());
+                    command=control.update(effective,previous,.08f,true);
+                }
+                require(control.done()&&control.usedPoseEstimate(),"Command-estimate model cannot complete dwell and reverse");
+            }
+            RaceParkingTestReport report;report.start();report.observe("PARK_DWELL","estimated",0,"CONTROLLER_STOP",false);
+            report.observe("PARK_EXIT","estimated",-.08f,"TRACKING",false);report.observe("PARK_COMPLETE","estimated",0,"STOPPED",false);
+            const auto attempt=report.toJson()["retained_attempts"][0];
+            require(!attempt["full_body_inside_observed"].get<bool>()&&!attempt["returned_to_aisle_observed"].get<bool>()&&
+                    attempt["completion_estimated"].get<bool>(),"Estimated parking reported as observed completion");
+            std::cout<<"PASS field fault continuation frames="<<continued<<" estimated_frames="<<estimated
+                     <<"; stale camera/traffic priority and estimated completion labels verified; physical validation pending\n";return 0;
+        }
+        if(argc==3&&std::string(argv[1])=="--entry-lead-field") {
+            const auto folder=std::filesystem::path(argv[2]);nlohmann::json saved;
+            std::ifstream(folder/"parking-route.json")>>saved;
+            RaceParkingRoute route;route.valid=true;route.entryCurvaturePreview=saved.at("entry_curvature_preview_m");
+            for(auto p:saved.at("entry"))route.entry.push_back({p[0].get<float>(),p[1].get<float>(),p[2].get<float>()});
+            route.exit=route.entry;std::reverse(route.exit.begin(),route.exit.end());
+            RaceParkingSpace space;space.keepRearWithinStart(route.entry.front());RaceParkingControl control(space);
+            std::ifstream input(folder/"parking-control.jsonl");std::string line;bool armed=false;double previous=0;
+            int boosted=0,counterSteerCorrected=0;float largestExtra=0;
+            while(std::getline(input,line)) {
+                const auto row=nlohmann::json::parse(line);
+                // Recorded later poses are not a new closed-loop trajectory.
+                if(row.at("state")=="PARK_FAULT")break;
+                if(!row.at("armed").get<bool>())continue;
+                const auto p=row.at("pose");RaceParkingObservation o{{p[0].get<float>(),p[1].get<float>(),p[2].get<float>()},
+                    row.at("captured").get<double>(),row.at("frame").get<uint64_t>(),row.at("motion_epoch").get<int>(),row.at("motion_valid").get<bool>()};
+                const double now=row.at("time");
+                if(!armed){require(control.arm(route,o,now,true),"Cannot arm entry lead replay");armed=true;previous=now;continue;}
+                auto c=control.update(o,now,float(now-previous),true);previous=now;
+                require(!control.failed(),c.reason);
+                if(c.speed<=0||row.at("entry_mouth_recovery").get<bool>())continue;
+                float pwm=1500-400*std::atan(.2f*c.curvature)/(33.f*float(CV_PI)/180);
+                require(pwm>=1099.9f&&pwm<=1900.1f,"Entry boost exceeds hardware PWM range");
+                float extra=row.at("pwm").get<float>()-pwm;
+                if(extra>50){++boosted;largestExtra=std::max(largestExtra,extra);}
+                if(row.at("pwm").get<int>()>1500&&pwm<1450)++counterSteerCorrected;
+            }
+            require(boosted>=3,"No sustained earlier steering increase on actual entry");
+            std::cout<<"PASS recorded entry commands: stronger_frames="<<boosted<<" max_extra_left_pwm="<<largestExtra
+                <<" countersteer_corrected="<<counterSteerCorrected<<"; recorded-pose comparison only, physical retest required\n";return 0;
+        }
         if(argc==3&&std::string(argv[1])=="--exit-field") {
             const auto folder=std::filesystem::path(argv[2]);nlohmann::json saved;
             std::ifstream(folder/"parking-route.json")>>saved;

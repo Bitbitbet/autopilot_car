@@ -62,6 +62,7 @@ class RaceGroundMap {
                 float((h.at<double>(1,0)*p.x+h.at<double>(1,1)*p.y+h.at<double>(1,2))/w)};
     }
 public:
+    RaceGroundMap()=default; // disabled metric map for image-only laboratory mission
     explicit RaceGroundMap(const RaceGroundCalibration &c) {
         c.validate();std::array<cv::Point2f,4> image;
         for(size_t i=0;i<4;++i)image[i]={c.imagePoints[i][0],c.imagePoints[i][1]};
@@ -81,9 +82,11 @@ public:
     }
     float scale() const {return metricScale;}
     cv::Point2f toGround(cv::Point2f p) const {
+        if(imageToGround.empty())return {NAN,NAN};
         const auto q=project(imageToGround,p);return {q.x*metricScale,q.y*metricScale};
     }
     cv::Point2f toImage(cv::Point2f p) const {
+        if(groundToImage.empty())return {NAN,NAN};
         return project(groundToImage,{p.x/metricScale,p.y/metricScale});
     }
 };

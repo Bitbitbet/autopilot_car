@@ -3,14 +3,43 @@
 #include <string>
 #include <cstdint>
 
-// Coordinates are measured front-bumper poses in the taught bay frame. Commands
-// never advance this pose. A discontinuous visual frame cannot restart a maneuver.
+// Front-bumper pose in the taught bay frame. Runtime command fallback explicitly
+// marks estimated observations; the independent visual tracker is never altered.
 struct RaceParkingObservation {
     RaceParkingPose pose;
     double captured=0;
     uint64_t sequence=0;
     int epoch=0;
     bool valid=false;
+    bool estimated=false;
+};
+// Parking-only fallback. Integrate APPLIED commands while current camera frames
+// remain fresh. This is an estimate, never measured wheel odometry. Keep the
+// ground tracker unchanged so it can independently recover its original frame.
+class RaceParkingPoseFallback {
+    RaceParkingObservation last;
+public:
+    void reset(){last={};}
+    RaceParkingObservation update(RaceParkingObservation raw,double now,float appliedSpeed,float appliedCurvature,
+                                  const RaceParkingDimensions &d) {
+        const double gap=raw.captured-last.captured;
+        if(!last.valid){if(raw.valid)last=raw;return raw;}
+        if(raw.epoch!=last.epoch||raw.sequence<=last.sequence||gap<=0||gap>.25||
+           now<raw.captured||now-raw.captured>.18||!std::isfinite(appliedSpeed)||!std::isfinite(appliedCurvature))return raw;
+        if(!raw.valid||last.estimated) {
+            auto predicted=raceParkingAdvance(last.pose,appliedSpeed*float(gap),appliedCurvature,d);
+            if(raw.valid) {
+                const float distance=std::hypot(raw.pose.x-predicted.x,raw.pose.z-predicted.z);
+                const float angle=raceParkingAngle(raw.pose.yaw-predicted.yaw);
+                if(distance<.01f&&std::abs(angle)<.04f) {last=raw;return raw;}
+                const float blend=distance>0?std::min(1.f,.008f/distance):1.f;
+                predicted.x+=(raw.pose.x-predicted.x)*blend;predicted.z+=(raw.pose.z-predicted.z)*blend;
+                predicted.yaw+=std::clamp(angle,-.03f,.03f);
+            }
+            raw.pose=predicted;raw.valid=true;raw.estimated=true;
+        }
+        last=raw;return raw;
+    }
 };
 struct RaceParkingCommand {
     float speed=0,curvature=0;
@@ -32,10 +61,12 @@ class RaceParkingControl {
     size_t segment=0;
     int epoch=0;
     uint64_t lastSequence=0;
-    double lastCapture=-1,lastTime=-1,badSince=-1,phaseSince=0,progressSince=0,dwellOutsideSince=-1;
+    double lastCapture=-1,lastTime=-1,badSince=-1,phaseSince=0,progressSince=0;
     RaceParkingPose previous{},progressPose{};
     float lastSpeed=0,steeringAngle=0;
     bool reverse=false;
+    bool estimateUsed=false;
+    bool terminalRecovery=false;
     bool mouthRecoveryActive=false;
     const char *faultReason="PARK_FAULT";
     static cv::Point2f rear(RaceParkingPose p,const RaceParkingDimensions &d) {
@@ -50,6 +81,8 @@ public:
     bool active()const{return phase==Phase::Entry||phase==Phase::Dwell||phase==Phase::Exit;}
     bool done()const{return phase==Phase::Done;}
     bool failed()const{return phase==Phase::Fault;}
+    bool usedPoseEstimate()const{return estimateUsed;}
+    bool terminalRecoveryUsed()const{return terminalRecovery;}
     const std::vector<RaceParkingPose> &reverseReference()const{return route.exit;}
     RaceParkingCommand status()const {
         if(failed())return {0,0,"PARK_FAULT",faultReason,segment};
@@ -99,36 +132,44 @@ public:
            move>.025f+.4f*recoveryExtra||turn>.11f+.8f*recoveryExtra)
             return fault("PARK_POSE_DISCONTINUITY");
         previous=o.pose;lastCapture=o.captured;lastSequence=o.sequence;badSince=-1;
+        estimateUsed|=o.estimated;
         const bool observedFree=space.freeObserved(o.pose);
         const bool paintPassage=(phase==Phase::Entry||phase==Phase::Exit)&&space.freeEntryMouth(o.pose);
         const bool parkedObservation=(phase==Phase::Dwell||phase==Phase::Exit)&&space.parkedObserved(o.pose);
-        if(!observedFree&&!paintPassage&&!parkedObservation&&phase!=Phase::Dwell)return fault("PARK_BODY_OUTSIDE_TAUGHT_SPACE");
+        const bool outsidePaint=!observedFree&&!paintPassage&&!parkedObservation;
         if(phase!=Phase::Entry||space.free(o.pose))mouthRecoveryActive=false;
         else if(!observedFree)mouthRecoveryActive=true;
         const bool mouthRecovery=mouthRecoveryActive;
         if(phase==Phase::Entry&&(std::hypot(o.pose.x-measuredEntry.back().x,o.pose.z-measuredEntry.back().z)>.004f||
            std::abs(raceParkingAngle(o.pose.yaw-measuredEntry.back().yaw))>.02f))measuredEntry.push_back(o.pose);
-        if(now-phaseSince>45)return fault("PARK_PHASE_TIMEOUT");
         if(phase==Phase::Dwell) {
-            // At least three seconds of distinct fresh stationary visual samples.
+            // Arrival is latched: loss of painted containment must never restart
+            // forward entry. Stop for three stationary seconds, then reverse the
+            // actual entry path. Terminal recovery is not a valid-bay success.
             const bool stationary=move/gap<.012f&&turn/gap<.06f;
-            if(!space.parkedObserved(o.pose)) {
-                dwell.ready(o.captured,false,false,false,reverse);lastSpeed=0;
-                if(dwellOutsideSince<0)dwellOutsideSince=now;
-                if(now-dwellOutsideSince>1)return fault("PARK_DWELL_BODY_LEFT_BAY");
-                return {0,0,"PARK_DWELL","WAIT_DWELL_POSE_SETTLE",segment};
-            }
-            dwellOutsideSince=-1;
+            terminalRecovery|=!space.parkedObserved(o.pose);
             if(dwell.ready(o.captured,true,stationary,true,reverse,space.dimensions().dwellSeconds)) {
                 measuredEntry.push_back(o.pose);route.exit=raceParkingReverseSamples(measuredEntry,space.dimensions());
                 phase=Phase::Exit;phaseSince=progressSince=now;progressPose=o.pose;segment=0;
                 lastSpeed=0;return {0,0,"PARK_EXIT","DWELL_COMPLETE_REVERSE_NEXT_FRAME",0};
             }
-            lastSpeed=0;return {0,0,"PARK_DWELL",stationary?"THREE_SECONDS_STATIONARY_INSIDE":"WAIT_PHYSICAL_STOP",segment};
+            lastSpeed=0;return {0,0,"PARK_DWELL",stationary?
+                (terminalRecovery?"TERMINAL_RECOVERY_THREE_SECONDS":"THREE_SECONDS_STATIONARY_INSIDE"):"WAIT_PHYSICAL_STOP",segment};
         }
         const bool leaving=phase==Phase::Exit;const auto &path=leaving?route.exit:route.entry;
         const auto &goal=path.back();const auto &d=space.dimensions();
         const float goalError=std::hypot(o.pose.x-goal.x,o.pose.z-goal.z);
+        if(leaving&&std::abs(raceParkingAngle(o.pose.yaw-goal.yaw))<.15f) {
+            bool inAisle=true;
+            for(auto q:space.body(o.pose))if(std::abs(q.x)>d.aisle/2)inAisle=false;
+            // Entry may include a long straight approach. Once the full body
+            // is back in the aisle and aligned, do not replay that straight all
+            // the way to the original start (75cm behind the mouth in the run).
+            if(inAisle&&std::hypot(o.pose.x-path.front().x,o.pose.z-path.front().z)>.10f) {
+                phase=Phase::Done;lastSpeed=0;
+                return {0,0,"PARK_COMPLETE","BODY_CLEAR_ALIGNED_IN_AISLE",segment};
+            }
+        }
         // A fully contained vehicle near the end is already parked; continuing
         // to chase one exact pose can push an otherwise valid body toward a line.
         // Exit finishes once the complete body is in the aisle near its starting
@@ -146,17 +187,32 @@ public:
             }
         }
         const auto axle=rear(o.pose,d);float best=1e9f,projection=0;size_t selected=segment;
-        for(size_t i=segment;i+1<path.size()&&i<segment+9;++i) {
+        for(size_t i=segment;i+1<path.size();++i) {
             const auto a=rear(path[i],d),b=rear(path[i+1],d),delta=b-a;
             const float length2=delta.dot(delta);if(length2<1e-10f)continue;
             const float t=std::clamp((axle-a).dot(delta)/length2,0.f,1.f);
             const float distance=cv::norm(axle-(a+delta*t));
             if(distance<best){best=distance;selected=i;projection=t;}
         }
-        if(best>.04f)return fault("PARK_ROUTE_TRACKING_ERROR");
+        const bool routeRecovery=best>.04f;
         segment=selected;
+        if(!leaving&&segment+5>=path.size()&&o.pose.yaw>route.entry.front().yaw+.35f) {
+            const float dx=o.pose.x-goal.x,dz=o.pose.z-goal.z;
+            const float alongGoal=-std::sin(goal.yaw)*dx+std::cos(goal.yaw)*dz;
+            const float acrossGoal=std::cos(goal.yaw)*dx+std::sin(goal.yaw)*dz;
+            const bool depthReached=o.pose.x<=goal.x&&std::abs(dz)<.18f;
+            const bool endPassed=alongGoal>=0&&std::abs(acrossGoal)<.20f;
+            // Do not pursue a point behind the car after reaching the planned
+            // bay depth/terminal plane. This complements strict parked success;
+            // lateral error must not turn the last segment into endless circles.
+            if(depthReached||endPassed) {
+                terminalRecovery=!space.parked(o.pose);
+                phase=Phase::Dwell;phaseSince=now;lastSpeed=0;steeringAngle=0;
+                return {0,0,"PARK_DWELL",terminalRecovery?"ENTRY_TERMINAL_REACHED_STOPPING":"FULL_BODY_INSIDE_STOPPING",segment};
+            }
+        }
         const auto refYaw=path[segment].yaw+projection*raceParkingAngle(path[segment+1].yaw-path[segment].yaw);
-        if(std::abs(raceParkingAngle(o.pose.yaw-refYaw))>.35f)return fault("PARK_HEADING_ERROR");
+        const bool headingRecovery=std::abs(raceParkingAngle(o.pose.yaw-refYaw))>.35f;
         auto target=rear(path[segment],d)+(rear(path[segment+1],d)-rear(path[segment],d))*projection;
         // 5.5cm forward lookahead amplified millimetres of visual cross-track
         // noise into alternating full-lock commands on the real straight approach.
@@ -196,9 +252,17 @@ public:
         // Once the reference has established its left turn, recover missing
         // heading with a smooth lower bound. Release it on heading overshoot,
         // a right-turn reference, near the final heading, and during reverse.
-        if(!leaving&&refYaw>route.entry.front().yaw+.06f&&goal.yaw>refYaw+.03f&&feedforward>=-.05f&&headingError>.02f) {
-            const float blend=std::clamp((headingError-.02f)/.04f,0.f,1.f);
-            const float recovery=.9f*std::max(0.f,feedforward)+4.f*headingError;
+        // The two Oct-30 runs reached full lock only after the mouth. Use the
+        // already-previewed bend to lead wheel response by 6cm, rather than
+        // waiting for the nearest reference heading to be 0.06rad into it.
+        // The lead disappears on straight sections, near the goal, on heading
+        // overshoot, and in reverse; do not globally amplify lane/exit steering.
+        const float entryLead=route.entryCurvaturePreview>0?.06f*std::max(0.f,feedforward):0.f;
+        const float entryError=headingError+entryLead;
+        if(!leaving&&(refYaw>route.entry.front().yaw+.06f||entryLead>.02f)&&
+           goal.yaw>refYaw+.08f&&feedforward>=-.05f&&entryError>.02f) {
+            const float blend=std::clamp((entryError-.02f)/.04f,0.f,1.f);
+            const float recovery=1.1f*std::max(0.f,feedforward)+5.f*std::max(0.f,headingError);
             requested+=blend*std::max(0.f,recovery-requested);
             entryHeadingRecovery=requested>baseCurvature+1e-5f;
         }
@@ -214,7 +278,7 @@ public:
             requested+=blend*(bounded-requested);
         }
         requested=std::clamp(requested,-limit,limit);
-        if(mouthRecovery) {
+        if(mouthRecovery&&goal.yaw>o.pose.yaw+.03f) {
             // Only continue across mouth paint when a forward left arc can
             // return to the original observation envelope. Validate the whole
             // sweep with finite steering slew before asking for stronger steer.
@@ -232,7 +296,8 @@ public:
                 }
                 if(recoverable)break;
             }
-            if(!recoverable)return fault("PARK_MOUTH_NO_FORWARD_RECOVERY");
+            // A painted-envelope rejection is advisory during execution. If
+            // no contained arc exists, keep route/heading correction moving.
         }
         const float lock=d.fullLockDegrees*float(CV_PI)/180;
         // Generate a continuous wheel-angle target within the existing command
@@ -256,7 +321,7 @@ public:
         };
         // Close to a divider, choose a shorter stopping envelope by reducing
         // speed within the existing parking range, retaining the same geometry.
-        bool boundaryWarning=false;
+        bool boundaryWarning=outsidePaint||routeRecovery||headingRecovery;
         while(!sweepClear(magnitude)) {
             // Operator requested a less restrictive field trial: a predicted
             // margin crossing is advisory. Keep the existing parking creep
@@ -270,6 +335,8 @@ public:
         if(now-progressSince>4)return fault("PARK_NO_MEASURED_PROGRESS");
         lastSpeed=speed;
         return {speed,curvature,leaving?"PARK_EXIT":"PARK_ENTRY",
+            o.estimated?"COMMAND_POSE_ESTIMATE_CONTINUE":routeRecovery?"ROUTE_ERROR_CORRECTING_CONTINUE":
+            headingRecovery?"HEADING_ERROR_CORRECTING_CONTINUE":outsidePaint?"PAINT_CROSSING_CORRECTING_CONTINUE":
             mouthRecovery?"ENTRY_MOUTH_TURN_RECOVERY":boundaryWarning?"PREDICTED_BOUNDARY_WARNING_CONTINUE":
             leaving?(exitHeadingRecovery?"EXIT_HEADING_RECOVERY":"VISUAL_REVERSE_ROUTE"):
             entryHeadingRecovery?"ENTRY_HEADING_RECOVERY":"VISUAL_FORWARD_ROUTE",segment,boundaryWarning,
@@ -295,7 +362,9 @@ inline bool raceParkingModelCompletes(const RaceParkingSpace &space,const RacePa
         observation.pose=raceParkingAdvance(observation.pose,speed*.04f,std::tan(wheel)/d.wheelbase,d);
         if(!space.free(observation.pose))return false;
     }
-    return control.done();
+    // Runtime terminal recovery must not make an invalid parking trajectory
+    // pass the planner's nominal full-containment feasibility filter.
+    return control.done()&&!control.terminalRecoveryUsed();
 }
 inline RaceParkingRoute racePlanTrackableParking(const RaceParkingSpace &space,RaceParkingPose start) {
     RaceParkingRoute result;std::vector<RaceParkingSearchTrial> searches;

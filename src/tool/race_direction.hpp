@@ -83,7 +83,7 @@ inline int forkArrowDirection(const cv::Mat &image,const PredictResult &d,const 
                 return (cv::Point2f(polygon[x])-neck).dot(axis)<(cv::Point2f(polygon[y])-neck).dot(axis);
             });
             const cv::Point2f tip=polygon[tipId];
-            if((tip-neck).dot(axis)<=0||tip.y-neck.y<bounds.height*.10||
+            if((tip-neck).dot(axis)<=0||
                std::fabs(tip.x-neck.x)<bounds.width*.15) continue;
             if(tip.x<neck.x) ++leftVotes; else ++rightVotes;
         }
@@ -97,7 +97,7 @@ inline std::vector<ForkDirectionCheck> verifyForkDirections(const cv::Mat &image
                                                            std::vector<PredictResult> &detections) {
     std::vector<ForkDirectionCheck> checks;
     detections.erase(std::remove_if(detections.begin(),detections.end(),[&](PredictResult &d) {
-        if(d.type!=LABEL_YLEFT&&d.type!=LABEL_YRIGHT) return false;
+        if(d.type!=LABEL_YLEFT&&d.type!=LABEL_YRIGHT&&d.type!=LABEL_LEFT) return false;
         ForkDirectionCheck check; check.rawType=d.type; check.modelScore=d.score; check.box={d.x,d.y,d.width,d.height};
         const int direction=forkArrowDirection(image,d,check.reason);
         check.finalType=direction<0?LABEL_YLEFT:direction>0?LABEL_YRIGHT:-1;

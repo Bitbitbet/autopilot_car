@@ -35,6 +35,49 @@ struct Fixture {
 };
 int main(int argc,char **argv) {
     try {
+        if(argc==3&&std::string(argv[1])=="--elevated-sign-field") {
+            std::ifstream input(std::filesystem::path(argv[2])/"detections.jsonl");std::string line;
+            Fixture field;field.image=cv::Mat::zeros(240,320,CV_8UC1);
+            cv::fillConvexPoly(field.image,std::vector<cv::Point>{{240,0},{319,0},{280,239},{40,239}},{255});
+            bool started=false;int count=0,guided=0,maxBottom=0;
+            while(std::getline(input,line)) {
+                auto row=nlohmann::json::parse(line);std::vector<PredictResult> ds;
+                for(const auto &d:row.at("detections"))if(d.at("type")==LABEL_YLEFT&&d.at("accepted").get<bool>()) {
+                    ds.push_back(box(LABEL_YLEFT,d.at("y"),d.at("width"),d.at("height"),d.at("x")));
+                    maxBottom=std::max(maxBottom,d.at("y").get<int>()+d.at("height").get<int>());
+                }
+                if(!started&&ds.empty())continue;started=true;
+                auto p=field.step(ds);++count;
+                if(p.guideDirection==-1) {
+                    check(!p.stop&&!p.selectedBranch&&p.guidePwm>=180&&raceDirectionServo(p,1700)<=1320,
+                          "Recorded elevated sign waits for left road or row145");++guided;
+                }
+                if(count>=30)break;
+            }
+            check(guided>=15&&maxBottom<145,"Elevated sign field sequence not exercised");
+            cv::flip(field.image,field.image,1);auto p=field.repeat({},4);
+            check(p.selectedBranch&&!p.stop&&std::string(p.state)=="FORK_LEFT","Sign-led turn cannot hand off to newly visible left road");
+            std::cout<<"PASS actual elevated sign detections with synthetic hidden-left road: guided_frames="<<guided
+                     <<" maximum_box_bottom="<<maxBottom<<"; immediate steering then left-road handoff\n";return 0;
+        }
+        for(int sign:{-1,1}) {
+            cv::Mat picture(240,320,CV_8UC3,cv::Scalar(30,30,30));
+            cv::circle(picture,{160,120},80,{220,40,20},-1);
+            std::vector<cv::Point> arrow{{100,120},{150,80},{150,105},{210,105},{210,135},{150,135},{150,160}};
+            if(sign>0)for(auto &v:arrow)v.x=320-v.x;
+            cv::fillPoly(picture,std::vector<std::vector<cv::Point>>{arrow},{255,255,255});
+            std::vector<PredictResult> ds{box(LABEL_LEFT,40,160,160,80)};
+            auto checks=verifyForkDirections(picture,ds);
+            check(checks.size()==1&&ds.size()==1&&ds[0].type==(sign<0?LABEL_YLEFT:LABEL_YRIGHT),"horizontal blue arrow direction not verified");
+        }
+        if(argc==3&&std::string(argv[1])=="--sign-photo") {
+            auto raw=cv::imread(argv[2]);check(!raw.empty(),"Uploaded left-sign fixture missing");
+            cv::Mat picture;cv::resize(raw(cv::Rect(100,485,890,780)),picture,{320,240});
+            std::vector<PredictResult> ds{box(LABEL_LEFT,0,320,240,0)};
+            verifyForkDirections(picture,ds);
+            check(ds.size()==1&&ds[0].type==LABEL_YLEFT,"User's photographed blue arrow not recognized as left");
+            std::cout<<"PASS user photographed left arrow shape (phone image; vehicle recognition still needs field check)\n";
+        }
         Fixture f;
         check(!f.repeat({}).stop,"fresh empty AI permits clear straight lane");
         auto p=f.repeat({box(LABEL_LIMIT)});
@@ -57,7 +100,8 @@ int main(int argc,char **argv) {
 
         Fixture fork;
         p=fork.repeat({box(LABEL_YLEFT)});
-        check(!p.selectedBranch&&std::string(p.state)=="FORK_ARMED","sign alone must not turn");
+        check(!p.selectedBranch&&p.guideDirection==-1&&std::string(p.state)=="FORK_SEEK_LEFT","near confirmed sign must seek the signed road without claiming a branch");
+        check(raceDirectionServo(p,1650)<PWMSERVOMID,"visible right road overrides left sign");
         fork.image=road(true);
         p=fork.repeat({box(LABEL_YLEFT)},4);
         check(p.selectedBranch&&std::string(p.state)=="FORK_LEFT","confirmed left branch");
@@ -88,23 +132,55 @@ int main(int argc,char **argv) {
         Fixture expired;
         expired.repeat({box(LABEL_YLEFT)});
         for(int i=0;i<65;++i)p=expired.step({});
-        check(p.stop&&std::string(p.reason)=="DIRECTION_MEMORY_EXPIRED"&&!p.selectedBranch,
+        check(p.stop&&(std::string(p.reason)=="DIRECTION_MEMORY_EXPIRED"||std::string(p.reason)=="SIGNED_ROAD_REACQUIRE_TIMEOUT")&&!p.selectedBranch,
               "unresolved direction silently resumed ordinary lane following");
         expired.step({},false);p=expired.repeat({},4);
-        check(p.stop&&std::string(p.reason)=="DIRECTION_MEMORY_EXPIRED","manual toggle cleared unresolved direction fault");
+        check(p.stop,"manual toggle cleared unresolved direction fault");
 
         Fixture renewed;
-        renewed.repeat({box(LABEL_YLEFT)});
-        for(int i=0;i<65;++i)p=renewed.step({box(LABEL_YLEFT)});
-        check(!p.stop&&std::string(p.state)=="FORK_ARMED","fresh same-direction evidence did not renew memory");
+        renewed.repeat({box(LABEL_YLEFT,20)});
+        for(int i=0;i<30;++i)p=renewed.step({box(LABEL_YLEFT,20)});
+        check(!p.stop&&std::string(p.state)=="FORK_SEEK_LEFT"&&p.guidePwm>=280,"confirmed high sign did not actively seek left");
         renewed.image=road(true);p=renewed.repeat({box(LABEL_YLEFT)},4);
         check(p.selectedBranch&&std::string(p.state)=="FORK_LEFT","renewed direction cannot select a later real split");
 
         Fixture neverSplit;
-        neverSplit.repeat({box(LABEL_YRIGHT)});
-        for(int i=0;i<125;++i)p=neverSplit.step({box(LABEL_YRIGHT)});
-        check(p.stop&&std::string(p.reason)=="FORK_NOT_CONFIRMED_TIMEOUT",
+        neverSplit.repeat({box(LABEL_YRIGHT,20)});
+        for(int i=0;i<125;++i)p=neverSplit.step({box(LABEL_YRIGHT,20)});
+        check(p.stop&&std::string(p.reason)=="SIGNED_ROAD_REACQUIRE_TIMEOUT",
               "continuous direction sign permits indefinite unconfirmed forward approach");
+        Fixture horizontalLeft;
+        p=horizontalLeft.repeat({box(LABEL_LEFT)});
+        check(p.guideDirection==-1&&p.guidePwm>=90,"ordinary LEFT label never arms direction guidance");
+        horizontalLeft.image=road(true);p=horizontalLeft.repeat({},4);
+        check(p.selectedBranch&&std::string(p.state)=="FORK_LEFT","guided left cannot acquire visible branch");
+        Fixture distant;
+        p=distant.repeat({box(LABEL_YLEFT,20)});
+        check(p.guidePwm>=180&&raceDirectionServo(p,1650)<=1320,"confirmed elevated sign still waits for row145 or permits opposite steering");
+        AutoPilot missingRoad(TrackviewConfig{});
+        missingRoad.update({}, {},.07f,0);
+        check(!missingRoad.ready&&raceDirectionSeeking(p)&&raceDirectionSpeed(p,missingRoad,.1f,.07f,0)>0,
+              "confirmed sign cannot move without visible lane");
+        check(raceDirectionSpeed(p,missingRoad,.1f,1.f,0)==0,"sign seeking ignores frame gap");
+        auto stoppedGuide=p;stoppedGuide.stop=true;
+        check(raceDirectionSpeed(stoppedGuide,missingRoad,.1f,.07f,.1f)==0,"sign seeking ignores priority stop");
+        stoppedGuide=p;stoppedGuide.fresh=false;
+        check(raceDirectionSpeed(stoppedGuide,missingRoad,.1f,.07f,.1f)==0,"sign seeking ignores stale AI");
+        Fixture hidden;
+        hidden.image=cv::Mat::zeros(240,320,CV_8UC1);
+        cv::fillConvexPoly(hidden.image,std::vector<cv::Point>{{240,0},{319,0},{280,239},{40,239}},{255});
+        p=hidden.repeat({box(LABEL_YLEFT)},8);
+        check(!p.stop&&!p.selectedBranch&&p.guideDirection==-1&&raceDirectionServo(p,1700)<1500,
+              "only-right-visible scene defeats confirmed left guidance");
+        cv::flip(hidden.image,hidden.image,1);p=hidden.repeat({},4);
+        check(!p.stop&&p.selectedBranch&&std::string(p.state)=="FORK_LEFT",
+              "single connected left road entering view cannot replace guidance");
+        Fixture seekGate;
+        seekGate.repeat({box(LABEL_LEFT)});
+        p=seekGate.repeat({box(LABEL_LEFT),box(LABEL_GATE,130,90,20)});
+        check(p.stop&&std::string(p.state)=="GATE_WAIT","sign guidance overrides gate");
+        Fixture seekStale;seekStale.repeat({box(LABEL_LEFT)});p=seekStale.step({},true,false,.5f);
+        check(p.stop&&!p.fresh&&p.guideDirection==0,"stale image keeps sign steering active");
 
         Fixture gate;
         p=gate.repeat({box(LABEL_GATE,130,90,20)});

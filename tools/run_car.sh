@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 固定入口：相同程序通过参数切换预览/实跑及测试场景。
 set -euo pipefail
-if [ "$#" -gt 3 ]; then printf '%s\n' '用法: bash run_car.sh [preview|drive|calibrate|bypass|parking-preview|parking-drive|reverse-check] [lane|signal|limit|competition] [white|black]' >&2;exit 2;fi
+if [ "$#" -gt 3 ]; then printf '%s\n' '用法: bash run_car.sh [preview|drive|calibrate|bypass|parking-preview|parking-drive|reverse-check|bypass-virtual|bypass-virtual-preview|mission|mission-preview|mission-lab|mission-lab-preview] [lane|signal|limit|competition] [white|black]' >&2;exit 2;fi
 MODE="${1:-preview}"
 PROFILE="${2:-lane}"
 SURFACE="${3:-config}"
-case "$MODE" in preview|drive|calibrate|bypass|parking-preview|parking-drive|reverse-check) ;; *) printf '%s\n' '模式支持 preview、drive、calibrate、bypass、parking-preview、parking-drive、reverse-check。' >&2;exit 2 ;; esac
+case "$MODE" in preview|drive|calibrate|bypass|parking-preview|parking-drive|reverse-check|bypass-virtual|bypass-virtual-preview|mission|mission-preview|mission-lab|mission-lab-preview) ;; *) printf '%s\n' '模式支持 preview、drive、calibrate、bypass、parking-preview、parking-drive、reverse-check。' >&2;exit 2 ;; esac
 case "$PROFILE" in lane|signal|limit|competition) ;; *) printf '%s\n' '未知测试场景。' >&2;exit 2 ;; esac
 case "$SURFACE" in config|white|black) ;; *) printf '%s\n' '路面模式支持 white、black。' >&2;exit 2 ;; esac
 cd -- "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -32,6 +32,8 @@ if isinstance(minimum,bool) or not isinstance(minimum,(int,float)) or not math.i
 if track.get('diagnostics') is not True:raise SystemExit('需要 diagnostics=true；原配置没有改写。')
 for key in ['cruiseSpeed','curveSpeed','degradedSpeed']:track[key]=.1
 track['maxSpeed']=10.0
+if mode.startswith('mission'):race['forkMaxTime']=max(12.,race.get('forkMaxTime',4.))
+if mode.startswith('mission'):race['stopAfterCross']=False
 # 正式比赛的规则仍保留；signal/limit 为当前实验室的独立测试副本。
 if profile in ('signal','limit'):race['stopAfterCross']=False
 if profile=='limit':race['limitedSpeed']=max(minimum,.08)
@@ -46,6 +48,14 @@ command=['./trackview_race','--config',lane_path,'--race-config',race_path]
 navigation=Path('navigation.json')
 if navigation.is_file():command+=['--navigation-config',str(navigation)]
 if mode=='preview':command+=['--no-control']
+if mode in ('bypass-virtual','bypass-virtual-preview'):
+    if profile!='competition':raise SystemExit('虚拟边界绕障使用 competition 配置。')
+    command+=['--virtual-boundary-bypass']
+    if mode.endswith('-preview'):command+=['--no-control']
+if mode.startswith('mission'):
+    if profile!='competition':raise SystemExit('总控使用 competition 配置。')
+    if 'lab' not in mode and not Path('ground-calibration.json').is_file():raise SystemExit('总控停车需要当前车的 ground-calibration.json。')
+    if mode.endswith('-preview'):command+=['--mission-lab' if 'lab' in mode else '--mission','--no-control','--ground-calibration','ground-calibration.json']
 if mode=='calibrate':command+=['--calibrate-ground','--no-control']
 if mode=='reverse-check':command+=['--reverse-check']
 if mode=='parking-preview':
@@ -53,7 +63,7 @@ if mode=='parking-preview':
     command+=['--parking-preview','--ground-calibration','ground-calibration.json','--no-control']
 ground=Path('ground-calibration.json')
 reverse_source=None
-if mode=='parking-drive':
+if mode in ('parking-drive','mission'):
     if profile!='competition':raise SystemExit('停车实跑请使用 parking-drive competition，保留比赛停车任务。')
     if not ground.is_file():raise SystemExit('停车实跑需要当前车辆 ground-calibration.json。')
     capability=Path('parking-reverse-check.json')
@@ -70,12 +80,13 @@ if mode=='parking-drive':
     elif manifest.get('parking_control',{}).get('reverse_verified_by_user') is True:
         reverse_source='current_project_user_report_2026_10_29'
     else:raise SystemExit('缺少当前车辆实际倒车成功的确认。')
-    command+=['--parking-drive','--reverse-verified','--ground-calibration',str(ground)]
+    command+=['--parking-drive' if mode=='parking-drive' else '--mission-lab' if mode=='mission-lab' else '--mission','--reverse-verified','--ground-calibration',str(ground)]
+if mode=='mission-lab':command+=['--mission-lab']
 if mode=='bypass':
     if profile!='competition':raise SystemExit('绕行实验请使用 bypass competition，保留完整比赛任务优先级。')
     if not ground.is_file():raise SystemExit('请先执行 bash ./run_car.sh calibrate competition，生成当前车辆的地面标定。')
     command+=['--obstacle-bypass','--ground-calibration',str(ground)]
-record={'mode':profile,'run_mode':mode,'no_control':mode in ('preview','calibrate','parking-preview'),'binary':'trackview_race',
+record={'mode':profile,'run_mode':mode,'no_control':mode in ('preview','calibrate','parking-preview','bypass-virtual-preview','mission-preview','mission-lab-preview'),'binary':'trackview_race',
         'road_surface':track.get('roadSurface','white'),
         'binary_sha256':sha('trackview_race'),'plugin_sha256':sha('librace_npu_backend.so'),
         'source_trackview_config_sha256':sha(source),'source_race_config_sha256':sha(source_race),
@@ -85,15 +96,17 @@ record={'mode':profile,'run_mode':mode,'no_control':mode in ('preview','calibrat
         'speed_overrides_mps':{key:track[key] for key in ['cruiseSpeed','maxSpeed','curveSpeed','degradedSpeed']},
         'trial_timer_enabled':False,'command':command}
 record['navigation_config_sha256']=sha(navigation) if navigation.is_file() else None
-record['obstacle_planning_preview_only']=mode!='bypass'
-record['obstacle_route_controls_vehicle']=mode=='bypass'
+record['obstacle_planning_preview_only']=mode not in ('bypass','bypass-virtual','mission','mission-lab')
+record['obstacle_route_controls_vehicle']=mode in ('bypass','bypass-virtual','mission','mission-lab')
 record['bypass_hard_speed_cap_mps']=track['maxSpeed'] if mode=='bypass' else None
-record['ground_calibration_sha256']=sha(ground) if mode in ('bypass','parking-drive') else None
+record['ground_calibration_sha256']=sha(ground) if ground.is_file() and mode in ('bypass','parking-drive','mission','mission-lab','mission-preview','mission-lab-preview') else None
 record['sample_write_mode']='bounded_background_queue'
 record['parking_geometry_preview_only']=mode=='parking-preview'
-record['parking_control']={'enabled':mode=='parking-drive','reverse_source':reverse_source,'bay':None,'selection_policy':'fully visible left bay, all assumed empty',
-    'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':3,'entrance_exit_turns_integrated':False}
+record['parking_control']={'enabled':mode=='parking-drive' or mode.startswith('mission') and 'lab' not in mode,'reverse_source':reverse_source,'bay':None,'selection_policy':'fully visible left bay, all assumed empty',
+    'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':3,'entrance_exit_turns_integrated':mode.startswith('mission') and 'lab' not in mode}
 record['reverse_check']={'operator_trigger_required':True,'speed_command_mps':-.08,'duration_s':.5,'command_is_not_measured_motion':True} if mode=='reverse-check' else None
+record['mission']={'enabled':mode.startswith('mission'),'lab_single_loop':'lab' in mode,'lap_finish_source':'operator n at physical start','ground_arrow_assisted':True}
+record['bypass_algorithm']='virtual_boundary_v6' if 'virtual' in mode or mode.startswith('mission') else 'metric_ground' if mode=='bypass' else 'shadow'
 Path(prefix+'-launch.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
 print('启动记录: '+prefix+'-launch.json')
 print('路面模式: '+track.get('roadSurface','white')+'；寻路二值图统一为白色道路。')
@@ -105,7 +118,11 @@ PY
 )
 if [ "${#COMMAND[@]}" -eq 0 ];then printf '%s\n' '无法读取启动记录。' >&2;exit 1;fi
 printf '模式: %s；场景: %s；初始巡航/弯道/降级速度0.10 m/s；最高可调上限10 m/s；默认MANUAL。\n' "$MODE" "$PROFILE"
-if [ "$MODE" = reverse-check ]; then
+if [[ "$MODE" == mission* ]]; then
+    printf '%s\n' '总控：a开始，n在真实起点确认计圈/结束，空格停，g复位，s保存当前图；preview不打开电机串口。实验室单圈用mission-lab。'
+elif [[ "$MODE" == bypass-virtual* ]]; then
+    printf '%s\n' '虚拟边界绕障：a开始，空格停车，preview不驱动车轮；绕过后的回线是视觉/指令距离启发式，不是实测车尾过桶证明。'
+elif [ "$MODE" = reverse-check ]; then
     printf '%s\n' '倒车短测：按r才发送一次0.5秒倒车指令，之后自动停车；y确认实际后退，n记录未后退；空格/q退出。不执行自动停车任务。'
 elif [ "$MODE" = parking-drive ]; then
     printf '%s\n' '停车实跑：自动找左侧完整可见车位并规划，出现黄线和绿线后按a执行，不需每次点选。g重新识别；f手动诊断；空格停。车尾不越过起始后沿，入口/出口左转尚未接入。'

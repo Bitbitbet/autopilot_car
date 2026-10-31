@@ -3,6 +3,22 @@ from pathlib import Path
 
 @unittest.skipUnless(os.name=='posix','需要 Linux bash')
 class UnifiedCarLauncher(unittest.TestCase):
+    def test_lab_and_virtual_need_no_metric_calibration_or_reverse_record(self):
+        for mode in ['mission-lab','mission-lab-preview','bypass-virtual','bypass-virtual-preview']:
+            result=self.invoke(mode,'competition','white');self.assertEqual(result.returncode,0,result.stderr)
+            argv=json.loads((self.root/'invoked.json').read_text());self.assertNotIn('--reverse-verified',argv)
+    def test_mission_and_virtual_modes_white_and_black(self):
+        (self.root/'ground-calibration.json').write_text('{}')
+        (self.root/'parking-reverse-check.json').write_text(json.dumps({'reverse_verified':True}))
+        for mode in ['bypass-virtual','bypass-virtual-preview','mission','mission-preview','mission-lab','mission-lab-preview']:
+            for surface in ['white','black']:
+                result=self.invoke(mode,'competition',surface);self.assertEqual(result.returncode,0,result.stderr)
+                argv=json.loads((self.root/'invoked.json').read_text())
+                self.assertEqual('--no-control' in argv,mode.endswith('-preview'))
+                expected='--virtual-boundary-bypass' if 'virtual' in mode else '--mission-lab' if 'lab' in mode else '--mission'
+                self.assertIn(expected,argv)
+                cfg=json.loads((self.root/argv[argv.index('--config')+1]).read_text());self.assertEqual(cfg['roadSurface'],surface)
+                self.assertEqual(cfg['cruiseSpeed'],.1);self.assertEqual(cfg['maxSpeed'],10)
     def setUp(self):
         self.repo=Path(__file__).parents[1];(self.repo/'.cache').mkdir(exist_ok=True)
         self.temp=tempfile.TemporaryDirectory(dir=self.repo/'.cache');self.root=Path(self.temp.name)

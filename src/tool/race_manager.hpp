@@ -61,7 +61,7 @@ inline std::vector<std::pair<int,int>> raceRoadBlocks(const cv::Mat &bin,int row
 // 顶部复核只参与判别，不把这些行送入 v6 的转向路径。
 // 车头图案会在更远处重新合成一片白色；牌面的圆环会分成两个黑边，
 // 都不满足道路分隔带连续的条件。判断使用本帧像素，AI 漏检时也不沿用旧框。
-// 方向只在通过此检查的分叉上生效，不采用看到方向牌就删掉半边线的开环转向。
+// 此函数只返回可见几何。方向引导由 RaceManager 单独标记，不伪装成已看见支路。
 inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int direction,const RaceConfig &cfg,
                                const std::vector<cv::Rect> &signRegions={}) {
     RacePath out;
@@ -128,7 +128,7 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
             return std::abs(a.first+a.second-low-high)<std::abs(b.first+b.second-low-high);
         });
         const bool fork=out.splitRows>=cfg.minBranchRows&&r.number<=forkStart;
-        if(fork&&direction) best=direction<0?blocks.begin():blocks.end()-1;
+        if(fork&&direction&&direction!=2) best=direction<0?blocks.begin():blocks.end()-1;
         low=(!direction)?blocks.front().first:best->first;
         high=(!direction)?blocks.back().second:best->second;
         out.left.emplace_back(r.number,low); out.right.emplace_back(r.number,high);
@@ -140,6 +140,8 @@ struct RacePlan {
     float speedCap=10.f;
     bool stop=false,buzzer=false,fresh=false;
     bool selectedBranch=false;
+    int guideDirection=0;
+    float guidePwm=0;
     int colorRejectedComponents=0,geometrySplitRows=0;
     const char *geometryReason="INVALID_ROAD_INPUT";
     double detectionAge=-1;
@@ -159,12 +161,13 @@ class RaceManager {
     bool lastActive=false,limited=false,crossBottomSeen=false,gateWaiting=false,hazardWaiting=false;
     bool hazardPersonWaiting=false;
     bool hazardConeWaiting=false;
-    int direction=0;
+    int direction=0;bool routeArmed=false;
+    double seekSince=-1;
     enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
     State state=State::Lane;
     const char *reviewReason="REVIEW_REQUIRED";
     PredictResult gateBox{};
-    void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0; }
+    void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0;seekSince=-1; }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label,int row) const { return seen(label)&&boxes[label].y+boxes[label].height>=row; }
     bool updateObservation(const RaceSnapshot &snap,bool fresh) {
@@ -201,7 +204,7 @@ public:
         return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
     }
     RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track,
-                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false) {
+                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false) {
         now=time;
         RacePlan p;
         p.detectionAge=snap.sequence?time-snap.captured:-1;
@@ -217,7 +220,7 @@ public:
         p.geometryReason=geometry.geometryReason;
         if(active!=lastActive) {
             // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
-            if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0; }
+            if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0;routeArmed=false; }
             counts.fill(0); confirmed.fill(false); lastActive=active;
         }
         if(!active) { p.state="MANUAL"; p.reason="MANUAL"; return p; }
@@ -244,7 +247,7 @@ public:
         if(state==State::ReviewStop||state==State::Fault) {
             p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; return p;
         }
-        if(state==State::Lane&&newFrame&&near(LABEL_STOP,cfg.triggerRow)) {
+        if(state!=State::CrossApproach&&state!=State::SignalWait&&newFrame&&near(LABEL_STOP,cfg.triggerRow)) {
             crossBottomSeen=false; lastCrossSeen=now;
             enter(cfg.stopAfterCross?State::CrossApproach:State::SignalWait);
         }
@@ -285,6 +288,8 @@ public:
             }
         }
         if(gateWaiting||hazardWaiting) {
+            if(seekSince>=0)seekSince+=dt;
+            if(state==State::ForkArmed||state==State::ForkSelect){stateSince+=dt;directionUntil+=dt;}
             // 高优先级停车叠加在当前任务之上，不丢失信号灯等待等低优先级义务。
             // 停车期间不累计穿越/选路动作时间。
             stateSince+=dt; splitTime=exitTime=0;
@@ -317,36 +322,83 @@ public:
             }
             return p;
         }
+        const bool leftSign=seen(LABEL_YLEFT)||seen(LABEL_LEFT),rightSign=seen(LABEL_YRIGHT);
+        if(routeArmed&&routeDirection&&routeDirection!=direction&&(state==State::ForkArmed||state==State::ForkSelect)) {
+            enter(State::Lane);routeArmed=false;
+        }
         if(state==State::Lane&&now>=cooldownUntil&&newFrame) {
-            if(seen(LABEL_YLEFT)&&seen(LABEL_YRIGHT)) { direction=0; }
-            else if(seen(LABEL_YLEFT)||seen(LABEL_YRIGHT)) {
-                direction=seen(LABEL_YLEFT)?-1:1;
+            if(routeDirection!=0&&(geometry.splitRows>=cfg.minBranchRows||
+                (confirmedRouteSign&&routeDirection==-1)||
+                (routeDirection==-1&&leftSign&&!rightSign)||(routeDirection==1&&rightSign&&!leftSign))) {
+                direction=routeDirection;routeArmed=true;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
+            }
+            else if(routeDirection!=0) {}
+            else if(seen(LABEL_FLOW)&&geometry.splitRows>=cfg.minBranchRows) {
+                direction=2;routeArmed=false;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
+            }
+            else if(leftSign&&rightSign) { direction=0; }
+            else if(leftSign||rightSign) {
+                direction=leftSign?-1:1;routeArmed=false;
                 directionUntil=now+cfg.directionMemory; enter(State::ForkArmed);
             }
         }
         if(state==State::ForkArmed) {
+            if(direction==-1||direction==1) {
+                p.guideDirection=direction;
+                // Elevated field signs disappear with box bottoms at rows
+                // 31..103, never reaching the old ground-object row145 gate.
+                // Confirmed sign direction itself starts the road search.
+                if(seekSince<0)seekSince=now;
+                p.guidePwm=180+100*std::clamp(float((now-seekSince)/.6),0.f,1.f);
+            }
             p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
             p.state="FORK_ARMED"; p.reason=direction<0?"WAIT_LEFT_SPLIT":"WAIT_RIGHT_SPLIT";
-            if(newFrame&&seen(LABEL_YLEFT)&&seen(LABEL_YRIGHT)) {
+            if(!routeArmed&&newFrame&&leftSign&&rightSign) {
                 enter(State::Fault); reviewReason="CONFLICTING_DIRECTIONS";
-            } else if(newFrame&&((direction<0&&seen(LABEL_YRIGHT))||(direction>0&&seen(LABEL_YLEFT)))) {
+            } else if(!routeArmed&&newFrame&&((direction<0&&rightSign)||(direction==1&&leftSign))) {
                 enter(State::Fault); reviewReason="DIRECTION_CHANGED_BEFORE_SPLIT";
             } else {
                 // Fresh same-direction observations renew memory, not the total approach budget.
-                if(newFrame&&seen(direction<0?LABEL_YLEFT:LABEL_YRIGHT))directionUntil=now+cfg.directionMemory;
+                if(newFrame&&((routeArmed&&routeDirection==direction)||(direction<0?leftSign:rightSign)))directionUntil=now+cfg.directionMemory;
                 if(now-stateSince>cfg.directionMemory+cfg.forkMaxTime) {
                     enter(State::Fault);reviewReason="FORK_NOT_CONFIRMED_TIMEOUT";
-                } else if(now>directionUntil) {
+                } else if(seekSince<0&&now>directionUntil) {
                     enter(State::Fault);reviewReason="DIRECTION_MEMORY_EXPIRED";
                 } else if(geometry.splitRows>=cfg.minBranchRows) {
                     splitTime+=dt;
                     if(splitTime>=cfg.forkConfirmTime) { enter(State::ForkSelect); p.buzzer=true; }
-                } else splitTime=0;
+                } else {
+                    splitTime=0;
+                    if(direction==-1||direction==1) {
+                        if(seekSince>=0) {
+                            const double elapsed=now-seekSince;
+                            p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
+                            p.reason="SIGN_GUIDED_ROAD_REACQUIRE";
+                            p.guidePwm=180+100*std::clamp(float(elapsed/.6),0.f,1.f);
+                            // Acquire only a CURRENT connected corridor pointing
+                            // in the committed direction, not the opposite road.
+                            bool acquired=false;
+                            if(geometry.left.size()>=20&&geometry.right.size()==geometry.left.size()) {
+                                const size_t k=std::min<size_t>(8,geometry.left.size()/4);
+                                float nearCenter=0,farCenter=0;
+                                for(size_t i=0;i<k;++i) {
+                                    nearCenter+=(geometry.left[i].y+geometry.right[i].y)*.5f/k;
+                                    const auto j=geometry.left.size()-1-i;
+                                    farCenter+=(geometry.left[j].y+geometry.right[j].y)*.5f/k;
+                                }
+                                acquired=elapsed>=.25&&direction*(farCenter-nearCenter)>20&&direction*(farCenter-160)>10;
+                            }
+                            if(acquired) {enter(State::ForkSelect);p.buzzer=true;}
+                            else if(elapsed>=cfg.forkMaxTime) {enter(State::Fault);reviewReason="SIGNED_ROAD_REACQUIRE_TIMEOUT";}
+                        }
+                    }
+                }
             }
         }
         if(state==State::ForkSelect) {
+            p.guideDirection=direction==2?0:direction;p.guidePwm=0;
             p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
-            p.state=direction<0?"FORK_LEFT":"FORK_RIGHT"; p.reason="CONNECTED_BRANCH";
+            p.state=direction<0?"FORK_LEFT":direction==2?"FORK_STRAIGHT":"FORK_RIGHT"; p.reason=routeArmed?"MISSION_CONNECTED_BRANCH":"CONNECTED_BRANCH";
             p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions); p.selectedBranch=true;
             if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
             else if(now-stateSince>cfg.forkMaxTime) { enter(State::Fault); reviewReason="FORK_TIMEOUT"; }
@@ -355,16 +407,25 @@ public:
                 if(exitTime>=cfg.forkExitTime) {
                     enter(State::Lane); cooldownUntil=now+cfg.cooldown;
                     p.selectedBranch=false; p.path={};
+                    p.guideDirection=0;
                 }
             } else exitTime=0;
         }
         if(state==State::Lane) {
             p.state=limited?"LIMIT_ZONE":"LANE"; p.reason=limited?"LIMIT_SIGN":"CRUISE";
-            if(geometry.splitRows>=cfg.minBranchRows&&now>=cooldownUntil) {
+            if(geometry.splitRows>=cfg.minBranchRows&&now>=cooldownUntil&&!continueGeometry) {
                 p.stop=true; p.state="FORK_WAIT"; p.reason="NO_CONFIRMED_DIRECTION";
             }
         }
-        if(state==State::Fault) { p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; }
+        if(state==State::Fault&&continueGeometry&&(reviewReason=="BRANCH_PATH_LOST"||reviewReason=="FORK_TIMEOUT"||
+           reviewReason=="SIGNED_ROAD_REACQUIRE_TIMEOUT"||reviewReason=="FORK_NOT_CONFIRMED_TIMEOUT")) {
+            // Painted geometry warnings must not latch the competition run.
+            // Seek the committed side again, then reacquire current road edges.
+            enter(State::ForkArmed);seekSince=now;
+            p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
+            p.guidePwm=p.guideDirection?180:0;p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
+        }
+        else if(state==State::Fault) { p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; }
         return p;
     }
 };
