@@ -620,7 +620,7 @@ int raceVehicleMain(int argc,char **argv) {
                 job.context={{"race_frame",raceFrame},{"ai_frame",observation.sequence},
                     {"ai_captured_s",observation.captured},{"control_time_s",observationTime},
                     {"state",racePlan.state},{"reason",racePlan.reason},{"selected_branch",racePlan.selectedBranch},
-                    {"guide_direction",racePlan.guideDirection},{"guide_pwm",racePlan.guidePwm},
+                    {"guide_direction",racePlan.guideDirection},{"guide_pwm",racePlan.guidePwm},{"lane_blend",racePlan.laneBlend},
                     {"geometry_split_rows",racePlan.geometrySplitRows},{"geometry_reason",racePlan.geometryReason},
                     {"road_surface",config.roadSurface},{"speed_command",speed},{"pwm",servo},
                     {"lane_image_binding","current control frame; camera.png is asynchronous AI frame"}};

@@ -88,6 +88,65 @@ int main(int argc,char **argv){try{
     require(mission.routeDirection()==2&&!mission.exitArrowTurnAuthorized(),"Second lap reuses parking exit arrow");
     std::cout<<"PASS exit-only ground arrow; duplicate/stale rejection; no-road left seek; second-lap isolation\n";
 
+    // Strong signed guidance must hand over gradually, then permit correction
+    // in either direction once the target-road pilot owns the steering.
+    {RacePlan p;p.fresh=true;p.guideDirection=-1;p.guidePwm=320;p.selectedBranch=true;
+     p.laneBlend=0;require(raceDirectionServo(p,1600)==1180,"Handoff drops initial strong guidance");
+     p.laneBlend=.5;require(raceDirectionServo(p,1600)==1390,"Handoff is not blended");
+     p.laneBlend=1;require(raceDirectionServo(p,1600)==1600,"Left commitment blocks rightward centering correction");
+     p.guideDirection=1;p.laneBlend=0;require(raceDirectionServo(p,1400)==1820,"Right guidance not mirrored");
+     p.laneBlend=1;require(raceDirectionServo(p,1400)==1400,"Right commitment blocks leftward centering correction");}
+    cv::Mat split=binary.clone();cv::rectangle(split,{260,0,120,300},{0},-1);
+    {auto weak=config;weak.minBranchRows=1000;
+     const auto locked=raceBranchPath(split,track,-1,weak,{},true);
+     const auto row=std::find_if(locked.right.begin(),locked.right.end(),[](auto p){return p.x>=198&&p.x<=202;});
+     require(row!=locked.right.end()&&row->y<260,"Committed left road replaced by closer right road when distant split is unconfirmed");}
+    auto curve=[&](int farCenter){cv::Mat b=cv::Mat::zeros(480,640,CV_8UC1);
+        const std::vector<cv::Point> polygon{{80,479},{560,479},{std::min(639,farCenter+100),0},{std::max(0,farCenter-100),0}};
+        cv::fillPoly(b,std::vector<std::vector<cv::Point>>{polygon},{255});return b;};
+    {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;double t=0;uint64_t sequence=0;
+     auto step=[&](const cv::Mat &b){t+=.07;snapshot.sequence=++sequence;snapshot.captured=t;
+         return manager.update(snapshot,t,.07,true,b,track,{},false,true,-1,true,true);};
+     for(int i=0;i<5;++i)p=step(binary);
+     require(raceDirectionSeeking(p)&&raceDirectionServo(p,1500)<=1200,"No-road left guidance is still weak");
+     for(int i=0;i<2;++i){p=step(split);require(!p.selectedBranch,"One glimpse prematurely takes over steering");}
+     p=step(split);require(p.selectedBranch&&p.laneBlend==0&&raceDirectionServo(p,1500)<1200,"Initial target-road takeover snaps steering straight");
+     float previousBlend=0;
+     for(int i=0;i<12;++i){p=step(split);require(p.selectedBranch&&p.laneBlend>=previousBlend,"Target handoff is not continuous");previousBlend=p.laneBlend;}
+     require(p.laneBlend==1,"Target-road pilot never gets full steering control");
+     for(int center:{200,230,260,290,320})p=step(curve(center));
+     for(int i=0;i<16;++i)p=step(binary);
+     require(!p.selectedBranch&&std::string(p.state)=="LANE"&&!p.stop,"Aligned turn cannot finish and rejoin normal lane");}
+    {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;
+     for(int i=1;i<=16;++i){snapshot.sequence=i;snapshot.captured=i*.07;
+        p=manager.update(snapshot,snapshot.captured,.07,true,curve(490),track,{},false,true,-1,true,true);
+        require(!p.selectedBranch,"Visible opposite corridor was accepted as the left target");}
+     require(raceDirectionSeeking(p)&&!p.stop,"Opposite-road rejection stops instead of keeping signed turn");}
+    {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;int i=0;
+     for(int center:{320,200,260,320}){snapshot.sequence=++i;snapshot.captured=i*.07;
+        p=manager.update(snapshot,snapshot.captured,.07,true,curve(center),track,{},false,true,-1,true,true);}
+     require(p.selectedBranch,"Target road centering during acquisition is mistaken for a missing left road");}
+    {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;
+     for(int i=1;i<=8;++i){snapshot.sequence=i;snapshot.captured=i*.07;
+        p=manager.update(snapshot,snapshot.captured,.07,true,split,track,{},false,true,1,true);}
+     require(p.selectedBranch&&p.guideDirection==1,"Right fork cannot acquire its mirrored target road");
+     const auto row=std::find_if(p.path.left.begin(),p.path.left.end(),[](auto q){return q.x>=198&&q.x<=202;});
+     require(row!=p.path.left.end()&&row->y>=380,"Right target path is on the left branch");}
+    {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;
+     for(int i=1;i<=8;++i){snapshot.sequence=i;snapshot.captured=i*.07;
+        p=manager.update(snapshot,snapshot.captured,.07,true,split,track,{},false,true,-1,false,true);}
+     require(p.selectedBranch,"Left target not acquired before disappearance check");
+     snapshot.sequence=9;snapshot.captured=.63;
+     p=manager.update(snapshot,.63,.07,true,curve(490),track,{},false,true,-1,false,true);
+     require(!p.stop&&raceDirectionSeeking(p)&&p.guideDirection==-1,"Lost target latches stop or takes over the opposite road");
+     p=manager.update(snapshot,1.2,.07,true,binary,track);
+     require(p.stop&&!raceDirectionSeeking(p),"Strong guidance ignores stale AI stop");}
+    {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;
+     for(int i=1;i<=8;++i){snapshot.sequence=i;snapshot.captured=i*.07;
+        p=manager.update(snapshot,snapshot.captured,.07,true,split,track,{},false,true,2,true);}
+     require(p.selectedBranch&&p.guideDirection==0&&p.laneBlend==1,"Straight branch unexpectedly receives turning bias");}
+    std::cout<<"PASS strong signed turn; continuous target acquisition; gradual steering handoff; opposite-road rejection; mirrored right turn; aligned exit\n";
+
     RaceParkingDimensions dimensions;RaceParkingSpace space(dimensions);auto route=racePlanTrackableParking(space,{0,-.4f,0});require(route.valid,"No metric entry route");
     RaceParkingControl parking(space);RaceParkingObservation observation{route.entry.front(),1,1,1,true};require(parking.arm(route,observation,1,true),"Cannot arm parking model");
     double time=1,dwell=-1,reverse=-1;RaceParkingCommand command;

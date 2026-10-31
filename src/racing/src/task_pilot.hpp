@@ -46,6 +46,11 @@ template<class Plan>inline bool raceDirectionSeeking(const Plan &p){return !p.st
 template<class Plan>inline float raceDirectionSpeed(const Plan &p,RaceTaskPilot &pilot,float cruise,float dt,float previous){return raceDirectionSeeking(p)?pilot.speedForDirection(std::min(cruise,p.speedCap),dt,previous):0;}
 template<class Plan>inline uint16_t raceDirectionServo(const Plan &p,uint16_t laneServo){
     if(p.stop||!p.fresh||!p.guideDirection)return laneServo;
+    if(p.selectedBranch){
+        const float blend=std::clamp(p.laneBlend,0.f,1.f);
+        const float guided=PWMSERVOMID+p.guideDirection*p.guidePwm;
+        return uint16_t(std::lround(std::clamp(guided*(1-blend)+laneServo*blend,float(PWMSERVOMIN),float(PWMSERVOMAX))));
+    }
     const float directed=p.guideDirection*(float(laneServo)-PWMSERVOMID);
     return uint16_t(std::clamp(PWMSERVOMID+p.guideDirection*std::max(directed,p.guidePwm),float(PWMSERVOMIN),float(PWMSERVOMAX)));
 }

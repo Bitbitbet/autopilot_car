@@ -64,7 +64,7 @@ inline std::vector<std::pair<int,int>> raceRoadBlocks(const cv::Mat &bin,int row
 // 都不满足道路分隔带连续的条件。判断使用本帧像素，AI 漏检时也不沿用旧框。
 // 此函数只返回可见几何。方向引导由 RaceManager 单独标记，不伪装成已看见支路。
 inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int direction,const RaceConfig &cfg,
-                               const std::vector<cv::Rect> &signRegions={}) {
+                               const std::vector<cv::Rect> &signRegions={},bool committed=false) {
     RacePath out;
     if(bin.empty()||bin.type()!=CV_8UC1||bin.rows!=480||bin.cols!=640||
        track.pointsEdgeLeft.empty()||track.pointsEdgeRight.empty()) return out;
@@ -129,7 +129,9 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
             return std::abs(a.first+a.second-low-high)<std::abs(b.first+b.second-low-high);
         });
         const bool fork=out.splitRows>=cfg.minBranchRows&&r.number<=forkStart;
-        if(fork&&direction&&direction!=2) best=direction<0?blocks.begin():blocks.end()-1;
+        // Once a sign commits the turn, keep the connected target side even
+        // when the distant divider no longer passes the full split test.
+        if((fork||committed)&&direction&&direction!=2) best=direction<0?blocks.begin():blocks.end()-1;
         low=(!direction)?blocks.front().first:best->first;
         high=(!direction)?blocks.back().second:best->second;
         out.left.emplace_back(r.number,low); out.right.emplace_back(r.number,high);
@@ -143,6 +145,7 @@ struct RacePlan {
     bool selectedBranch=false;
     int guideDirection=0;
     float guidePwm=0;
+    float laneBlend=1; // 0: sign guidance; 1: selected-road pilot, including countersteer.
     int colorRejectedComponents=0,geometrySplitRows=0;
     const char *geometryReason="INVALID_ROAD_INPUT";
     double detectionAge=-1;
@@ -164,11 +167,25 @@ class RaceManager {
     bool hazardConeWaiting=false;
     int direction=0;bool routeArmed=false;
     double seekSince=-1;
+    float targetVisibleTime=0,handoffTime=0,alignedTime=0,handoffPwm=300;
+    float targetCenter=std::numeric_limits<float>::quiet_NaN();
     enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
     State state=State::Lane;
     const char *reviewReason="REVIEW_REQUIRED";
     PredictResult gateBox{};
-    void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0;seekSince=-1; }
+    void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0;seekSince=-1;
+        targetVisibleTime=handoffTime=alignedTime=0;targetCenter=std::numeric_limits<float>::quiet_NaN(); }
+    static float guidancePwm(double elapsed) {return 300+40*std::clamp(float(elapsed/.35),0.f,1.f);}
+    static bool corridorCenters(const RacePath &path,float &nearCenter,float &farCenter,float &heading) {
+        if(path.left.size()<20||path.right.size()!=path.left.size())return false;
+        nearCenter=farCenter=heading=0;constexpr size_t samples=8;
+        for(size_t i=0;i<samples;++i) {
+            const auto center=[&](size_t j){return (path.left[j].y+path.right[j].y)*.5f;};
+            nearCenter+=center(i)/samples;farCenter+=center(path.left.size()-1-i)/samples;
+            heading+=center(i+samples)/samples;
+        }
+        heading-=nearCenter;return true;
+    }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label,int row) const { return seen(label)&&boxes[label].y+boxes[label].height>=row; }
     bool updateObservation(const RaceSnapshot &snap,bool fresh) {
@@ -350,7 +367,7 @@ public:
                 // 31..103, never reaching the old ground-object row145 gate.
                 // Confirmed sign direction itself starts the road search.
                 if(seekSince<0)seekSince=now;
-                p.guidePwm=180+100*std::clamp(float((now-seekSince)/.6),0.f,1.f);
+                p.guidePwm=guidancePwm(now-seekSince);p.laneBlend=0;
             }
             p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
             p.state="FORK_ARMED"; p.reason=direction<0?"WAIT_LEFT_SPLIT":"WAIT_RIGHT_SPLIT";
@@ -365,33 +382,33 @@ public:
                     enter(State::Fault);reviewReason="FORK_NOT_CONFIRMED_TIMEOUT";
                 } else if(seekSince<0&&now>directionUntil) {
                     enter(State::Fault);reviewReason="DIRECTION_MEMORY_EXPIRED";
-                } else if(geometry.splitRows>=cfg.minBranchRows) {
+                } else if(direction==2&&geometry.splitRows>=cfg.minBranchRows) {
                     splitTime+=dt;
                     if(splitTime>=cfg.forkConfirmTime) { enter(State::ForkSelect); p.buzzer=true; }
                 } else {
                     splitTime=0;
-                    if(direction==-1||direction==1) {
-                        if(seekSince>=0) {
-                            const double elapsed=now-seekSince;
-                            p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
-                            p.reason="SIGN_GUIDED_ROAD_REACQUIRE";
-                            p.guidePwm=180+100*std::clamp(float(elapsed/.6),0.f,1.f);
-                            // Acquire only a CURRENT connected corridor pointing
-                            // in the committed direction, not the opposite road.
-                            bool acquired=false;
-                            if(geometry.left.size()>=20&&geometry.right.size()==geometry.left.size()) {
-                                const size_t k=std::min<size_t>(8,geometry.left.size()/4);
-                                float nearCenter=0,farCenter=0;
-                                for(size_t i=0;i<k;++i) {
-                                    nearCenter+=(geometry.left[i].y+geometry.right[i].y)*.5f/k;
-                                    const auto j=geometry.left.size()-1-i;
-                                    farCenter+=(geometry.left[j].y+geometry.right[j].y)*.5f/k;
-                                }
-                                acquired=elapsed>=.25&&direction*(farCenter-nearCenter)>40&&direction*(farCenter-320)>20;
-                            }
-                            if(acquired) {enter(State::ForkSelect);p.buzzer=true;}
-                            else if(elapsed>=cfg.forkMaxTime) {enter(State::Fault);reviewReason="SIGNED_ROAD_REACQUIRE_TIMEOUT";}
-                        }
+                    if((direction==-1||direction==1)&&seekSince>=0) {
+                        const double elapsed=now-seekSince;
+                        p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
+                        p.reason="STRONG_SIGN_GUIDANCE_FIND_TARGET_ROAD";
+                        p.guidePwm=guidancePwm(elapsed);p.laneBlend=0;
+                        const auto candidate=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true);
+                        float nearCenter=0,farCenter=0,heading=0,unionNear=0,unionFar=0,unionHeading=0;
+                        const bool visible=corridorCenters(candidate,nearCenter,farCenter,heading);
+                        const bool splitTarget=geometry.splitRows>=cfg.minBranchRows&&
+                            corridorCenters(geometry,unionNear,unionFar,unionHeading)&&direction*(farCenter-unionFar)>24;
+                        const bool sameTarget=visible&&targetVisibleTime>0&&std::isfinite(targetCenter)&&
+                            std::abs(farCenter-targetCenter)<80;
+                        const bool target=visible&&(splitTarget||sameTarget||
+                            (direction*(farCenter-nearCenter)>40&&direction*(farCenter-320)>20));
+                        // One visible patch must not cancel the strong turn.
+                        // Confirm a continuous connected target, never the opposite corridor.
+                        if(target&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<80))targetVisibleTime+=dt;
+                        else targetVisibleTime=0;
+                        targetCenter=target?farCenter:std::numeric_limits<float>::quiet_NaN();
+                        if(targetVisibleTime>=std::max(.18f,cfg.forkConfirmTime)) {
+                            const float guide=p.guidePwm;enter(State::ForkSelect);handoffPwm=guide;p.buzzer=true;
+                        } else if(elapsed>=cfg.forkMaxTime) {enter(State::Fault);reviewReason="SIGNED_ROAD_REACQUIRE_TIMEOUT";}
                     }
                 }
             }
@@ -400,10 +417,30 @@ public:
             p.guideDirection=direction==2?0:direction;p.guidePwm=0;
             p.speedCap=std::min(p.speedCap,cfg.forkSpeed);
             p.state=direction<0?"FORK_LEFT":direction==2?"FORK_STRAIGHT":"FORK_RIGHT"; p.reason=routeArmed?"MISSION_CONNECTED_BRANCH":"CONNECTED_BRANCH";
-            p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions); p.selectedBranch=true;
+            p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true); p.selectedBranch=true;
+            bool aligned=direction==2;
+            if(direction!=2) {
+                float nearCenter=0,farCenter=0,heading=0;
+                const bool visible=corridorCenters(p.path,nearCenter,farCenter,heading);
+                const bool continuous=visible&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<96);
+                p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/.65f,0.f,1.f);
+                if(continuous){handoffTime+=dt;targetCenter=farCenter;}
+                else {
+                    // Do not feed an abruptly substituted opposite road to the
+                    // pilot. Continue the signed turn instead of latching stop.
+                    enter(State::ForkArmed);seekSince=now;
+                    p.selectedBranch=false;p.path={};p.laneBlend=0;p.guidePwm=guidancePwm(0);
+                    p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
+                    p.reason="TARGET_ROAD_LOST_KEEP_SIGN_GUIDANCE";return p;
+                }
+                if(continuous&&p.laneBlend>=1&&std::abs(nearCenter-320)<80&&std::abs(heading)<32)alignedTime+=dt;
+                else alignedTime=0;
+                aligned=alignedTime>=.18f;
+                if(continuous)p.reason=p.laneBlend<1?"TARGET_ROAD_GRADUAL_HANDOFF":"COMMITTED_ROAD_CENTER_TRACKING";
+            }
             if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
             else if(now-stateSince>cfg.forkMaxTime) { enter(State::Fault); reviewReason="FORK_TIMEOUT"; }
-            else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0) {
+            else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0&&aligned) {
                 exitTime+=dt;
                 if(exitTime>=cfg.forkExitTime) {
                     enter(State::Lane); cooldownUntil=now+cfg.cooldown;
@@ -425,7 +462,8 @@ public:
             // Seek the committed side again, then reacquire current road edges.
             enter(State::ForkArmed);seekSince=now;
             p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
-            p.guidePwm=p.guideDirection?180:0;p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
+            p.guidePwm=p.guideDirection?guidancePwm(0):0;p.laneBlend=p.guideDirection?0:1;
+            p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
         }
         else if(state==State::Fault) { p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; }
         return p;
