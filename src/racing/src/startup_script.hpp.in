@@ -1,0 +1,4 @@
+#pragma once
+inline constexpr const char *raceStartupScript=R"RACE_STARTUP_PY(
+@RACE_STARTUP_PYTHON@
+)RACE_STARTUP_PY";

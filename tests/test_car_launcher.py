@@ -23,7 +23,22 @@ class UnifiedCarLauncher(unittest.TestCase):
         self.repo=Path(__file__).parents[1];(self.repo/'.cache').mkdir(exist_ok=True)
         self.temp=tempfile.TemporaryDirectory(dir=self.repo/'.cache');self.root=Path(self.temp.name)
         shutil.copy2(self.repo/'tools/run_car.sh',self.root/'run_car.sh')
-        binary=self.root/'trackview_race';binary.write_text('#!/usr/bin/env python3\nimport json,sys\nopen("invoked.json","w").write(json.dumps(sys.argv[1:]))\n');binary.chmod(0o755)
+        # The shell now delegates preparation to the native frontend. This
+        # stand-in exercises that exact shared embedded-Python implementation
+        # while replacing only camera/AI/motor execution.
+        binary=self.root/'trackview_race';binary.write_text('''#!/usr/bin/env python3
+import json,sys,subprocess,time
+from pathlib import Path
+arguments=sys.argv[1:]
+if arguments[:1]==['--launch']:
+    mode,profile,surface=arguments[1:]
+    Path('run-records').mkdir(exist_ok=True)
+    prefix='./run-records/test-'+str(time.time_ns())+'-'+profile
+    result=subprocess.run([sys.executable,@STARTUP@,mode,profile,prefix,surface,Path(sys.argv[0]).name])
+    if result.returncode:sys.exit(result.returncode)
+    arguments=json.loads(Path(prefix+'-launch.json').read_text())['command'][1:]
+Path('invoked.json').write_text(json.dumps(arguments))
+'''.replace('@STARTUP@',repr(str(self.repo/'tools/race_startup.py'))));binary.chmod(0o755)
         (self.root/'librace_npu_backend.so').write_bytes(b'mock paired backend')
         files={n:hashlib.sha256((self.root/n).read_bytes()).hexdigest() for n in ['trackview_race','librace_npu_backend.so']}
         (self.root/'release-manifest.json').write_text(json.dumps({'files':files}))

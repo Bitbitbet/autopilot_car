@@ -1,2 +1,2 @@
-int raceVehicleMain(int,char**);
-int main(int argc,char **argv){return raceVehicleMain(argc,argv);}
+#include "startup.hpp"
+int main(int argc,char **argv){return raceLaunchMain(argc,argv);}
