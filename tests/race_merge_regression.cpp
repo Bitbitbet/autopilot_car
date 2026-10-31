@@ -38,9 +38,15 @@ int main(){try{
         time+=.08;observation.captured=time;++observation.sequence;command=control.update(observation,time,.08f,true);
         found=!space.parkedObserved(observation.pose);}
     check(found,"No near-boundary drift case");
-    check(!control.failed()&&command.speed==0&&std::string(command.reason)=="WAIT_DWELL_POSE_SETTLE","Single jitter frame faults parked vehicle");
+    check(!control.failed()&&command.speed==0&&std::string(command.state)=="PARK_DWELL"&&control.terminalRecoveryUsed(),
+          "Dwell jitter must latch recovery, keep stopped and never restart forward entry");
     observation.pose=lastInside;
     for(int i=0;i<25;++i){time+=.08;observation.captured=time;++observation.sequence;command=control.update(observation,time,.08f,true);
         check(!control.failed()&&command.speed==0&&std::string(command.state)=="PARK_DWELL","Jitter counted toward completed dwell");}
+    bool exit=false;
+    for(int i=0;i<25;++i){time+=.08;observation.captured=time;++observation.sequence;command=control.update(observation,time,.08f,true);
+        check(!control.failed()&&command.speed<=0,"Recovery after dwell drives forward or faults");
+        if(std::string(command.state)=="PARK_EXIT"){exit=true;break;}}
+    check(exit&&control.terminalRecoveryUsed(),"Three stationary seconds must lead to reverse with recovery still reported");
     std::cout<<"PASS 640 capture normalization, aspect rejection, GUI latest-only/throttle, OpenCV worker limit, FPS-independent reverse samples and dwell observation margin\n";
 }catch(const std::exception &e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}

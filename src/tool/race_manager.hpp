@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string_view>
 
 struct RacePath {
     std::vector<PointX> left,right;
@@ -417,8 +418,9 @@ public:
                 p.stop=true; p.state="FORK_WAIT"; p.reason="NO_CONFIRMED_DIRECTION";
             }
         }
-        if(state==State::Fault&&continueGeometry&&(reviewReason=="BRANCH_PATH_LOST"||reviewReason=="FORK_TIMEOUT"||
-           reviewReason=="SIGNED_ROAD_REACQUIRE_TIMEOUT"||reviewReason=="FORK_NOT_CONFIRMED_TIMEOUT")) {
+        const std::string_view failureReason=reviewReason;
+        if(state==State::Fault&&continueGeometry&&(failureReason=="BRANCH_PATH_LOST"||failureReason=="FORK_TIMEOUT"||
+           failureReason=="SIGNED_ROAD_REACQUIRE_TIMEOUT"||failureReason=="FORK_NOT_CONFIRMED_TIMEOUT")) {
             // Painted geometry warnings must not latch the competition run.
             // Seek the committed side again, then reacquire current road edges.
             enter(State::ForkArmed);seekSince=now;
