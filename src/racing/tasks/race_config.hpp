@@ -56,7 +56,7 @@ struct RaceConfig {
         if(!in) throw std::runtime_error("Cannot read race config: "+path);
         nlohmann::json j; in>>j;
         if(!j.is_object()) throw std::invalid_argument("Race config must be an object");
-        
+
         const int reference=j.value("imageWidth",320);
         if(j.value("imageHeight",reference*3/4)!=reference*3/4)throw std::invalid_argument("Pixel reference must be 4:3");
         if(reference!=320&&reference!=640)throw std::invalid_argument("Unsupported race pixel reference");
