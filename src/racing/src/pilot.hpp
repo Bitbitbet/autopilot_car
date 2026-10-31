@@ -11,8 +11,8 @@
 
 // 主循环与 HUD 也用到的三个速度参数；其余调参都在 pilot.cpp 顶部。
 namespace cfg {
-constexpr float CRUISE_SPEED = 1.0f; // 默认巡航
-constexpr float MAX_SPEED = 1.50f;   // 上限
+constexpr float CRUISE_SPEED = 0.10f; // 固定入口初始巡航
+constexpr float MAX_SPEED = 10.0f;   // 沿用可调上限
 constexpr float MIN_SPEED = 0.05f;
 } // namespace cfg
 
@@ -42,6 +42,7 @@ class AutoPilot {
     double missingTime = 0, qualityGoodTime = 0;
     bool qualityRestricted = false, degraded = false, hadPath = false;
     WeightMode weightMode = WeightMode::FarFull;
+    float runP1=1.10f,runP2=.00175f,turnD=1.75f,maxFrameGap=.25f;
 
     float weightOf(int row) const;
     float qualitySpeedLimit() const;
@@ -57,6 +58,7 @@ class AutoPilot {
 
   public:
     explicit AutoPilot(int frameCols, int frameRows);
+    void configure(float curve,float quality,float p1,float p2,float derivative,float gap){curveLimit=curve;qualityLimit=quality;runP1=p1;runP2=p2;turnD=derivative;maxFrameGap=gap;}
 
     // 每帧识别后调用。rows 为空、点数不足或帧间隔异常时判定不可信。
     // 哪一边更平滑由自己判断：两边都好取中点，只有一边好就用它加减半个路宽。

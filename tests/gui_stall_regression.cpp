@@ -34,12 +34,12 @@ int main() {
     });
     std::jthread control([&] {
         TrackviewConfig cfg;
-        AutoPilot pilot(cfg);
+        RaceTaskPilot pilot(cfg);
         std::vector<PointX> left,right;
-        for(int row=219;row>=30;row-=2) {
-            left.emplace_back(row,70); right.emplace_back(row,250);
+        for(int row=438;row>=60;row-=4) {
+            left.emplace_back(row,140); right.emplace_back(row,500);
         }
-        cv::Mat image(240,320,CV_8UC3,cv::Scalar(0)), bin(240,320,CV_8UC1,cv::Scalar(0));
+        cv::Mat image(480,640,CV_8UC3,cv::Scalar(0)), bin(480,640,CV_8UC1,cv::Scalar(0));
         try {
             while(!stop) {
                 if(cameraStall.exchange(false)) std::this_thread::sleep_for(400ms);

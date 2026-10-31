@@ -7,21 +7,22 @@
 #include <string>
 
 struct TrackviewConfig {
+    int imageWidth=640,imageHeight=480;
     float cruiseSpeed = 0.25f, maxSpeed = 10.0f, minSpeed = 0.05f;
     float curveSpeed = 0.15f, degradedSpeed = 0.12f, acceleration = 0.30f;
     float deceleration = 0.60f, qualityDeceleration = 1.20f;
     float curveStart = 0.20f, qualityRecoverTime = 0.30f;
-    int curveLookaheadRow = 10;
+    int curveLookaheadRow = 20;
     float maxSingleFraction = 0.35f;
-    float runP1 = 2.2f, runP2 = 0.007f, turnD = 3.5f;
+    float runP1 = 1.1f, runP2 = 0.00175f, turnD = 1.75f;
     float referenceDt = 1.f / 30.f, derivativeFilter = 0.08f;
-    float maxErrorRate = 960.f, highSpeedGain = 1.f;
+    float maxErrorRate = 1920.f, highSpeedGain = 1.f;
     float lostTimeout = 0.20f, recoverTime = 0.25f, maxFrameGap = 0.25f;
     // 为兼容旧 JSON 保留 widthLifetime，仅用于诊断中提示记录过旧，
     // 不使固定相机的宽度记录自动过期；观测冲突时仍需重新验证。
     float widthAlpha = 0.1f, widthLifetime = 15.f;
-    int borderMargin = 3, minPoints = 8, minSpan = 30;
-    int minWidth = 30, maxWidth = 300, rowCutUp = 10, rowCutBottom = 20;
+    int borderMargin = 6, minPoints = 8, minSpan = 60;
+    int minWidth = 60, maxWidth = 600, rowCutUp = 20, rowCutBottom = 40;
     int commandTimeoutMs = 250, binary = -1;
     bool diagnostics = true;
     std::string roadSurface = "white";
@@ -29,7 +30,7 @@ struct TrackviewConfig {
 
     void validate() const {
         auto positive = [](float x) { return std::isfinite(x) && x > 0; };
-        if (!positive(cruiseSpeed) || !positive(maxSpeed) || maxSpeed > 10.f ||
+        if (imageWidth!=640 || imageHeight!=480 || !positive(cruiseSpeed) || !positive(maxSpeed) || maxSpeed > 10.f ||
             !positive(minSpeed) || minSpeed > cruiseSpeed || cruiseSpeed > maxSpeed ||
             !positive(curveSpeed) || curveSpeed > maxSpeed ||
             !positive(degradedSpeed) || degradedSpeed > maxSpeed ||
@@ -39,7 +40,7 @@ struct TrackviewConfig {
             !positive(qualityDeceleration) || qualityDeceleration > 5 ||
             !std::isfinite(curveStart) || curveStart < 0 || curveStart >= 0.95f ||
             !std::isfinite(qualityRecoverTime) || qualityRecoverTime < 0 || qualityRecoverTime > 5 ||
-            curveLookaheadRow < 0 || curveLookaheadRow > 200 ||
+            curveLookaheadRow < 0 || curveLookaheadRow > 400 ||
             !std::isfinite(runP2) || runP2 < 0 || runP2 > 1 ||
             !std::isfinite(turnD) || turnD < 0 || turnD > 30 ||
             !positive(referenceDt) || referenceDt > 0.1f ||
@@ -50,9 +51,9 @@ struct TrackviewConfig {
             !positive(maxFrameGap) || maxFrameGap > 1 ||
             !positive(widthAlpha) || widthAlpha > 1 || !positive(widthLifetime) || widthLifetime > 60 ||
             borderMargin < 1 || borderMargin > 20 || minPoints < 5 || minPoints > 100 ||
-            minSpan < 10 || minSpan > 200 || minWidth < 10 ||
-            maxWidth <= minWidth || maxWidth >= 320 || rowCutUp < 0 || rowCutUp > 60 ||
-            rowCutBottom < 0 || rowCutBottom > 60 || commandTimeoutMs < 100 ||
+            minSpan < 10 || minSpan > 400 || minWidth < 10 ||
+            maxWidth <= minWidth || maxWidth >= 640 || rowCutUp < 0 || rowCutUp > 120 ||
+            rowCutBottom < 0 || rowCutBottom > 120 || commandTimeoutMs < 100 ||
             commandTimeoutMs > 1000 || binary < -1 || binary > 255 ||
             (roadSurface != "white" && roadSurface != "black") || logDirectory.empty())
             throw std::invalid_argument("Invalid trackview configuration values");
@@ -65,13 +66,22 @@ struct TrackviewConfig {
         }
         nlohmann::json j; file >> j;
         if (!j.is_object()) throw std::invalid_argument("Config must be a JSON object");
+        const int reference=j.value("imageWidth",320);
+        if(j.value("imageHeight",reference*3/4)!=reference*3/4)throw std::invalid_argument("Pixel reference must be 4:3");
+        if(reference!=320&&reference!=640)throw std::invalid_argument("Unsupported pilot pixel reference");
+        if(reference==320){
+            for(const char *key:{"curveLookaheadRow","borderMargin","minSpan","minWidth","maxWidth","rowCutUp","rowCutBottom","maxErrorRate"})if(j.contains(key))j[key]=j[key].get<double>()*2;
+            for(const char *key:{"runP1","turnD"})if(j.contains(key))j[key]=j[key].get<double>()/2;
+            if(j.contains("runP2"))j["runP2"]=j["runP2"].get<double>()/4;
+        }
+        j["imageWidth"]=640;j["imageHeight"]=480;
         // 参数名拼写错误时直接报错，避免速度设置被静默忽略。
         const auto known = toJson();
         for (auto it = j.begin(); it != j.end(); ++it)
             if (!known.contains(it.key()) && it.key() != "mixedSpeed")
                 throw std::invalid_argument("Unknown config key: " + it.key());
 #define TV_READ(name) if (j.contains(#name)) j.at(#name).get_to(name)
-        TV_READ(cruiseSpeed); TV_READ(maxSpeed); TV_READ(minSpeed);
+        TV_READ(imageWidth); TV_READ(imageHeight); TV_READ(cruiseSpeed); TV_READ(maxSpeed); TV_READ(minSpeed);
         TV_READ(curveSpeed); TV_READ(degradedSpeed); TV_READ(acceleration);
         TV_READ(deceleration); TV_READ(qualityDeceleration); TV_READ(curveStart);
         TV_READ(qualityRecoverTime); TV_READ(curveLookaheadRow);
@@ -91,7 +101,7 @@ struct TrackviewConfig {
         validate();
     }
     nlohmann::json toJson() const {
-        return {{"cruiseSpeed", cruiseSpeed}, {"maxSpeed", maxSpeed},
+        return {{"imageWidth",imageWidth},{"imageHeight",imageHeight},{"cruiseSpeed", cruiseSpeed}, {"maxSpeed", maxSpeed},
             {"minSpeed", minSpeed}, {"curveSpeed", curveSpeed},
             {"degradedSpeed", degradedSpeed}, {"acceleration", acceleration},
             {"deceleration", deceleration}, {"qualityDeceleration", qualityDeceleration},

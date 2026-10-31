@@ -51,11 +51,17 @@ void CarControl::latch_stop() {
     resetVelocity();
 }
 
+void CarControl::setCommandTimeout(int ms){if(ms<100||ms>1000)throw std::invalid_argument("Command timeout must be 100..1000ms");std::lock_guard lock(writeMutex);commandTimeoutMs=ms;}
+void CarControl::pauseMotion(){std::lock_guard lock(writeMutex);++stopEpoch;motionAllowed=false;carControlLocked(0,PWMSERVOMID);}
+bool CarControl::resumeMotion(uint64_t expected){std::lock_guard lock(writeMutex);if(hasFault()||expected!=stopEpoch.load())return false;motionAllowed=true;return true;}
+void CarControl::checkCommandTimeout(){std::lock_guard lock(writeMutex);if(moving&&Clock::now()-lastCommand>=milliseconds(commandTimeoutMs)){commandExpired=true;carControlLocked(0,PWMSERVOMID);}}
+
 void CarControl::recvThreadMain() {
     size_t index = 0;
     array<uint8_t, USB_FRAME_LENMAX> buffer{};
     try {
         while (!recvThreadStop.load()) {
+            checkCommandTimeout();
             pollfd fd{serialFd, POLLIN, 0};
             const int status = poll(&fd, 1, 20);
             if (status < 0) {
@@ -133,7 +139,7 @@ void CarControl::carControl(float speed, uint16_t servo) {
         carControlLocked(0, PWMSERVOMID);
         throw std::invalid_argument("Non-finite vehicle speed");
     }
-    if (hasFault()) {
+    if (hasFault()||!motionAllowed.load()) {
         speed = 0;
         servo = PWMSERVOMID;
     }

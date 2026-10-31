@@ -43,12 +43,16 @@ class CarControl {
     std::atomic_bool recvThreadStop{true};
     std::atomic_bool serialFault{false};
     std::atomic_bool commandExpired{false};
+    std::atomic_bool motionAllowed{true};
+    std::atomic<uint64_t> stopEpoch{0};
+    int commandTimeoutMs=250;
     std::mutex writeMutex;
     int serialFd = -1;
     bool moving = false;
     std::chrono::steady_clock::time_point lastCommand;
     void writeBufferLocked(const void *buffer, size_t len);
     void carControlLocked(float speed, uint16_t servo);
+    void checkCommandTimeout();
 
     CarControl();
 
@@ -67,6 +71,11 @@ class CarControl {
 
     /* Exit/UI failure: prevent any racing worker from restarting. */
     void latch_stop();
+    void latchStop(){latch_stop();}
+    void setCommandTimeout(int milliseconds);
+    void pauseMotion();
+    uint64_t motionEpoch()const{return stopEpoch.load();}
+    bool resumeMotion(uint64_t expectedEpoch);
 
     bool exitBoot = false;
     bool keypress = false;

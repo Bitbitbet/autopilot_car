@@ -29,6 +29,14 @@ Camera::Camera(const char *capture_source, uint8_t threshold)
     initialize(capture_source);
 }
 
+Camera::Camera(CalibrationOnly,int threshold):threshold_value(threshold<0?127:threshold),use_otsu(threshold<0),capture_width(640),capture_height(480){initializeCalibration();}
+Camera::Camera(const Mat &h):threshold_value(127),use_otsu(true),capture_width(640),capture_height(480){if(!h.empty())setGroundHomography(h);}
+void Camera::setGroundHomography(const Mat &h){h.convertTo(H_img2gnd,CV_64F);H_gnd2img=H_img2gnd.inv();}
+void Camera::correct(Mat &frame) const {
+    if(frame.size()!=Size(640,480))throw std::invalid_argument("Camera expects native 640x480 frames");
+    if(!mapx.empty())remap(frame,frame,mapx,mapy,cv::INTER_LINEAR);
+}
+
 void Camera::initialize(const char *capture_source) {
     capture.open(capture_source);
     if (!capture.isOpened()) {
@@ -47,6 +55,10 @@ void Camera::initialize(const char *capture_source) {
          << "\n  高：" << capture_height << "\n  FPS："
          << capture.get(cv::CAP_PROP_FPS) << endl;
 
+    initializeCalibration();
+}
+
+void Camera::initializeCalibration() {
     // 读取xml中的相机标定参数
     auto camera_matrix = Mat(3, 3, CV_32FC1, Scalar::all(0)); // 摄像机内参矩阵
     auto dist_coeffs = Mat(1, 5, CV_32FC1, Scalar::all(0));   // 相机的畸变矩阵
@@ -55,24 +67,39 @@ void Camera::initialize(const char *capture_source) {
                   FileStorage::READ)) { // 读取本地保存的标定文件
         file["cameraMatrix"] >> camera_matrix;
         file["distCoeffs"] >> dist_coeffs;
+        int referenceWidth=0,referenceHeight=0;
+        file["image_width"]>>referenceWidth;file["image_height"]>>referenceHeight;
+        if(!referenceWidth)file["imageWidth"]>>referenceWidth;
+        if(!referenceHeight)file["imageHeight"]>>referenceHeight;
+        camera_matrix.convertTo(camera_matrix,CV_64F);
+        // Older calibration.xml has no dimensions. Its principal point
+        // distinguishes this project's 320 and 640 reference images.
+        if(!referenceWidth)referenceWidth=camera_matrix.at<double>(0,2)<240?320:640;
+        if(!referenceHeight)referenceHeight=referenceWidth*3/4;
+        if(referenceWidth*3!=referenceHeight*4)throw std::runtime_error("Lens reference must be 4:3");
+        cout<<"[Camera] lens reference="<<referenceWidth<<'x'<<referenceHeight<<"; processing=640x480\n";
+        const double scale=640.0/referenceWidth;
+        camera_matrix.row(0)*=scale;camera_matrix.row(1)*=scale;
         Mat h_img2gnd, h_gnd2img;
         file["ground_H_img2gnd"] >> h_img2gnd;
         file["ground_H_gnd2img"] >> h_gnd2img;
         if (!h_img2gnd.empty()) {
             h_img2gnd.convertTo(H_img2gnd, CV_64F);
+            H_img2gnd.col(0)/=scale;H_img2gnd.col(1)/=scale;
+            H_gnd2img=H_img2gnd.inv();
         }
-        if (!h_gnd2img.empty()) {
+        if (H_img2gnd.empty()&&!h_gnd2img.empty()) {
             h_gnd2img.convertTo(H_gnd2img, CV_64F);
+            H_gnd2img.row(0)*=scale;H_gnd2img.row(1)*=scale;H_img2gnd=H_gnd2img.inv();
         }
         file.release();
     } else {
         cerr << "打开相机矫正参数失败!!!" << endl;
-        exit(3);
+        throw std::runtime_error("Cannot read lens calibration.xml");
     }
     if (H_img2gnd.empty() || H_gnd2img.empty()) {
         // 地面单应只影响 image_to_ground/ground_to_image，不阻塞取图
-        cerr << "[Fatal] 校准文件中没有地面单应 ground_H_*" << endl;
-        abort();
+        cerr << "[Camera] No ground_H_*; task ground calibration may supply it; image-only tracking remains available" << endl;
     }
 
     Size camera_size{capture_width, capture_height};
@@ -102,12 +129,12 @@ Mat Camera::binarize(const Mat &img) {
     cvtColor(img, gray_img, cv::COLOR_BGR2GRAY); // RGB转灰度图
 
     const int threshold_value_arg = use_otsu ? -1 : threshold_value;
-    const int polarity = BLACK_ROAD ? cv::THRESH_BINARY_INV : cv::THRESH_BINARY;
+    const int polarity = blackRoad ? cv::THRESH_BINARY_INV : cv::THRESH_BINARY;
     Mat bin_img;
     threshold(gray_img, bin_img,
               threshold_value_arg < 0 ? 0 : threshold_value_arg, 255,
               polarity | (threshold_value_arg < 0 ? cv::THRESH_OTSU : 0));
-    if (!BLACK_ROAD)
+    if (!blackRoad)
         return bin_img;
 
     // 只修补有界的内部空洞；与下边界连通的背景、与远边界连通的分隔带保留。
@@ -149,10 +176,10 @@ static Point2d applyHomography(const Mat &H, double x, double y) {
     if (H.empty()) { // 还没标定地面单应
         return Point2d(NAN, NAN);
     }
-    const Mat v = (cv::Mat_<double>(3, 1) << x, y, 1.0);
-    const Mat r = H * v;
-    const double w = r.at<double>(2);
-    return Point2d(r.at<double>(0) / w, r.at<double>(1) / w);
+    const double w=H.at<double>(2,0)*x+H.at<double>(2,1)*y+H.at<double>(2,2);
+    if(!std::isfinite(w)||std::abs(w)<1e-10)return {NAN,NAN};
+    return {(H.at<double>(0,0)*x+H.at<double>(0,1)*y+H.at<double>(0,2))/w,
+            (H.at<double>(1,0)*x+H.at<double>(1,1)*y+H.at<double>(1,2))/w};
 }
 
 Point2d Camera::image_to_ground(const Point2d &img_pt) const {

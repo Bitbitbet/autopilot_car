@@ -2,6 +2,9 @@
 #include "camera.hpp"
 #include <opencv2/opencv.hpp>
 #include <vector>
+#include <functional>
+using NativeTrackRows=std::map<int,std::pair<int,int>,std::greater<int>>;
+void track_identify_from_bin(const cv::Mat &,const std::function<cv::Point2d(cv::Point2d)> &,NativeTrackRows &);
 
 /**
  * @brief 赛道边缘识别

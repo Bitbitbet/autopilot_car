@@ -58,18 +58,23 @@ void find_connected_blocks(const Blocks &blocks, int last_left, int last_right,
 
 void track_identify_from_bin(const Mat &bin_img, Camera &camera,
                              map<int, pair<int, int>, greater<int>> &rows) {
+    track_identify_from_bin(bin_img,[&camera](Point2d p){return camera.image_to_ground(p);},rows);
+}
+
+void track_identify_from_bin(const Mat &bin_img,const std::function<Point2d(Point2d)> &project,
+                             NativeTrackRows &rows) {
     rows.clear();
 
     // 行中心处的纵向距离：同一行上各列的距离差可以忽略
     const auto distanceAt = [&](int row) {
         return float(
-            camera.image_to_ground({bin_img.cols / 2.0, double(row)}).y);
+            project({bin_img.cols / 2.0, double(row)}).y);
     };
     // 同一行上左右边界的实际横向间距，就是色块在路面上的宽度
     const auto widthAt = [&](int row, int left, int right) {
         return float(
-            fabs(camera.image_to_ground({double(right), double(row)}).x -
-                 camera.image_to_ground({double(left), double(row)}).x));
+            fabs(project({double(right), double(row)}).x -
+                 project({double(left), double(row)}).x));
     };
 
     bool isSearchingFirstRow = true; // 还没找到最下面那行有效路面
@@ -79,13 +84,14 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
         rows.insert({row, {left, right}});
     };
 
+    const bool metric=std::isfinite(distanceAt(bin_img.rows-1));
     Blocks blocks, connected_blocks;
     for (auto r = bin_img.rows - 1; r > 0; r -= 2) {
         const float distance = distanceAt(r);
         // 单应缺失、或者已经越过最远搜索距离，就没有可用的地面信息了
-        if (!std::isfinite(distance) || distance > TRACK_MAX_DISTANCE)
+        if (metric&&(!std::isfinite(distance) || distance > TRACK_MAX_DISTANCE))
             break;
-        if (distance < TRACK_MIN_DISTANCE)
+        if (metric&&distance < TRACK_MIN_DISTANCE)
             continue;
 
         //  开始识别赛道左右边缘
@@ -102,7 +108,7 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
             // 白色标记会把路面切成几块，取并集；还不够宽就继续往上找起始行
             const int left = blocks.front().first;
             const int right = blocks.back().second;
-            if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
+            if (metric&&widthAt(r, left, right) < TRACK_MIN_WIDTH)
                 continue;
             appendEdge(r, left, right);
             isSearchingFirstRow = false;
@@ -121,7 +127,7 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
         // 白色标记会把路面切成几块：取并集，别把标记边缘当路面边缘
         const int left = connected_blocks.front().first;
         const int right = connected_blocks.back().second;
-        if (widthAt(r, left, right) < TRACK_MIN_WIDTH)
+        if (metric&&widthAt(r, left, right) < TRACK_MIN_WIDTH)
             break; // 路面已经收窄到不可信，结束搜索
         appendEdge(r, left, right);
         lastDistance = distance;

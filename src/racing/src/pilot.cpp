@@ -257,7 +257,7 @@ float AutoPilot::qualitySpeedLimit() const {
 void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
                        float previousSpeed) {
     // 帧间隔异常（真的卡死）：这一帧的积分/微分都没意义，按丢线处理
-    if (dt <= 0 || dt > MAX_FRAME_GAP) {
+    if (dt <= 0 || dt > maxFrameGap) {
         valid = false;
         lost = true;
         degraded = false;
@@ -292,7 +292,6 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     }
     std::sort(raw.begin(), raw.end(),
               [](const Point2i &a, const Point2i &b) { return a.y > b.y; });
-    std::cerr << raw.size() << " " << dt << std::endl; // DEBUG
 
     // 2) 这一帧的中心线够不够可信
     if (!update_path_state(raw, rows.size(), accepted, rejected, dt))
@@ -410,9 +409,9 @@ void AutoPilot::update_steering(float dt, float previousSpeed,
     const float speedRatio =
         std::clamp(std::fabs(previousSpeed) / cfg::MAX_SPEED, 0.f, 1.f);
     const float gain = 1 + (HIGH_SPEED_GAIN - 1) * speedRatio;
-    const float p = RUN_P1 + std::fabs(error) * RUN_P2;
+    const float p = runP1 + std::fabs(error) * runP2;
     servo = clampServo(PWMSERVOMID +
-                       gain * (error * p + filteredDerivative * TURN_D));
+                       gain * (error * p + filteredDerivative * turnD));
 
     // 弯道程度取偏差、航向、舵机量三者最大者。
     const float e = std::fabs(error) / SEVERITY_SCALE;
@@ -427,7 +426,7 @@ void AutoPilot::update_steering(float dt, float previousSpeed,
 
 float AutoPilot::speedFor(float cruise, float dt) {
     if (!std::isfinite(cruise) || !std::isfinite(dt) || dt <= 0 ||
-        dt > MAX_FRAME_GAP || !valid || lost) {
+        dt > maxFrameGap || !valid || lost) {
         commandedSpeed = 0;
         return 0;
     }

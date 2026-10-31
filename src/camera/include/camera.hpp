@@ -7,6 +7,12 @@ constexpr bool BLACK_ROAD = true;
 
 class Camera {
   public:
+    struct CalibrationOnly {};
+    Camera(CalibrationOnly, int threshold=-1);
+    explicit Camera(const cv::Mat &imageToGround);
+    void correct(cv::Mat &frame) const;
+    void setGroundHomography(const cv::Mat &h);
+    bool blackRoad=BLACK_ROAD;
     Camera();
     Camera(uint8_t threshold_value);
     Camera(const char *capture_source);
@@ -53,4 +59,5 @@ class Camera {
     int capture_width, capture_height;
 
     void initialize(const char *capture_source);
+    void initializeCalibration();
 };

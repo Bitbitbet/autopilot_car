@@ -24,6 +24,20 @@ for name in ['trackview_race','librace_npu_backend.so']:
 if not os.access('trackview_race',os.X_OK):raise SystemExit('请先 chmod +x ./trackview_race')
 source=Path('trackview.json');source_race=Path('race.json')
 track=json.loads(source.read_text(encoding='utf-8-sig'));race=json.loads(source_race.read_text(encoding='utf-8-sig'))
+def native_pixels(config, distances, gains=False):
+    reference=config.get('imageWidth',320)
+    if reference not in (320,640) or config.get('imageHeight',reference*3//4)!=reference*3//4:
+        raise SystemExit('配置图像坐标必须为320×240旧口径或640×480。')
+    if reference==320:
+        for key in distances:
+            if key in config:config[key]*=2
+        if gains:
+            for key in ('runP1','turnD'):
+                if key in config:config[key]/=2
+            if 'runP2' in config:config['runP2']/=4
+    config.update(imageWidth=640,imageHeight=480)
+native_pixels(track,('curveLookaheadRow','borderMargin','minSpan','minWidth','maxWidth','rowCutUp','rowCutBottom','maxErrorRate'),True)
+native_pixels(race,('minBranchWidth','minBranchGap','triggerRow','obstacleRow','crossPassedRow'))
 if surface!='config':track['roadSurface']=surface
 if track.get('roadSurface','white') not in ('white','black'):raise SystemExit('roadSurface 必须是 white 或 black。')
 minimum=track.get('minSpeed',.05)
@@ -105,8 +119,10 @@ record['parking_geometry_preview_only']=mode=='parking-preview'
 record['parking_control']={'enabled':mode=='parking-drive' or mode.startswith('mission') and 'lab' not in mode,'reverse_source':reverse_source,'bay':None,'selection_policy':'fully visible left bay, all assumed empty',
     'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':3,'entrance_exit_turns_integrated':mode.startswith('mission') and 'lab' not in mode}
 record['reverse_check']={'operator_trigger_required':True,'speed_command_mps':-.08,'duration_s':.5,'command_is_not_measured_motion':True} if mode=='reverse-check' else None
-record['mission']={'enabled':mode.startswith('mission'),'lab_single_loop':'lab' in mode,'lap_finish_source':'operator n at physical start','ground_arrow_assisted':True}
-record['bypass_algorithm']='virtual_boundary_v6' if 'virtual' in mode or mode.startswith('mission') else 'metric_ground' if mode=='bypass' else 'shadow'
+record['mission']={'enabled':mode.startswith('mission'),'lab_single_loop':'lab' in mode,'lap_finish_source':'post-parking FLOW or operator n; finish operator n','ground_arrow_assisted':True,'ground_arrow_turn_trigger':'parking_exit_stage_only'}
+record['processing_resolution']=[640,480]
+record['backend_abi']=4
+record['bypass_algorithm']='virtual_boundary_master640' if 'virtual' in mode or mode.startswith('mission') else 'metric_ground' if mode=='bypass' else 'shadow'
 Path(prefix+'-launch.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
 print('启动记录: '+prefix+'-launch.json')
 print('路面模式: '+track.get('roadSurface','white')+'；寻路二值图统一为白色道路。')

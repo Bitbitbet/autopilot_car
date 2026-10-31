@@ -30,7 +30,7 @@ extern "C" int raceImageProbe(const char *manifestPath,const char *outputPath,
         for(const auto &entry:entries) {
             const auto file=entry.at("path").get<std::string>();
             const auto image=cv::imread(file,cv::IMREAD_COLOR);
-            if(image.empty()||image.size()!=cv::Size(320,240))
+            if(image.empty()||image.size()!=cv::Size(640,480))
                 throw std::runtime_error("Expected unchanged 320x240 saved camera image: "+file);
             for(int repeat=0;repeat<repeats;++repeat) {
                 detector.inference(image);
@@ -53,7 +53,7 @@ extern "C" int raceImageProbe(const char *manifestPath,const char *outputPath,
                     const int x=static_cast<int>(data[i+2]),y=static_cast<int>(data[i+3]);
                     const int width=static_cast<int>(data[i+4]-data[i+2]);
                     const int height=static_cast<int>(data[i+5]-data[i+3]);
-                    const bool valid=x>=0&&y>=0&&width>0&&height>0&&x<320&&y<240&&width<=320-x&&height<=240-y;
+                    const bool valid=x>=0&&y>=0&&width>0&&height>0&&x<640&&y<480&&width<=640-x&&height<=480-y;
                     if(type==5) bestStop=std::max(bestStop,score);
                     const auto review=type==5&&valid?reviewStopCandidate(image,{x,y,width,height}):StopCandidateReview{};
                     candidates.push_back({{"type",type},{"score",score},{"raw_xyxy",{data[i+2],data[i+3],data[i+4],data[i+5]}},
