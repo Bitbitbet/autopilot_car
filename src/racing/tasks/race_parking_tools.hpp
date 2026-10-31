@@ -71,11 +71,11 @@ int racePreviewParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGro
         if(event==cv::EVENT_LBUTTONDOWN&&s.frozen&&s.points.size()<2&&x<640&&y<480&&x>=0&&y>=0)
             s.points.emplace_back(float(x),float(y));
     },&state);
-    cv::Mat image;RaceParkingRoute route;cv::Point2f origin,along{0,1},right{1,0};bool taught=false;
-    std::cout<<"停车路径预览，不连接电机。小车摆在停车区中央通道、2号位之前，车头朝出口方向。\n"
-        <<"f冻结，点击2号车位靠通道的两个口角：近角、远角；p规划；s保存预览；r重选；q退出。\n"
+    cv::Mat image;RaceParkingRoute route;RaceParkingFrame bayFrame;bool taught=false;
+    std::cout<<"停车路径预览，不连接电机。小车摆在通道内、完整可见车位之前，车头朝出口方向。\n"
+        <<"f冻结，点击左侧或右侧车位靠通道的两个口角：近角、远角；p规划；s保存预览；r重选；q退出。\n"
         <<"尺寸：通道45cm，车位四边41cm、垂直进深38cm；停车3秒。图中路线仅是几何预览，不能当成已执行停车。\n";
-    auto world=[&](cv::Point2f p){return origin+right*(p.x+dims.aisle/2)+along*p.y;};
+    auto world=[&](cv::Point2f p){return bayFrame.world(p,dims.aisle);};
     while(!stop.load()) {
         if(!state.frozen){if(!video.read(image)||image.empty())throw std::runtime_error("Parking preview camera unavailable");
             if(image.size()!=cv::Size(640,480))throw std::invalid_argument("Expected 640x480 camera frame");
@@ -107,9 +107,7 @@ int racePreviewParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGro
                 if(!std::isfinite(scale)||scale<.8f||scale>1.3f)throw std::runtime_error("Mouth length contradicts ground calibration; recheck corners/calibration");
                 map.setMetricScale(scale);a=map.toGround(state.points[0]);b=map.toGround(state.points[1]);
                 if(b.y<=a.y||std::abs(b.x-a.x)>.10f)throw std::runtime_error("Face forward along aisle; click near then far mouth corner");
-                origin=a;along=(b-a)*(1.f/dims.side);right={along.y,-along.x};
-                const auto offset=-origin;
-                const RaceParkingPose start{offset.dot(right)-dims.aisle/2,offset.dot(along),std::atan2(along.x,along.y)};
+                bayFrame.locate(a,b);const auto start=bayFrame.local({},dims.aisle);
                 route=racePlanParking(space,start);taught=true;
                 std::cout<<"[Parking] "<<route.reason<<" nodes="<<route.expanded<<" scale="<<scale<<'\n';
             }catch(const std::exception &e){taught=false;route={};std::cerr<<"[Parking] "<<e.what()<<'\n';}
@@ -125,7 +123,8 @@ int racePreviewParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGro
                 {"front_to_rear_axle_experimental_m",dims.frontToRearAxle},{"full_lock_experimental_degrees",dims.fullLockDegrees},
                 {"ground_scale",map.scale()},{"lens_fingerprint",calibration.lensFingerprint},
                 {"mouth_image_points",{{state.points[0].x,state.points[0].y},{state.points[1].x,state.points[1].y}}},
-                {"lane_origin_ground_m",{origin.x,origin.y}},{"lane_forward_axis",{along.x,along.y}}};
+                {"lane_origin_ground_m",{bayFrame.origin.x,bayFrame.origin.y}},{"lane_forward_axis",{bayFrame.along.x,bayFrame.along.y}},
+                {"parking_side",bayFrame.side<0?"left":"right"}};
             std::ofstream output("parking-preview.json");output<<result.dump(2)<<'\n';output.close();
             if(!output)throw std::runtime_error("Cannot save parking preview");
             cv::imwrite("parking-preview-camera.png",image);cv::imwrite("parking-preview-overlay.png",shown);

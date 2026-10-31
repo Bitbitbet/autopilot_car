@@ -9,7 +9,7 @@
 #include <vector>
 #include <functional>
 
-// Fixed empty bay 2. Dimensions measured on 2026-10-29; rear-axle offset and
+// Canonical empty left bay (reflected for right bays). Dimensions measured on 2026-10-29; rear-axle offset and
 // steering angle are explicit experimental values, not measured calibrations.
 struct RaceParkingDimensions {
     float side=.41f,depth=.38f,aisle=.45f,length=.31f,width=.18f,wheelbase=.20f;
@@ -28,6 +28,26 @@ struct RaceParkingDimensions {
     float stagger() const {validate();return std::sqrt(std::max(0.f,side*side-depth*depth));}
 };
 struct RaceParkingPose {float x=0,z=0,yaw=0;}; // front bumper ground origin; positive yaw turns left
+// Plan in the established left-bay frame; reflect lateral position, heading
+// and curvature together for a right bay. Camera/odometry stay physical.
+struct RaceParkingFrame {
+    cv::Point2f origin{},along{0,1},right{1,0};int side=-1;
+    float handedness()const{return side<0?1.f:-1.f;}
+    void locate(cv::Point2f near,cv::Point2f far) {
+        origin=near;along=(far-near)*(1.f/float(cv::norm(far-near)));right={along.y,-along.x};
+        side=near.x+far.x>0?1:-1;
+    }
+    cv::Point2f world(cv::Point2f p,float aisle)const{return origin+right*(handedness()*(p.x+aisle/2))+along*p.y;}
+    RaceParkingPose local(RaceParkingPose p,float aisle)const {
+        const cv::Point2f offset{p.x-origin.x,p.z-origin.y};
+        return {handedness()*offset.dot(right)-aisle/2,offset.dot(along),
+                std::remainder(handedness()*(p.yaw+std::atan2(along.x,along.y)),float(2*CV_PI))};
+    }
+    RaceParkingPose physical(RaceParkingPose p,float aisle)const {
+        const auto point=world({p.x,p.z},aisle);
+        return {point.x,point.y,std::remainder(handedness()*p.yaw-std::atan2(along.x,along.y),float(2*CV_PI))};
+    }
+};
 struct RaceParkingMouthCheck {
     bool valid=false;
     const char *reason="P_MOUTH_SCALE_MISMATCH";

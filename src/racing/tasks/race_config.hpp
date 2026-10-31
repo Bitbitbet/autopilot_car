@@ -11,6 +11,7 @@ struct RaceConfig {
     float confidence=0.65f, maxDetectionAge=0.40f, confirmGap=0.30f;
     int confirmFrames=3;
     float limitedSpeed=0.40f, forkSpeed=0.15f, approachSpeed=0.12f;
+    float parkingSpeed=0.30f;
     float directionMemory=4.f, forkConfirmTime=0.12f, forkMinTime=0.40f;
     float forkMaxTime=4.f, forkExitTime=0.35f, cooldown=2.f;
     int minBranchWidth=60, minBranchGap=24, minBranchRows=3;
@@ -29,7 +30,7 @@ struct RaceConfig {
     bool verifyCrosswalkGeometry=true;
     float crossCandidateConfidence=.10f; // 仅斑马线：低分结果须同帧条纹复核；远处可单独提供几何证据。
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(RaceConfig,imageWidth,imageHeight,confidence,maxDetectionAge,confirmGap,
-        confirmFrames,limitedSpeed,forkSpeed,approachSpeed,directionMemory,
+        confirmFrames,limitedSpeed,forkSpeed,approachSpeed,parkingSpeed,directionMemory,
         forkConfirmTime,forkMinTime,forkMaxTime,forkExitTime,cooldown,minBranchWidth,
         minBranchGap,minBranchRows,triggerRow,obstacleRow,clearTime,stopAfterCross,
         crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,verifyForkArrows,modelDirectory,
@@ -39,7 +40,7 @@ struct RaceConfig {
         if(imageWidth!=640||imageHeight!=480||!range(confidence,0.1f,1.f)||!range(maxDetectionAge,0.05f,1.f)||
            !range(confirmGap,0.05f,1.f)||confirmFrames<2||confirmFrames>10||
            !range(limitedSpeed,0.05f,0.49f)||!range(forkSpeed,0.05f,10.f)||
-           !range(approachSpeed,0.05f,10.f)||!range(directionMemory,0.5f,15.f)||
+           !range(approachSpeed,0.05f,10.f)||!range(parkingSpeed,0.05f,10.f)||!range(directionMemory,0.5f,15.f)||
            !range(forkConfirmTime,0.05f,1.f)||!range(forkMinTime,0.1f,3.f)||
            !range(forkMaxTime,forkMinTime,60.f)||!range(forkExitTime,0.1f,2.f)||
            !range(cooldown,0.1f,10.f)||minBranchWidth<40||minBranchWidth>200||

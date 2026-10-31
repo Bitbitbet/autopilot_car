@@ -6,6 +6,7 @@
   "limitedSpeed": 0.4,
   "forkSpeed": 0.15,
   "approachSpeed": 0.12,
+  "parkingSpeed": 0.30,
   "directionMemory": 4.0,
   "forkConfirmTime": 0.12,
   "forkMinTime": 0.4,

@@ -9,6 +9,7 @@ private:
     Stage stage=Stage::Ready;bool lab=false,branch=false;uint64_t sequence=0;int parkCount=0;
     std::string reason="PRESS_A_START";int completedParking=0;bool parkingSign=false;int flowCount=0;
     int exitArrowCount=0;uint64_t exitArrowFrame=0;bool exitArrowConfirmed=false;
+    bool entryGateSeen=false,entryGateReleased=false,exitGateSeen=false,exitGateReleased=false;
 public:
     explicit RaceMission(bool laboratory=false):lab(laboratory){}
     const char *name()const {
@@ -32,6 +33,19 @@ public:
     }
     bool parkingZone()const{return (stage==Stage::FirstFork&&parkingSign)||stage==Stage::ParkingApproach||parkingSearch()||parkingRun()||stage==Stage::ParkingExit;}
     bool parkingApproach()const{return stage==Stage::ParkingApproach||(stage==Stage::FirstFork&&parkCount>0);}
+    bool parkingSpeedLimited()const{return !lab&&running()&&!exitGateReleased&&
+        (parkingZone()||parkingApproach()||completedParking>0);}
+    float speedLimit(float cruise,float parkingSpeed)const{return parkingSpeedLimited()?std::min(cruise,parkingSpeed):cruise;}
+    void observeGate(const RacePlan &traffic) {
+        if(!running()||lab||!traffic.fresh)return;
+        if(completedParking>0) {
+            if(traffic.gateWaiting)exitGateSeen=true;
+            if(exitGateSeen&&traffic.gateOpened){exitGateReleased=true;reason="EXIT_GATE_OPEN_RESTORE_CRUISE";}
+        } else if(parkingZone()||parkingApproach()) {
+            if(traffic.gateWaiting)entryGateSeen=true;
+            if(entryGateSeen&&traffic.gateOpened){entryGateReleased=true;reason="ENTRY_GATE_OPEN_PARKING_AREA_SPEED";}
+        }
+    }
     bool complete()const{return stage==Stage::Done;}
     bool failed()const{return stage==Stage::Fault;}
     int routeDirection()const{return stage==Stage::FirstFork?(parkingSign?-1:2):stage==Stage::ParkingExit?-1:stage==Stage::SecondFork?2:0;}
@@ -72,5 +86,7 @@ public:
     nlohmann::json json()const{return {{"state",name()},{"reason",reason},{"lab_single_loop",lab},{"parking_completed",completedParking},
         {"lap_finish_source","post_parking_flow_or_operator_n; finish_operator_n"},{"parking_sign_confirmed",parkingSign},
         {"route_direction",routeDirection()},{"parking_exit_arrow_authorized",exitArrowTurnAuthorized()},
+        {"parking_speed_limited",parkingSpeedLimited()},{"entry_gate_seen",entryGateSeen},{"entry_gate_released",entryGateReleased},
+        {"exit_gate_seen",exitGateSeen},{"exit_gate_released",exitGateReleased},
         {"ground_arrows_are_route_constraints_not_global_location",true}};}
 };

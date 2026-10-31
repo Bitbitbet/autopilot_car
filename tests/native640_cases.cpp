@@ -12,7 +12,13 @@
 namespace fs=std::filesystem;
 static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);}
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
+#include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--reject-old-backend") {
+        try {auto perception=createRacePerception(RaceConfig{});require(false,"Old configuration ABI was accepted");}
+        catch(const std::exception &error){require(std::string(error.what()).find("backend version mismatch")!=std::string::npos,"Old backend was not rejected at the ABI boundary");}
+        std::cout<<"PASS ABI4 backend rejected before creation by the ABI5 loader\n";return 0;
+    }
     require(argc==2,"Pass workspace root");const fs::path root=argv[1];
     const auto temp=fs::temp_directory_path()/"race-native640-regression";fs::create_directories(temp);
     cv::Mat image(480,640,CV_8UC3,cv::Scalar(0));raceNormalizeFrame(image);
@@ -159,6 +165,7 @@ int main(int argc,char **argv){try{
     RaceParkingBaySearch search;search.reject({-.22,.3},{-.22,.7});RaceParkingMouthCandidate failed;failed.nearGround={-.22,.3};failed.farGround={-.22,.7};require(!search.accepts(failed),"Failed bay not skipped");
     RaceParkingMouthCandidate next=failed;next.nearGround={-.22,.7};next.farGround={-.22,1.1};require(search.accepts(next),"Adjacent bay incorrectly excluded");
     std::cout<<"PASS metric parking entry/3s dwell/reverse and next-bay selection unchanged\n";
+    parkingAreaChecks(config,ground,binary,track);
 
     RaceSnapshot snapshot;snapshot.sequence=1;snapshot.captured=1;snapshot.image=image;snapshot.detections={box(LABEL_CONE)};
     RaceVirtualBoundary virtualBoundary(navigation);RaceObstaclePreviewPlan plan;

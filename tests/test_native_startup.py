@@ -47,6 +47,15 @@ class NativeStartup(unittest.TestCase):
         race_path=record['command'][record['command'].index('--race-config')+1]
         race=json.loads((self.root/race_path).read_text())
         self.assertFalse(race['stopAfterCross']);self.assertGreaterEqual(race['forkMaxTime'],12)
+        self.assertEqual(race['parkingSpeed'],.30)
+        self.assertEqual(record['backend_abi'],5)
+        self.assertIn('left or right',record['parking_control']['selection_policy'])
+    def test_parking_area_speed_preserves_vehicle_override(self):
+        path=self.root/'race.json';config=json.loads(path.read_text());config['parkingSpeed']=.4
+        path.write_text(json.dumps(config))
+        result=self.run_native('--prepare-only','mission-lab','competition','black')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.record()['parking_control']['parking_area_speed_cap_mps'],.4)
     def test_bare_racing_prepares_drive_before_any_hardware_access(self):
         self.manifest['files']['racing']='invalid';self.save_manifest()
         result=self.run_native()

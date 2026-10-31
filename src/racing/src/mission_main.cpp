@@ -231,7 +231,7 @@ int raceVehicleMain(int argc,char **argv) {
                     <<"--calibrate-ground: camera-only four-point ground calibration, never opens serial/NPU.\n"
                     <<"--parking-preview: camera-only taught bay-2 geometry and in/out route preview; never opens serial/NPU.\n"
                     <<"--reverse-check: one operator-triggered -0.08 m/s, 0.5s pulse; independent stop timer; no AI.\n"
-                    <<"--parking-drive --reverse-verified: auto-locate a fully visible left bay; a starts entry/3s dwell/reverse exit/lane rejoin; f manual, g rescan.\n"
+                    <<"--parking-drive --reverse-verified: auto-locate a fully visible left/right bay; a starts entry/3s dwell/reverse exit/lane rejoin; f manual, g rescan.\n"
                     <<"--obstacle-bypass --ground-calibration ground-calibration.json: calibrated straight-cone trial; uses configured maxSpeed.\n"
                     <<"--virtual-boundary-bypass: matched-image Bezier virtual boundaries with master native 640 tracking; optional --no-control preview; no optical-flow odometry.\n"
                     <<"--mission / --mission-lab: two-lap route or single-loop lab; optional --no-control preview; n confirms physical start/finish.\n"; return 0;

@@ -64,6 +64,7 @@ class RaceParkingControl {
     double lastCapture=-1,lastTime=-1,badSince=-1,phaseSince=0,progressSince=0;
     RaceParkingPose previous{},progressPose{};
     float lastSpeed=0,steeringAngle=0;
+    float taskSpeed=.10f;
     bool reverse=false;
     bool estimateUsed=false;
     bool terminalRecovery=false;
@@ -77,7 +78,9 @@ class RaceParkingControl {
         return {0,0,"PARK_FAULT",faultReason,segment};
     }
 public:
-    explicit RaceParkingControl(RaceParkingSpace s=RaceParkingSpace{}):space(s){}
+    explicit RaceParkingControl(RaceParkingSpace s=RaceParkingSpace{},float targetSpeed=.10f):space(s),taskSpeed(targetSpeed){
+        if(!std::isfinite(taskSpeed)||taskSpeed<=0||taskSpeed>10)throw std::invalid_argument("Invalid parking target speed");
+    }
     bool active()const{return phase==Phase::Entry||phase==Phase::Dwell||phase==Phase::Exit;}
     bool done()const{return phase==Phase::Done;}
     bool failed()const{return phase==Phase::Fault;}
@@ -114,7 +117,14 @@ public:
         lastTime=now;
         if(o.epoch!=epoch)return fault("PARK_ODOMETRY_EPOCH_CHANGED");
         if(o.sequence<lastSequence||(o.sequence>lastSequence&&o.captured<=lastCapture))return fault("PARK_OBSERVATION_REORDERED");
-        if(!o.valid||!o.sequence||now<o.captured||now-o.captured>.18||!taskClear) {
+        if(!taskClear) {
+            lastSpeed=0;progressSince=now;dwell.ready(now,false,false,false,reverse);
+            if(o.valid&&o.sequence>lastSequence&&now>=o.captured&&now-o.captured<=.18) {
+                previous=o.pose;lastCapture=o.captured;lastSequence=o.sequence;badSince=-1;
+            }
+            return {0,0,"PARK_HOLD","TRAFFIC_STOP_PRIORITY",segment};
+        }
+        if(!o.valid||!o.sequence||now<o.captured||now-o.captured>.18) {
             lastSpeed=0;dwell.ready(now,false,false,false,reverse);
             if(badSince<0)badSince=now;
             if(now-badSince>.65)return fault("PARK_MOTION_OR_TASK_INTERRUPTED_RETEACH");
@@ -128,8 +138,12 @@ public:
         // last loop iteration. Accept its complete visually measured bridge;
         // otherwise every recovery after 250ms would fault even with a good fit.
         const float recoveryExtra=badSince>=0?std::clamp(gap-.08f,0.f,.57f):0.f;
+        const auto &dimensions=space.dimensions();
+        const float appliedCurvature=std::tan(steeringAngle)/dimensions.wheelbase;
+        const float moveLimit=std::max(.025f,.008f+std::abs(lastSpeed)*gap*(1+dimensions.frontToRearAxle*std::abs(appliedCurvature))*1.6f);
+        const float turnLimit=std::max(.11f,.04f+std::abs(lastSpeed*appliedCurvature)*gap*1.6f);
         if(!std::isfinite(move)||!std::isfinite(turn)||gap<=0||gap>(badSince>=0?.75f:.25f)||
-           move>.025f+.4f*recoveryExtra||turn>.11f+.8f*recoveryExtra)
+           move>moveLimit+.4f*recoveryExtra||turn>turnLimit+.8f*recoveryExtra)
             return fault("PARK_POSE_DISCONTINUITY");
         previous=o.pose;lastCapture=o.captured;lastSequence=o.sequence;badSince=-1;
         estimateUsed|=o.estimated;
@@ -306,8 +320,10 @@ public:
         const float targetAngle=std::atan(d.wheelbase*requested);
         steeringAngle+=std::clamp(targetAngle-steeringAngle,-angleRate*dt,angleRate*dt);
         const float curvature=std::tan(steeringAngle)/d.wheelbase;
-        float magnitude=std::min({speedLimit,leaving?.08f:.10f,std::max(.05f,goalError*.8f)});
-        if(mouthRecovery)magnitude=std::min(magnitude,.05f);
+        const float creep=std::min(.12f,taskSpeed*.5f);
+        const float curveCap=taskSpeed<=.10001f?taskSpeed:std::max(creep,taskSpeed/(1+.5f*std::abs(curvature)));
+        float magnitude=std::min({speedLimit,leaving?taskSpeed*.8f:taskSpeed,curveCap,std::max(creep,goalError*.8f)});
+        if(mouthRecovery)magnitude=std::min(magnitude,creep);
         // Validate a short swept-body stopping envelope before issuing motion.
         auto sweepClear=[&](float speed) {
             auto prediction=o.pose;const float sweep=speed*.25f+.005f;float predictedAngle=steeringAngle;
@@ -326,9 +342,10 @@ public:
             // Operator requested a less restrictive field trial: a predicted
             // margin crossing is advisory. Keep the existing parking creep
             // command, while current observed body/people/device stops remain.
-            if(magnitude<=.05001f){boundaryWarning=true;break;}
-            magnitude=std::max(.05f,magnitude-.01f);
+            if(magnitude<=creep+.00001f){boundaryWarning=true;break;}
+            magnitude=std::max(creep,magnitude-.01f);
         }
+        if(taskSpeed>.10001f)magnitude=std::min(magnitude,std::abs(lastSpeed)+.5f*dt);
         const float speed=leaving?-magnitude:magnitude;
         if(std::hypot(o.pose.x-progressPose.x,o.pose.z-progressPose.z)>.008f||
            std::abs(raceParkingAngle(o.pose.yaw-progressPose.yaw))>.04f) {progressPose=o.pose;progressSince=now;}
@@ -347,14 +364,14 @@ public:
 // Extra model feasibility filter, not calibration or evidence of physical success.
 // Reject a geometrically valid route if the current controller cannot track it
 // with command steering slew and the same footprint/rear-boundary checks.
-inline bool raceParkingModelCompletes(const RaceParkingSpace &space,const RaceParkingRoute &route) {
+inline bool raceParkingModelCompletes(const RaceParkingSpace &space,const RaceParkingRoute &route,float taskSpeed=.10f) {
     if(!route.valid||route.entry.empty())return false;
-    RaceParkingControl control(space);RaceParkingObservation observation{route.entry.front(),1,1,1,true};
+    RaceParkingControl control(space,taskSpeed);RaceParkingObservation observation{route.entry.front(),1,1,1,true};
     if(!control.arm(route,observation,1,true))return false;
     const auto &d=space.dimensions();float wheel=0;double time=1;
     for(int step=0;step<3500&&!control.done()&&!control.failed();++step) {
         time+=.04;observation.captured=time;++observation.sequence;
-        const auto command=control.update(observation,time,.04f,true);
+        const auto command=control.update(observation,time,.04f,true,taskSpeed);
         const float target=std::atan(d.wheelbase*command.curvature);
         const float rate=d.fullLockDegrees*float(CV_PI)/180*600/400;
         wheel+=std::clamp(target-wheel,-rate*.04f,rate*.04f);
@@ -366,7 +383,7 @@ inline bool raceParkingModelCompletes(const RaceParkingSpace &space,const RacePa
     // pass the planner's nominal full-containment feasibility filter.
     return control.done()&&!control.terminalRecoveryUsed();
 }
-inline RaceParkingRoute racePlanTrackableParking(const RaceParkingSpace &space,RaceParkingPose start) {
+inline RaceParkingRoute racePlanTrackableParking(const RaceParkingSpace &space,RaceParkingPose start,float taskSpeed=.10f) {
     RaceParkingRoute result;std::vector<RaceParkingSearchTrial> searches;
     int expanded=0,candidates=0,rejected=0;
     // Wheel-angle state enlarged the lattice. Search toward a contained goal
@@ -377,7 +394,7 @@ inline RaceParkingRoute racePlanTrackableParking(const RaceParkingSpace &space,R
     // that crosses the near divider and losing all previously valid routes.
     for(float preview:{.10f,0.f})for(float weight:{1.5f,1.f})for(float scale:{1.f,.9f,.8f,.7f}) {
         auto candidate=racePlanParking(space,start,scale,[&](const RaceParkingRoute &route){
-            auto checked=route;checked.entryCurvaturePreview=preview;return raceParkingModelCompletes(space,checked);
+            auto checked=route;checked.entryCurvaturePreview=preview;return raceParkingModelCompletes(space,checked,taskSpeed);
         },weight,preview>0);
         candidate.entryCurvaturePreview=preview;
         searches.push_back({scale,weight,candidate.expanded,candidate.geometricCandidates,candidate.modelRejected,candidate.reason,preview});

@@ -36,6 +36,7 @@ if isinstance(minimum,bool) or not isinstance(minimum,(int,float)) or not math.i
 if track.get('diagnostics') is not True:raise SystemExit('需要 diagnostics=true；原配置没有改写。')
 for key in ['cruiseSpeed','curveSpeed','degradedSpeed']:track[key]=.1
 track['maxSpeed']=10.0
+race.setdefault('parkingSpeed',.30)
 if mode.startswith('mission'):race['forkMaxTime']=max(12.,race.get('forkMaxTime',4.))
 if mode.startswith('mission'):race['stopAfterCross']=False
 # 正式比赛的规则仍保留；signal/limit 为当前实验室的独立测试副本。
@@ -106,12 +107,13 @@ record['bypass_hard_speed_cap_mps']=track['maxSpeed'] if mode=='bypass' else Non
 record['ground_calibration_sha256']=sha(ground) if ground.is_file() and mode in ('bypass','parking-drive','mission','mission-lab','mission-preview','mission-lab-preview') else None
 record['sample_write_mode']='bounded_background_queue'
 record['parking_geometry_preview_only']=mode=='parking-preview'
-record['parking_control']={'enabled':mode=='parking-drive' or mode.startswith('mission') and 'lab' not in mode,'reverse_source':reverse_source,'bay':None,'selection_policy':'fully visible left bay, all assumed empty',
+record['parking_control']={'enabled':mode=='parking-drive' or mode.startswith('mission') and 'lab' not in mode,'reverse_source':reverse_source,'bay':None,'selection_policy':'nearby fully visible left or right bay, all assumed empty',
+    'parking_area_speed_cap_mps':race['parkingSpeed'],'exit_gate_release_restores_cruise':True,
     'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':3,'entrance_exit_turns_integrated':mode.startswith('mission') and 'lab' not in mode}
 record['reverse_check']={'operator_trigger_required':True,'speed_command_mps':-.08,'duration_s':.5,'command_is_not_measured_motion':True} if mode=='reverse-check' else None
 record['mission']={'enabled':mode.startswith('mission'),'lab_single_loop':'lab' in mode,'lap_finish_source':'post-parking FLOW or operator n; finish operator n','ground_arrow_assisted':True,'ground_arrow_turn_trigger':'parking_exit_stage_only'}
 record['processing_resolution']=[640,480]
-record['backend_abi']=4
+record['backend_abi']=5
 record['bypass_algorithm']='virtual_boundary_master640' if 'virtual' in mode or mode.startswith('mission') else 'metric_ground' if mode=='bypass' else 'shadow'
 Path(prefix+'-launch.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
 print('启动记录: '+prefix+'-launch.json')
@@ -122,7 +124,7 @@ if mode.startswith('mission'):
 elif mode.startswith('bypass-virtual'):
     print('虚拟边界绕障：a开始，空格停车；preview不驱动车轮。')
 elif mode=='parking-drive':
-    print('停车：自动选择完整可见的左侧车位；a执行，g重新识别，空格停。')
+    print('停车：自动选择完整可见的左侧或右侧车位；a执行，g重新识别，空格停。')
 elif mode in ('preview','calibrate','parking-preview'):
     print('NO MOTOR；按模式进行预览、标定或保存样本。')
 elif mode=='reverse-check':

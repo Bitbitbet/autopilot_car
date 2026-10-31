@@ -6,6 +6,7 @@
 struct RaceParkingMouthCandidate {
     cv::Point2f nearImage,farImage,nearGround,farGround;
     float support=0;
+    int side=-1;
 };
 // Rejected bays remain rejected in the current camera ground frame. Applied
 // command integration only prevents retry loops; it is not measured odometry.
@@ -37,16 +38,15 @@ public:
 };
 // Geometric paint detector, not an AI class or an occupancy detector. Only uses
 // the live corrected image and this car's ground map. Never reuses old clicks.
-inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouths(const cv::Mat &image,const RaceGroundMap &map,
-                                                                   const RaceParkingDimensions &dims={},std::vector<cv::Point2f> *junctionDebug=nullptr) {
-    if(image.type()!=CV_8UC3||image.size()!=cv::Size(640,480))return {};
-    constexpr float resolution=.005f,minX=-.62f,maxZ=1.3f;
-    constexpr int width=124,height=260;
-    cv::Mat hsv,white;cv::cvtColor(image,hsv,cv::COLOR_BGR2HSV);
-    cv::inRange(hsv,cv::Scalar(0,0,155),cv::Scalar(180,85,255),white);
+inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouthsSide(const cv::Mat &white,const RaceGroundMap &map,
+        const RaceParkingDimensions &dims,int side,std::vector<cv::Point2f> *junctionDebug) {
+    constexpr float resolution=.005f,minX=-.8f,maxZ=1.3f;
+    constexpr int width=160,height=260;
+    const float mirror=side<0?1.f:-1.f;
+    auto physical=[&](cv::Point2f p){return cv::Point2f{p.x*mirror,p.y};};
     cv::Mat bird=cv::Mat::zeros(height,width,CV_8UC1),visible=bird.clone();
     for(int row=0;row<height;++row)for(int col=0;col<width;++col) {
-        const auto p=map.toImage({minX+col*resolution,row*resolution});
+        const auto p=map.toImage(physical({minX+col*resolution,row*resolution}));
         if(!std::isfinite(p.x)||!std::isfinite(p.y)||p.x<6||p.x>=634||p.y<16||p.y>=440)continue;
         visible.at<uchar>(row,col)=255;bird.at<uchar>(row,col)=white.at<uchar>(int(std::lround(p.y)),int(std::lround(p.x)));
     }
@@ -59,7 +59,7 @@ inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouths(const cv::
     };
     struct Junction {cv::Point2f point;float score;};std::vector<Junction> junctions;
     const float slope=dims.stagger()/dims.depth;
-    for(float z=.015f;z<maxZ-.04f;z+=resolution)for(float x=-.38f;x<=-.08f;x+=resolution) {
+    for(float z=.015f;z<maxZ-.04f;z+=resolution)for(float x=-.48f;x<=-.055f;x+=resolution) {
         if(sample(x,z,0)!=1)continue;
         int stem=0,stemN=0,arm=0,armN=0,background=0,backgroundN=0;
         for(int i=-7;i<=7;++i) {int v=sample(x,z+i*.005f);if(v>=0){stem+=v;++stemN;}}
@@ -108,14 +108,28 @@ inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouths(const cv::
         }
     }
     std::sort(selected.begin(),selected.end(),[](auto a,auto b){return a.point.y<b.point.y;});
-    if(junctionDebug)for(auto j:selected)junctionDebug->push_back(j.point);
+    if(junctionDebug)for(auto j:selected)junctionDebug->push_back(physical(j.point));
     std::vector<RaceParkingMouthCandidate> mouths;
     for(size_t i=0;i<selected.size();++i)for(size_t j=i+1;j<selected.size();++j) {
         const auto a=selected[i].point,b=selected[j].point;
         if(std::abs(a.x-b.x)>.045f||!raceCheckParkingMouth(a,b,dims).valid)continue;
         // Require adjacent junctions on this side; do not skip a visible divider.
         if(std::any_of(selected.begin(),selected.end(),[&](auto k){return k.point.y>a.y+.08f&&k.point.y<b.y-.08f&&std::abs(k.point.x-(a.x+b.x)/2)<.05f;}))continue;
-        mouths.push_back({map.toImage(a),map.toImage(b),a,b,(selected[i].score+selected[j].score)/9});
+        const auto near=physical(a),far=physical(b);
+        mouths.push_back({map.toImage(near),map.toImage(far),near,far,(selected[i].score+selected[j].score)/9,side});
     }
+    return mouths;
+}
+inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouths(const cv::Mat &image,const RaceGroundMap &map,
+        const RaceParkingDimensions &dims={},std::vector<cv::Point2f> *junctionDebug=nullptr) {
+    if(image.type()!=CV_8UC3||image.size()!=cv::Size(640,480))return {};
+    cv::Mat hsv,white;cv::cvtColor(image,hsv,cv::COLOR_BGR2HSV);
+    cv::inRange(hsv,cv::Scalar(0,0,155),cv::Scalar(180,85,255),white);
+    auto mouths=raceDetectParkingMouthsSide(white,map,dims,-1,junctionDebug);
+    auto right=raceDetectParkingMouthsSide(white,map,dims,1,junctionDebug);
+    mouths.insert(mouths.end(),right.begin(),right.end());
+    // Prefer a nearby reachable-side mouth, rather than always preferring left.
+    const auto cost=[](const auto &m){return 1.5f*std::abs(m.nearGround.x)+.5f*m.nearGround.y-.02f*m.support;};
+    std::stable_sort(mouths.begin(),mouths.end(),[&](const auto &a,const auto &b){return cost(a)<cost(b);});
     return mouths;
 }
