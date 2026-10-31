@@ -78,6 +78,9 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
 
     RaceParkingSpace space(dims);auto route=racePlanTrackableParking(space,{0,-.4f,0},.30f);
     require(route.valid,"No model-trackable parking route at the new target speed");
+    require(raceParkingReadyToRejoin(space,{.04f,.2f,.35f}),"Basic alignment with slight paint overlap still demands precise reverse alignment");
+    require(!raceParkingReadyToRejoin(space,{0,.2f,.7f}),"A large sideways heading is incorrectly called basic alignment");
+    require(!raceParkingReadyToRejoin(space,{-.4f,.2f,.2f}),"A car still in the bay is incorrectly called back in the aisle");
     RaceParkingControl control(space,.30f);RaceParkingObservation observation{route.entry.front(),1,1,1,true};
     require(control.arm(route,observation,1,true),"Cannot arm target-speed parking");
     RaceParkingFrame rightBay;rightBay.locate({dims.aisle/2,.4f},{dims.aisle/2,.4f+dims.side});
@@ -100,5 +103,39 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         observation.pose=rightBay.local(physical,dims.aisle);
     }
     require(control.done()&&reverse-dwell>=3&&peak>.15f,"Target-speed entry/dwell/reverse did not finish or stayed at the old crawl speed");
+    require(!control.exitRecoveryUsed(),"Nominal right parking relies on command-distance recovery");
+    require(control.reverseReference().back().z>route.entry.front().z+.03f,"Reverse reference still follows the long original approach straight");
     std::cout<<"PASS target-speed mirrored right parking model; 3s dwell; long gate pause/resume; peak command="<<peak<<" m/s\n";
+
+    // A persistently biased position/heading must not request endless reverse.
+    // This is an estimated completion, deliberately distinct from observed exit.
+    RaceParkingControl biased(space,.30f);observation={route.entry.front(),1,1,1,true};
+    require(biased.arm(route,observation,1,true),"Cannot arm reverse-budget case");
+    clock=1;bool reversing=false;float previousSpeed=0;RaceParkingCommand command;
+    for(int i=0;i<3000&&!reversing;++i) {
+        clock+=.04;observation.captured=clock;++observation.sequence;
+        command=biased.update(observation,clock,.04,true,.3,previousSpeed);
+        require(!biased.failed(),"Budget case fails before reverse");
+        observation.pose=raceParkingAdvance(observation.pose,command.speed*.04,command.curvature,dims);
+        previousSpeed=command.speed;reversing=std::string(command.state)=="PARK_EXIT";
+    }
+    require(reversing,"Budget case never reaches reverse");
+    for(int i=0;i<1200&&!biased.done();++i) {
+        if(i==30) {
+            const float before=biased.reverseDistanceEstimate();
+            for(int wait=0;wait<50;++wait){clock+=.04;observation.captured=clock;++observation.sequence;
+                const auto held=biased.update(observation,clock,.04,false,.3,0);
+                require(held.speed==0&&!biased.failed(),"Gate pause during reverse changes the task to a fault");}
+            require(std::abs(biased.reverseDistanceEstimate()-before)<1e-6,"Zero-speed gate wait consumes the reverse distance budget");
+            previousSpeed=0;
+        }
+        clock+=.04;observation.captured=clock;++observation.sequence;
+        command=biased.update(observation,clock,.04,true,.3,previousSpeed);
+        require(!biased.failed(),"Biased reverse becomes a terminal race fault instead of forward rejoin");
+        observation.pose.z-=std::abs(command.speed)*.04;previousSpeed=command.speed;
+    }
+    require(biased.done()&&biased.exitRecoveryUsed()&&command.speed==0&&
+        std::string(command.reason)=="REVERSE_DISTANCE_BUDGET_FORWARD_REJOIN","Bad alignment still causes unbounded reverse");
+    require(biased.reverseDistanceEstimate()<=biased.reverseBudget()+.03f,"Reverse distance budget is substantially exceeded");
+    std::cout<<"PASS basic aisle alignment; clipped reverse straight; bounded reverse estimate transitions to forward rejoin\n";
 }

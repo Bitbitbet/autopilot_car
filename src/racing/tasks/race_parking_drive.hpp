@@ -314,7 +314,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(armed) {
                     const float appliedAngle=(float(PWMSERVOMID)-previousServo)/400*dims.fullLockDegrees*float(CV_PI)/180;
                     observation=poseFallback.update(observation,raceTime(),previousSpeed,bayFrame.handedness()*std::tan(appliedAngle)/dims.wheelbase,dims);
-                    command=controller.update(observation,raceTime(),dt,!traffic.stop,std::min(taskCruise,traffic.speedCap));
+                    command=controller.update(observation,raceTime(),dt,!traffic.stop,std::min(taskCruise,traffic.speedCap),previousSpeed);
                 }
                 else if(controller.failed())command=controller.status();
                 else command.reason=frozen?(corners.size()==2?"P_PLAN_ROUTE":"CLICK_NEAR_THEN_FAR_WHITE_LINE_TIPS"):taught?"A_START_PARKING":"F_FREEZE_AT_BAY_2";
@@ -390,7 +390,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 const float previousCommandSpeed=previousSpeed;
                 if(!virtualDecision.follow||speed==0)virtualFeedback.reset();
                 car->carControl(speed,servo);previousServo=servo;previousSpeed=speed;
-                test.observe(command.state,command.reason,speed,actuatorReason,!observation.estimated,controller.terminalRecoveryUsed());
+                test.observe(command.state,command.reason,speed,actuatorReason,!observation.estimated&&!controller.exitRecoveryUsed(),controller.terminalRecoveryUsed());
                 if(!armed)poseFallback.reset();
                 if(missionLog) {
                     auto row=mission.json();row["frame"]=frame;row["no_control"]=previewOnly;row["speed_command"]=speed;row["pwm"]=servo;
@@ -421,6 +421,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"pose",{observation.pose.x,observation.pose.z,observation.pose.yaw}},{"motion_valid",measured.valid},
                     {"pose_estimated",observation.estimated},
                     {"terminal_recovery",controller.terminalRecoveryUsed()},
+                    {"exit_distance_recovery",controller.exitRecoveryUsed()},
+                    {"reverse_command_distance_m",controller.reverseDistanceEstimate()},{"reverse_distance_budget_m",controller.reverseBudget()},
                     {"pose_source",observation.estimated?"APPLIED_COMMAND_ESTIMATE":"VISUAL_ODOMETRY"},
                     {"visual_pose",{visualObservation.pose.x,visualObservation.pose.z,visualObservation.pose.yaw}},
                     {"motion_epoch",measured.epoch},{"motion_reason",measured.reason},{"motion_inliers",measured.inliers},
