@@ -189,6 +189,23 @@ class RaceManager {
     }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label,int row) const { return seen(label)&&boxes[label].y+boxes[label].height>=row; }
+    bool gatePassageClear(const RaceSnapshot &snap,const cv::Mat &bin,const cv::Mat &image)const {
+        if(counts[LABEL_GATE]||bin.type()!=CV_8UC1||bin.size()!=cv::Size(640,480)||
+           image.type()!=CV_8UC3||image.size()!=bin.size()||snap.image.type()!=CV_8UC3||snap.image.size()!=bin.size())return false;
+        const int width=std::clamp(gateBox.width/2,60,160);
+        const cv::Rect region=cv::Rect(gateBox.x+gateBox.width/2-width/2,gateBox.y,width,gateBox.height)&cv::Rect(0,0,640,480);
+        if(region.width<40||region.height<8||cv::countNonZero(bin(region))<region.area()*.85)return false;
+        for(const auto &d:snap.detections) {
+            if(d.type!=LABEL_PERSON&&d.type!=LABEL_CONE&&d.type!=LABEL_BUSY)continue;
+            if(reviewRaceDetection(d,snap.image,cfg,&snap.crosswalk).accepted&&
+               (cv::Rect(d.x,d.y,d.width,d.height)&region).area()>0)return false;
+        }
+        // On a white road the yellow part of an undetected bar can itself
+        // binarize as road. Do not call a still-yellow passage unobstructed.
+        cv::Mat hsv,yellow;cv::cvtColor(image(region),hsv,cv::COLOR_BGR2HSV);
+        cv::inRange(hsv,cv::Scalar(15,100,90),cv::Scalar(40,255,255),yellow);
+        return cv::countNonZero(yellow)<region.area()*.08;
+    }
     bool updateObservation(const RaceSnapshot &snap,bool fresh) {
         if(!fresh||snap.sequence<=lastSequence||snap.captured<=lastCapture) return false;
         if(lastCapture<0||snap.captured-lastCapture>cfg.confirmGap) counts.fill(0);
@@ -272,7 +289,7 @@ public:
             crossBottomSeen=false; lastCrossSeen=now;
             enter(cfg.stopAfterCross?State::CrossApproach:State::SignalWait);
         }
-        // 道闸优先于路线选择；绿色通行牌不能放行尚未抬起的杆。
+        // 道闸优先于路线选择；抬杆或连续看清原横杆处的空路面才能放行。
         if(newFrame&&counts[LABEL_GATE]>0&&boxes[LABEL_GATE].y+boxes[LABEL_GATE].height>=cfg.triggerRow&&
            boxes[LABEL_GATE].width>=boxes[LABEL_GATE].height&&!gateWaiting) {
             gateBox=boxes[LABEL_GATE]; gateWaiting=true; gateClearSince=-1;
@@ -286,7 +303,7 @@ public:
                 const bool sameArea=center>=gateBox.x-48&&center<=gateBox.x+gateBox.width+48&&
                     std::abs(g.y+g.height-gateBox.y-gateBox.height)<120;
                 const bool open=seen(LABEL_GATE)&&sameArea&&g.height>=60&&g.width<float(g.height)*cfg.gateOpenAspect;
-                if(open) { if(gateClearSince<0) gateClearSince=now; }
+                if(open||gatePassageClear(snap,bin,currentImage)) { if(gateClearSince<0) gateClearSince=now; }
                 else gateClearSince=-1;
                 if(gateClearSince>=0&&now-gateClearSince>=cfg.clearTime) {gateWaiting=false;p.gateOpened=true;}
             }

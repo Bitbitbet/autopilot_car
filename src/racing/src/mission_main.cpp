@@ -484,10 +484,10 @@ int raceVehicleMain(int argc,char **argv) {
                 else if(bypassEnabled&&!raceBypassArmReady(navigation,observationTime,raceConfig)) {
                     std::cout<<"[Wait] 绕行启动需要已确认锥桶和鲜活可执行路线；当前 "<<navigation.state<<" | "<<navigation.reason<<'\n';
                 }
-                else if(virtualBypass&&navigation.hasTarget&&(!navigation.fresh||navigation.stop||!navigation.candidate)) {
+                else if(virtualBypass&&virtualBoundary.decision(navigation,true).stop) {
                     std::cout<<"[Wait] Virtual boundary "<<navigation.state<<" | "<<navigation.reason<<'\n';
                 }
-                else if((pilot.ready||((bypassEnabled||virtualBypass)&&bypassPilot.ready)) && raceManager.aiReady(observation,observationTime) && !joyLost && (!js || !js->isStopped()) && std::fabs(jsSpeed)<=0.05f) {
+                else if((virtualBypass||pilot.ready||(bypassEnabled&&bypassPilot.ready)) && raceManager.aiReady(observation,observationTime) && !joyLost && (!js || !js->isStopped()) && std::fabs(jsSpeed)<=0.05f) {
                     if(car && !car->resumeMotion(motionEpoch)) return;
                     mode=Mode::Auto; panic=false; jsSpeed=0; pilot.resetControl();
                 } else {
@@ -542,7 +542,7 @@ int raceVehicleMain(int argc,char **argv) {
             const auto bypass=virtualBypass?virtualBoundary.decision(navigation,mode==Mode::Auto):
                 bypassEnabled?bypassControl.update(navigation,observation,raceConfig,observationTime,mode==Mode::Auto):RaceBypassDecision{};
             if(navigationWorker&&bypassEnabled)navigationWorker->setControlState(mode==Mode::Auto,bypassControl.engaged());
-            auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image,bypass.authorizeCone);
+            auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image,bypass.authorizeCone,false,0,virtualBypass);
             const bool laneTask=std::string(racePlan.state)=="LANE"||std::string(racePlan.state)=="LIMIT_ZONE";
             if(bypassEnabled||virtualBypass) {
                 std::vector<PointX> left,right;
@@ -552,8 +552,9 @@ int raceVehicleMain(int argc,char **argv) {
                 }
                 bypassPilot.update(left,right,dt,speed);
                 if(bypass.involved) {
-                    if(bypass.stop||!laneTask||!bypassPilot.ready)racePlan.stop=true;
-                    if(laneTask) {racePlan.state=bypass.state;racePlan.reason=bypass.follow&&!bypassPilot.ready?"BYPASS_CONTROL_PATH_WAIT":bypass.reason;}
+                    if(bypass.stop||(!virtualBypass&&(!laneTask||!bypassPilot.ready)))racePlan.stop=true;
+                    if(laneTask) {racePlan.state=bypass.state;racePlan.reason=virtualBypass?bypass.reason:
+                        bypass.follow&&!bypassPilot.ready?"BYPASS_CONTROL_PATH_WAIT":bypass.reason;}
                 }
             }
             if(forkTrace) forkTrace->observe(raceFrame,observationTime,image,bin,track,observation,racePlan);
@@ -565,7 +566,7 @@ int raceVehicleMain(int argc,char **argv) {
             // Retain the unannotated control-frame image separately from the asynchronous AI image.
             cv::Mat forkCamera;if(captureFork)forkCamera=image.clone();
             track.drawImage(image);
-            if(mode==Mode::Auto && pilot.lost && !raceDirectionSeeking(racePlan) && !(bypassEnabled&&bypassControl.engaged())&&!(virtualBypass&&bypass.involved)) {
+            if(mode==Mode::Auto && pilot.lost && !virtualBypass && !raceDirectionSeeking(racePlan) && !(bypassEnabled&&bypassControl.engaged())) {
                 mode=Mode::Manual; panic=true; jsSpeed=0; pilot.resetControl();
                 stopReason=std::string("trusted lane lost; stop latched, press a after recovery; path=")+pilot.pathIssue;
             }
@@ -575,10 +576,16 @@ int raceVehicleMain(int argc,char **argv) {
             if(!panic && !stopping) {
                 if(mode==Mode::Auto) {
                     if(racePlan.stop) {pilot.resetControl();bypassPilot.resetControl();}
-                    else if(bypass.follow) {
+                    else if(bypass.follow&&(!virtualBypass||laneTask)) {
                         if(virtualBypass) {
-                            speed=bypassPilot.speedFor(std::min(cruise,racePlan.speedCap),dt);
-                            servo=virtualFeedback.update(navigation,bypassPilot.error,bypassPilot.servo,lastBypassServo,dt,previousCommandSpeed);
+                            if(navigation.candidate&&bypassPilot.ready&&!bypassPilot.lost) {
+                                speed=bypassPilot.speedFor(std::min(cruise,racePlan.speedCap),dt);
+                                servo=virtualFeedback.update(navigation,bypassPilot.error,bypassPilot.servo,lastBypassServo,dt,previousCommandSpeed);
+                            } else {
+                                speed=pilot.speedForDirection(std::min(cruise,racePlan.speedCap),dt,previousCommandSpeed);
+                                servo=raceVirtualRecoveryServo(navigation,pilot,lastBypassServo,dt);
+                                racePlan.reason=navigation.candidate?"VIRTUAL_PILOT_RECOVERY_CONTINUE":bypass.reason;
+                            }
                         } else {
                         routeSteering=raceGroundSteering(navigation,navigationConfig,previousCommandSpeed,lastBypassServo,dt);
                         if(routeSteering.valid) {
@@ -590,13 +597,18 @@ int raceVehicleMain(int argc,char **argv) {
                         speed=raceDirectionSpeed(racePlan,pilot,cruise,dt,previousCommandSpeed);
                         servo=raceDirectionServo(racePlan,PWMSERVOMID);
                     }
+                    else if(virtualBypass&&(!pilot.ready||pilot.lost)) {
+                        speed=pilot.speedForDirection(std::min(cruise,racePlan.speedCap),dt,previousCommandSpeed);
+                        servo=pilot.valid?pilot.servo:lastBypassServo;
+                        racePlan.reason="VIRTUAL_LANE_RECOVERY_CONTINUE";
+                    }
                     else {speed=pilot.speedFor(std::min(cruise,racePlan.speedCap),dt);servo=raceDirectionServo(racePlan,pilot.servo);}
                 }
                 else if(!trial.enabled()&&!bypassEnabled&&!virtualBypass) { speed=std::clamp(jsSpeed,-config.maxSpeed,config.maxSpeed); servo=jsServo; }
             }
             if(!virtualBypass||!bypass.follow||speed==0)virtualFeedback.reset();
             if(virtualBypass&&bypass.involved&&speed==0)servo=lastBypassServo;
-            lastBypassServo=(virtualBypass&&bypass.involved)||(bypass.follow&&speed>0)?servo:PWMSERVOMID;
+            lastBypassServo=(virtualBypass&&mode==Mode::Auto)||(bypass.follow&&speed>0)?servo:PWMSERVOMID;
             if(car) {
                 if(car->hasFault()) throw std::runtime_error("Serial command timeout during processing");
                 car->carControl(speed,servo);

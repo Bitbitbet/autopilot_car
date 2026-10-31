@@ -32,6 +32,34 @@ class RaceVirtualBoundary {
     static constexpr int nearRow=410;
     static constexpr float entryLeadRows=280,farBlendRows=160,geometryEpsilon=.001f;
 
+    void recoverGeometry(RaceObstaclePreviewPlan &p,const Track &track,bool automatic,
+                         double gap,float previousSpeed) {
+        // This is a steering recovery, not a fabricated collision-free path.
+        p.centers.clear();p.left.clear();p.right.clear();p.candidate=false;
+        p.stop=false;p.visibilityLimited=true;p.virtualLineCrossing=true;
+        if(!p.obstacles.empty()) {
+            primary=*std::max_element(p.obstacles.begin(),p.obstacles.end(),[](auto a,auto b){return a.area()<b.area();});
+            float middle=320;
+            if(!track.pointsEdgeLeft.empty()&&!track.pointsEdgeRight.empty())
+                middle=(track.pointsEdgeLeft.front().y+track.pointsEdgeRight.front().y)*.5f;
+            if(!direction)direction=primary.x+primary.width*.5f<=middle?1:-1;
+            if(automatic)active=true;
+            nearSeen|=primary.br().y>=nearRow;
+            missingTime=returnTime=0;returning=false;
+        } else if(active&&automatic&&gap>0&&gap<=.25&&previousSpeed>0) {
+            // Count only issued forward commands. This is not rear-clearance odometry.
+            if(!returning)missingTime+=gap*previousSpeed;else returnTime+=gap*previousSpeed;
+            if(missingTime>=holdCommandDistance)returning=true;
+            if(returnTime>=returnCommandDistance) {
+                active=nearSeen=reacquiring=false;heldOffset=0;
+                p.virtualVisualReturn=true;
+            }
+        }
+        p.primary=primary;p.direction=direction;p.hasTarget=active||!p.obstacles.empty();
+        p.state=returning?"VIRTUAL_RECOVER_RETURN":"VIRTUAL_RECOVER";
+        if(p.virtualVisualReturn)direction=0;
+    }
+
     // Recover only an already confirmed object in the CURRENT matched image.
     // Keep the last AI template fixed to avoid recursively learning background.
     // A missing model box alone must neither erase the route nor mean "passed".
@@ -146,7 +174,13 @@ public:
         if(s.sequence==sequence) {p=latest;p.fresh=true;return p;}
         if(s.sequence<sequence||s.captured<=capture){p.hasTarget=true;p.state="VIRTUAL_FRAME_ORDER";p.reason="MONOTONIC_FRAMES_REQUIRED";return p;}
         const double gap=capture<0?0:s.captured-capture;sequence=s.sequence;capture=s.captured;
-        auto finish=[&](const std::string &state,const std::string &reason){p.state=state;p.reason=reason;latest=p;return p;};
+        auto finish=[&](const std::string &state,const std::string &reason){
+            p.state=state;p.reason=reason;
+            if(state=="VIRTUAL_TOO_MANY_CONES"||state=="VIRTUAL_PATH_WAIT"||state=="VIRTUAL_CONFIRMING"||
+               state=="VIRTUAL_TARGET_CHANGED"||state=="VIRTUAL_LOST_BEFORE_NEAR"||state=="VIRTUAL_NO_CLEAR_PATH")
+                recoverGeometry(p,track,automatic,gap,previousCommandSpeed);
+            latest=p;return p;
+        };
         if(interrupted){p.hasTarget=true;return finish("VIRTUAL_FAULT","OPERATOR_INTERRUPTED_RESTART_REQUIRED");}
         if(s.image.type()!=CV_8UC3||s.image.size()!=cv::Size(640,480)){p.hasTarget=active;return finish("VIRTUAL_IMAGE_WAIT","MATCHED_IMAGE_REQUIRED");}
         std::vector<cv::Rect> boxes;
@@ -337,14 +371,26 @@ public:
     }
     RaceBypassDecision decision(const RaceObstaclePreviewPlan &p,bool automatic)const {
         RaceBypassDecision d;if(!automatic)return d;
-        d.involved=p.hasTarget||active||interrupted;
-        d.stop=d.involved&&(!p.fresh||p.stop||!p.candidate);
+        d.involved=p.hasTarget||active||interrupted||!p.fresh||p.state=="VIRTUAL_IMAGE_WAIT";
+        const bool recovery=p.state=="VIRTUAL_RECOVER"||p.state=="VIRTUAL_RECOVER_RETURN";
+        d.stop=d.involved&&(!p.fresh||p.stop||(!p.candidate&&!recovery));
         d.follow=d.involved&&!d.stop;
         d.authorizeCone=d.follow||p.virtualVisualReturn||(p.fresh&&!p.hasTarget&&p.reason=="OFFROAD_CONES");
         // State text is owned by the caller's plan through the control iteration.
         d.state=p.state.c_str();d.reason=p.reason.c_str();return d;
     }
 };
+
+inline uint16_t raceVirtualRecoveryServo(const RaceObstaclePreviewPlan &p,const RaceTaskPilot &lane,
+                                        uint16_t previous,float dt) {
+    uint16_t target=previous;
+    if(!p.obstacles.empty()&&p.direction) {
+        target=uint16_t(std::clamp(int(PWMSERVOMID)+p.direction*320,int(PWMSERVOMIN),int(PWMSERVOMAX)));
+    } else if(p.state=="VIRTUAL_RECOVER_RETURN"||p.virtualVisualReturn) {
+        target=lane.valid?lane.servo:PWMSERVOMID;
+    }
+    return raceBypassServo(target,previous,dt);
+}
 
 // Bounded integral correction for persistent IMAGE tracking error. This is
 // inferred understeer, not measured wheel angle or measured vehicle motion.

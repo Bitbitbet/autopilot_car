@@ -43,8 +43,8 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     }
     std::cout<<"PASS bilateral mouth detection; off-centre starts; mirrored curvature/heading; nearer-side selection\n";
 
-    // A gate must release from the raised bar at either end, not from a lost
-    // detection or another FLOW sign. Exercise the same manager used on-car.
+    // Missing detections without a visible passage must still wait. Raised
+    // bars and continuously visible empty road are separate release sources.
     RaceManager manager(config);RaceSnapshot ai;RacePlan plan;int sequence=0;double time=0;
     auto step=[&](std::vector<PredictResult> detections) {
         ai.sequence=++sequence;ai.captured=time+=.07;ai.detections=std::move(detections);
@@ -52,10 +52,35 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     };
     for(int i=0;i<4;++i)plan=step({box(LABEL_GATE,100,260,440,70)});
     require(plan.stop&&plan.gateWaiting,"Closed entrance gate does not stop the vehicle");
-    for(int i=0;i<12;++i){plan=step({box(LABEL_FLOW)});require(plan.stop&&plan.gateWaiting&&!plan.gateOpened,"FLOW or absent gate detections release a closed gate");}
+    for(int i=0;i<12;++i){plan=step({box(LABEL_FLOW)});require(plan.stop&&plan.gateWaiting&&!plan.gateOpened,"Absent imagery or a FLOW sign alone releases a closed gate");}
     bool opened=false;
     for(int i=0;i<16&&!opened;++i){plan=step({box(LABEL_GATE,500,120,40,210)});opened=plan.gateOpened;}
     require(opened&&!plan.gateWaiting&&!plan.stop,"Raised gate at the far end never releases");
+
+    {
+        RaceManager passage(config);RaceSnapshot snapshot;RacePlan result;int frame=0;double clock=0;
+        cv::Mat scene(480,640,CV_8UC3,cv::Scalar(120,120,120));
+        auto tick=[&](std::vector<PredictResult> detections,const cv::Mat &road,const cv::Mat &view) {
+            snapshot.sequence=++frame;snapshot.captured=clock+=.07;snapshot.image=view;
+            snapshot.detections=std::move(detections);
+            return passage.update(snapshot,clock,.07,true,road,track,view,true,true);
+        };
+        const auto gate=box(LABEL_GATE,100,260,440,70);
+        for(int i=0;i<4;++i)result=tick({gate},binary,scene);
+        require(result.stop&&result.gateWaiting,"Missing-gate release case did not latch the closed gate");
+        result=tick({},binary,scene);
+        require(result.stop&&!result.gateOpened,"One missed gate frame releases immediately");
+        result=tick({gate},binary,scene);
+        require(result.stop,"A returning closed gate does not reset the clearance interval");
+        cv::Mat blocked=binary.clone();cv::rectangle(blocked,{220,260,200,70},{0},-1);
+        for(int i=0;i<12;++i){result=tick({},blocked,scene);require(result.stop&&!result.gateOpened,"Missing gate box releases over an occluded road");}
+        cv::Mat yellow=scene.clone();cv::rectangle(yellow,{220,260,200,70},{0,220,220},-1);
+        for(int i=0;i<12;++i){result=tick({},binary,yellow);require(result.stop&&!result.gateOpened,"Undetected yellow bar is treated as empty white road");}
+        for(int i=0;i<12;++i){result=tick({box(LABEL_CONE,290,270,60,50)},binary,scene);require(result.stop&&!result.gateOpened,"Another object in the gate passage does not block release");}
+        bool released=false;
+        for(int i=0;i<16&&!released;++i){result=tick({},binary,scene);released=result.gateOpened;}
+        require(released&&!result.stop&&!result.gateWaiting,"Continuously visible empty road cannot release an undetected/removed gate");
+    }
 
     RaceMission mission;mission.start();RaceSnapshot signs;signs.detections={box(LABEL_PARK)};
     for(int i=1;i<=3;++i){signs.sequence=i;mission.observeSigns(signs,true);}
@@ -74,7 +99,7 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     traffic.gateWaiting=traffic.stop=false;traffic.gateOpened=true;mission.observeGate(traffic);
     require(mission.speedLimit(.5,.3)==.5f&&!mission.parkingSpeedLimited(),"Exit gate opening does not restore configured cruise");
     require(std::min(mission.speedLimit(.5,.3),.4f)==.4f,"Restored cruise ignores an active traffic limit");
-    std::cout<<"PASS closed/raised gate and no disappearance release; entry/exit speed phases; cruise restoration under traffic limits\n";
+    std::cout<<"PASS closed/raised gate and visible-clear disappearance release; flicker/occlusion/yellow/obstacle rejection; entry/exit speed phases; cruise restoration under traffic limits\n";
 
     RaceParkingSpace space(dims);auto route=racePlanTrackableParking(space,{0,-.4f,0},.30f);
     require(route.valid,"No model-trackable parking route at the new target speed");

@@ -366,9 +366,13 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         std::vector<PointX> left,right;for(auto p:virtualPlan.left)left.emplace_back(p.x,int(std::lround(p.y)));
                         for(auto p:virtualPlan.right)right.emplace_back(p.x,int(std::lround(p.y)));
                         virtualPilot.update(left,right,dt,previousSpeed);
-                        if(virtualDecision.follow&&virtualPilot.ready&&!traffic.stop) {
+                        if(virtualDecision.follow&&virtualPlan.candidate&&virtualPilot.ready&&!virtualPilot.lost&&!traffic.stop) {
                             speed=virtualPilot.speedFor(std::min(taskCruise,traffic.speedCap),dt);
                             servo=virtualFeedback.update(virtualPlan,virtualPilot.error,virtualPilot.servo,previousServo,dt,previousSpeed);command.state=virtualDecision.state;command.reason=virtualDecision.reason;
+                        } else if(virtualDecision.follow&&!traffic.stop) {
+                            speed=pilot.speedForDirection(std::min(taskCruise,traffic.speedCap),dt,previousSpeed);
+                            servo=raceVirtualRecoveryServo(virtualPlan,pilot,previousServo,dt);
+                            command.state=virtualDecision.state;command.reason=virtualPlan.candidate?"VIRTUAL_PILOT_RECOVERY_CONTINUE":virtualDecision.reason;
                         } else {speed=0;servo=previousServo;command.reason=virtualDecision.reason;}
                     }
                     const int required=mission.routeDirection()<0?RoadLeft:mission.routeDirection()==2?RoadStraight:0;

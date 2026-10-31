@@ -177,5 +177,49 @@ int main(int argc,char **argv){try{
     require(compact.size()==cv::Size(640,300),"Native decision image not safely reduced for display only");
     auto smallBox=box(LABEL_CONE,600,400,30,40);require(raceDetectionBoxValid(smallBox),"Detector rejects native right half");
     std::cout<<"PASS native cone corridor, full-width detections and display-only thumbnails\n";
+    {
+        RaceVirtualBoundary recovery(navigation);RaceSnapshot s;s.image=image;
+        RaceObstaclePreviewPlan p;int sequence=0;double clock=0;
+        auto step=[&](const cv::Mat &road,const Track &edges,std::vector<PredictResult> detections) {
+            s.sequence=++sequence;s.captured=clock+=.07;s.detections=std::move(detections);
+            return recovery.update(s,clock,road,edges,config,true,.3);
+        };
+        p=step(binary,track,{box(LABEL_CONE,180,250,70,70)});
+        require(p.state=="VIRTUAL_RECOVER"&&!p.stop&&!p.candidate&&p.direction==1,"Initial cone confirmation still stops or chooses the obstacle side");
+        auto decision=recovery.decision(p,true);
+        require(decision.follow&&!decision.stop&&decision.authorizeCone,"Recovery without a planned corridor is rejected by the decision layer");
+        RaceTaskPilot missing(pilotConfig);missing.update({}, {},.07,.3);
+        require(missing.speedForDirection(.3,.07,.3)>0&&raceVirtualRecoveryServo(p,missing,1500,.07)>1500,
+                "No-lane recovery cannot issue forward speed and a rightward steering command");
+        Track noEdges;cv::Mat noRoad=cv::Mat::zeros(480,640,CV_8UC1);
+        for(int i=0;i<5;++i) {
+            p=step(noRoad,noEdges,{box(LABEL_CONE,180,250,70,70)});
+            require(!p.stop&&recovery.decision(p,true).follow,"Lost road edges still stop an active bypass");
+        }
+        bool resumed=false;
+        for(int i=0;i<80;++i) {
+            p=step(noRoad,noEdges,{});
+            require(!p.stop&&!recovery.decision(p,true).stop,"Missing cone/road turns recovery into a stop");
+            if(!p.hasTarget){resumed=true;break;}
+        }
+        require(resumed,"Geometry recovery never hands back to forward lane recovery");
+        // An oversized obstacle leaves no constrained centre path. Continue
+        // steering instead of presenting a fake valid corridor or zero speed.
+        p=step(binary,track,{box(LABEL_CONE,90,200,460,210)});
+        require(!p.stop&&recovery.decision(p,true).follow,"Envelope failure stops the vehicle");
+        for(int i=0;i<4;++i)p=step(binary,track,{box(LABEL_CONE,90,200,460,210)});
+        require(!p.candidate&&p.state=="VIRTUAL_RECOVER"&&!recovery.decision(p,true).stop,"No-clear-path recovery is not explicit or still requests a stop");
+        p=recovery.update(s,clock+1,noRoad,noEdges,config,true,.3);
+        require(recovery.decision(p,true).stop,"Geometry recovery disabled stale-data stopping");
+        p=step(binary,track,{box(LABEL_PERSON)});
+        require(p.stop&&recovery.decision(p,true).stop,"Geometry recovery overrides a person stop");
+        RaceVirtualBoundary mirrored(navigation);s.sequence=1;s.captured=1;s.detections={box(LABEL_CONE,390,250,70,70)};
+        p=mirrored.update(s,1,noRoad,noEdges,config,true,.3);
+        require(p.direction==-1&&raceVirtualRecoveryServo(p,missing,1500,.07)<1500,"Leftward recovery is not mirrored");
+        RaceVirtualBoundary invalid(navigation);s.sequence=2;s.captured=2;s.image.release();s.detections.clear();
+        p=invalid.update(s,2,noRoad,noEdges,config,true,.3);
+        require(invalid.decision(p,true).stop,"Missing matched imagery is mistaken for recoverable road geometry");
+        std::cout<<"PASS virtual geometry recovery keeps moving; confirmation/no-road/envelope/lost-target; mirrored steering; stale/person stops preserved\n";
+    }
     fs::remove_all(temp);return 0;
 }catch(const std::exception &e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}
