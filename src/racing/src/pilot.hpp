@@ -67,6 +67,11 @@ class AutoPilot {
 
     // 按 severity / 置信度算出指令速度（含加、减速限幅）。
     float speedFor(float cruise, float dt);
+    // Task recovery may have kept moving while visual path state was reset.
+    // Seed only the speed ramp from the last applied command, never pose/PD.
+    void synchronizeAppliedSpeed(float speed) {
+        commandedSpeed=std::isfinite(speed)?std::clamp(speed,0.f,cfg::MAX_SPEED):0.f;
+    }
 
     // 清掉 PD 与速度斜坡状态（切模式、停车、丢线时调用）。
     void resetControl() {

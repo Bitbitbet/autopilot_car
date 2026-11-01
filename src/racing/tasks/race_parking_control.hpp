@@ -62,6 +62,10 @@ inline bool raceParkingReadyToRejoin(const RaceParkingSpace &space,RaceParkingPo
     if(!std::isfinite(pose.x)||!std::isfinite(pose.z)||!std::isfinite(pose.yaw))return false;
     if(std::abs(raceParkingAngle(pose.yaw))>.20f)return false;
     for(auto point:space.body(pose,0))if(std::abs(point.x)>space.dimensions().aisle/2+.025f)return false;
+    // A near-boundary body can be inside now yet point out of the aisle. Check
+    // a short straight continuation before releasing the alignment controller.
+    const auto projected=raceParkingAdvance(pose,.25f,0,space.dimensions());
+    for(auto point:space.body(projected,0))if(std::abs(point.x)>space.dimensions().aisle/2+.01f)return false;
     return true;
 }
 class RaceParkingControl {

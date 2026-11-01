@@ -143,6 +143,7 @@ struct RacePlan {
     float speedCap=10.f;
     bool stop=false,buzzer=false,fresh=false;
     bool selectedBranch=false;
+    bool alignRoad=false;
     bool gateWaiting=false,gateOpened=false;
     int guideDirection=0;
     float guidePwm=0;
@@ -184,7 +185,7 @@ class RaceManager {
         // directional pulse, then ease off instead of holding full lock until
         // a restrictive far-road test eventually succeeds.
         if(elapsed<.40)return 260+40*std::clamp(float(elapsed/.20),0.f,1.f);
-        return 300-150*std::clamp(float((elapsed-.40)/.60),0.f,1.f);
+        return 300*(1-std::clamp(float((elapsed-.40)/1.0),0.f,1.f));
     }
     static bool corridorCenters(const RacePath &path,float &nearCenter,float &farCenter,float &heading) {
         if(path.left.size()<20||path.right.size()!=path.left.size())return false;
@@ -192,9 +193,14 @@ class RaceManager {
         for(size_t i=0;i<samples;++i) {
             const auto center=[&](size_t j){return (path.left[j].y+path.right[j].y)*.5f;};
             nearCenter+=center(i)/samples;farCenter+=center(path.left.size()-1-i)/samples;
-            heading+=center(i+samples)/samples;
         }
-        heading-=nearCenter;return true;
+        float nearRow=0,aheadRow=0,aheadCenter=0;int count=0;
+        for(size_t i=0;i<samples;++i)nearRow+=path.left[i].x/float(samples);
+        for(size_t i=0;i<path.left.size();++i)if(nearRow-path.left[i].x>=64&&nearRow-path.left[i].x<=128){
+            aheadRow+=path.left[i].x;aheadCenter+=(path.left[i].y+path.right[i].y)*.5f;++count;
+        }
+        if(count<4)return false;
+        heading=(aheadCenter/count-nearCenter)*80/(nearRow-aheadRow/count);return true;
     }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label,int row) const { return seen(label)&&boxes[label].y+boxes[label].height>=row; }
@@ -433,8 +439,11 @@ public:
                             corridorCenters(geometry,unionNear,unionFar,unionHeading)&&direction*(farCenter-unionFar)>24;
                         const bool sameTarget=visible&&targetVisibleTime>0&&std::isfinite(targetCenter)&&
                             std::abs(farCenter-targetCenter)<80;
-                        const bool centeredAfterTurn=!routeArmed&&elapsed>=.65&&geometry.splitRows==0&&
-                            std::abs(nearCenter-320)<60&&std::abs(farCenter-320)<80&&std::abs(heading)<24;
+                        // After the initial Y turn, a connected single road can
+                        // be off-centre/tilted: requiring it to be aligned before
+                        // allowing alignment control is a circular dependency.
+                        const bool centeredAfterTurn=!routeArmed&&elapsed>=1.0&&geometry.splitRows==0&&
+                            std::abs(nearCenter-320)<130;
                         const bool target=visible&&(splitTarget||sameTarget||centeredAfterTurn||
                             (direction*(farCenter-nearCenter)>40&&direction*(farCenter-320)>20));
                         // One visible patch must not cancel the strong turn.
@@ -445,15 +454,18 @@ public:
                         if(targetVisibleTime>=std::max(.18f,cfg.forkConfirmTime)) {
                             const float guide=p.guidePwm;enter(State::ForkSelect);handoffPwm=guide;p.buzzer=true;
                         } else if(elapsed>=cfg.forkMaxTime) {enter(State::Fault);reviewReason="SIGNED_ROAD_REACQUIRE_TIMEOUT";}
+                        if(p.guidePwm<=0){p.guideDirection=0;p.alignRoad=true;p.reason="SIGN_PULSE_COMPLETE_ROAD_RECOVERY";}
                     }
                 }
             }
         }
         if(state==State::ForkSelect) {
+            p.alignRoad=true;
             p.guideDirection=direction==2?0:direction;p.guidePwm=0;
             p.speedCap=std::min(p.speedCap,forkSpeed);
             p.state=direction<0?"FORK_LEFT":direction==2?"FORK_STRAIGHT":"FORK_RIGHT"; p.reason=routeArmed?"MISSION_CONNECTED_BRANCH":"CONNECTED_BRANCH";
             p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true); p.selectedBranch=true;
+            if(geometry.splitRows==0)p.path=raceBranchPath(geometryBin,track,2,cfg,signRegions,false);
             bool aligned=direction==2;
             if(direction!=2) {
                 float nearCenter=0,farCenter=0,heading=0;
@@ -462,20 +474,23 @@ public:
                 p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/(routeArmed?.65f:.25f),0.f,1.f);
                 if(continuous){handoffTime+=dt;targetCenter=farCenter;}
                 else {
-                    // Do not feed an abruptly substituted opposite road to the
-                    // pilot. Continue the signed turn instead of latching stop.
-                    enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.0);
-                    p.selectedBranch=false;p.path={};p.laneBlend=0;p.guidePwm=guidancePwm(now-seekSince);
-                    p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
-                    p.reason="TARGET_ROAD_LOST_KEEP_SIGN_GUIDANCE";return p;
+                    // Target was already acquired. Keep recovering the current
+                    // road; do not turn again just because its far end moved.
+                    targetCenter=std::numeric_limits<float>::quiet_NaN();alignedTime=0;
+                    p.selectedBranch=false;p.path={};p.laneBlend=1;p.guidePwm=0;p.guideDirection=0;
+                    p.reason="TARGET_ROAD_LOST_CURRENT_LANE_RECOVERY";return p;
                 }
-                if(continuous&&p.laneBlend>=1&&std::abs(nearCenter-320)<80&&std::abs(heading)<32)alignedTime+=dt;
+                if(continuous&&p.laneBlend>=1&&std::abs(nearCenter-320)<40&&std::abs(heading)<12)alignedTime+=dt;
                 else alignedTime=0;
                 aligned=alignedTime>=.18f;
                 if(continuous)p.reason=p.laneBlend<1?"TARGET_ROAD_GRADUAL_HANDOFF":"COMMITTED_ROAD_CENTER_TRACKING";
             }
             if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
-            else if(now-stateSince>cfg.forkMaxTime) { enter(State::Fault); reviewReason="FORK_TIMEOUT"; }
+            else if(now-stateSince>cfg.forkMaxTime) {
+                if(continueGeometry){stateSince=now;handoffPwm=0;handoffTime=1;p.guidePwm=0;p.laneBlend=1;
+                    p.reason="ACQUIRED_ROAD_ALIGNMENT_CONTINUE";}
+                else {enter(State::Fault);reviewReason="FORK_TIMEOUT";}
+            }
             else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0&&aligned) {
                 exitTime+=dt;
                 if(exitTime>=cfg.forkExitTime) {
@@ -496,9 +511,10 @@ public:
            failureReason=="SIGNED_ROAD_REACQUIRE_TIMEOUT"||failureReason=="FORK_NOT_CONFIRMED_TIMEOUT")) {
             // Painted geometry warnings must not latch the competition run.
             // Seek the committed side again, then reacquire current road edges.
-            enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.0);
+            enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.4);
             p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
             p.guidePwm=p.guideDirection?guidancePwm(now-seekSince):0;p.laneBlend=p.guideDirection?0:1;
+            if(p.guidePwm<=0){p.guideDirection=0;p.alignRoad=true;}
             p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
         }
         else if(state==State::Fault) { p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; }

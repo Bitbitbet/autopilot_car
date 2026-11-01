@@ -34,13 +34,15 @@ extern "C" RacePerception *raceCreatePerceptionV5(const RaceConfig *input) {
     // 模型初始化及其旧版 NMS 编译发生在打开电机串口之前。
     float floor=config.verifyStopCandidates?std::min(config.confidence,config.stopCandidateConfidence):config.confidence;
     if(config.verifyCrosswalkGeometry) floor=std::min(floor,config.crossCandidateConfidence);
+    floor=std::min(floor,.10f); // Retain low PARK scores for diagnostics, not automatic acceptance.
     auto detector=std::make_shared<Detection>(path.string(),floor);
     return new RacePerception([detector,config](const cv::Mat &frame) {
         detector->inference(frame);
         std::vector<PredictResult> result;
         for(const auto &d:detector->results)
             if(d.score>=config.confidence||(config.verifyStopCandidates&&d.type==LABEL_STOP&&d.score>=config.stopCandidateConfidence)||
-               (config.verifyCrosswalkGeometry&&d.type==LABEL_CROSS&&d.score>=config.crossCandidateConfidence))
+               (config.verifyCrosswalkGeometry&&d.type==LABEL_CROSS&&d.score>=config.crossCandidateConfidence)||
+               (d.type==LABEL_PARK&&d.score>=.10f))
                 result.push_back(d);
         return result;
     },config);

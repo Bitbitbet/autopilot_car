@@ -566,7 +566,7 @@ int raceVehicleMain(int argc,char **argv) {
             // Retain the unannotated control-frame image separately from the asynchronous AI image.
             cv::Mat forkCamera;if(captureFork)forkCamera=image.clone();
             track.drawImage(image);
-            if(mode==Mode::Auto && pilot.lost && !virtualBypass && !raceDirectionSeeking(racePlan) && !(bypassEnabled&&bypassControl.engaged())) {
+            if(mode==Mode::Auto && pilot.lost && !virtualBypass && !raceDirectionSeeking(racePlan) && !racePlan.alignRoad && !(bypassEnabled&&bypassControl.engaged())) {
                 mode=Mode::Manual; panic=true; jsSpeed=0; pilot.resetControl();
                 stopReason=std::string("trusted lane lost; stop latched, press a after recovery; path=")+pilot.pathIssue;
             }
@@ -597,12 +597,13 @@ int raceVehicleMain(int argc,char **argv) {
                         speed=raceDirectionSpeed(racePlan,pilot,cruise,dt,previousCommandSpeed);
                         servo=raceDirectionServo(racePlan,PWMSERVOMID);
                     }
-                    else if(virtualBypass&&(!pilot.ready||pilot.lost)) {
+                    else if((virtualBypass||racePlan.alignRoad)&&(!pilot.ready||pilot.lost)) {
                         speed=pilot.speedForDirection(std::min(cruise,racePlan.speedCap),dt,previousCommandSpeed);
-                        servo=pilot.valid?pilot.servo:lastBypassServo;
+                        servo=raceLaneRecoveryServo(racePlan,pilot,lastBypassServo,dt);
                         racePlan.reason="VIRTUAL_LANE_RECOVERY_CONTINUE";
                     }
-                    else {speed=pilot.speedFor(std::min(cruise,racePlan.speedCap),dt);servo=raceDirectionServo(racePlan,pilot.servo);}
+                    else {speed=pilot.speedFor(std::min(cruise,racePlan.speedCap),dt);servo=raceDirectionServo(racePlan,
+                        racePlan.alignRoad&&pilot.alignment.valid?pilot.alignment.servo:pilot.servo);}
                 }
                 else if(!trial.enabled()&&!bypassEnabled&&!virtualBypass) { speed=std::clamp(jsSpeed,-config.maxSpeed,config.maxSpeed); servo=jsServo; }
             }

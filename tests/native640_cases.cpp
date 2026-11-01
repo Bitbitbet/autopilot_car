@@ -14,6 +14,14 @@ static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--park-sign-photo") {
+        auto image=cv::imread(argv[1]);require(!image.empty(),"Missing supplied parking plate photo");
+        const float scale=std::min(640.f/image.cols,480.f/image.rows);cv::Mat resized,canvas(480,640,CV_8UC3,cv::Scalar(80,80,80));
+        cv::resize(image,resized,{},scale,scale);resized.copyTo(canvas(cv::Rect(0,0,resized.cols,resized.rows)));
+        const auto found=raceParkingPShape(canvas);std::cout<<"P shape "<<found<<'\n';
+        require(found.area()>0,"Supplied circular P/car/text plate was not matched");
+        std::cout<<"PASS supplied parking plate photo shape (phone image, not vehicle inference)\n";return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--parking-stale-field") {
         const fs::path run(argv[1]);nlohmann::json saved;std::ifstream(run/"parking-route.json")>>saved;
         RaceParkingRoute route;route.valid=true;route.entryCurvaturePreview=saved.at("entry_curvature_preview_m");
@@ -97,6 +105,18 @@ int main(int argc,char **argv){try{
     RaceTaskPilot pilot(pilotConfig);
     for(int i=0;i<8;++i)pilot.update(track.pointsEdgeLeft,track.pointsEdgeRight,.07,0);
     require(pilot.ready&&std::abs(pilot.center-320)<4,"Master Pilot not tracking native midpoint");
+    pilot.update(track.pointsEdgeLeft,track.pointsEdgeRight,.08,.25);
+    const float beforeGap=pilot.speedFor(.25,.08);
+    pilot.update({}, {},.08,beforeGap);require(!pilot.ready,"Blank road unexpectedly valid");
+    const float recovery=pilot.speedForDirection(.25,.08,beforeGap);
+    pilot.update(track.pointsEdgeLeft,track.pointsEdgeRight,.08,recovery);
+    require(pilot.speedFor(.25,.08)>=recovery-.04,"Fresh road restarts speed ramp at zero after moving recovery");
+    pilot.update(track.pointsEdgeLeft,track.pointsEdgeRight,.08,0);
+    require(pilot.speedFor(.25,.08)<.04,"Actual stop fails to reset acceleration ramp");
+    {RacePlan p;p.alignRoad=true;pilot.update({}, {},.08,0);
+     require(raceLaneRecoveryServo(p,pilot,1200,.08)>1200&&raceLaneRecoveryServo(p,pilot,1800,.08)<1800,
+        "No-road recovery retains the expired turn pulse");}
+    std::cout<<"PASS moving geometry recovery preserves applied speed; actual stop resets ramp\n";
     std::cout<<"PASS master Track/Pilot full-image row map; no compatibility edge engine\n";
 
     const std::vector<cv::Point> left{{190,210},{280,150},{280,186},{400,186},{400,234},{280,234},{280,270}};
@@ -108,6 +128,25 @@ int main(int argc,char **argv){try{
         require(found.allowed==RoadLeft,"Native straight-tail/bent-tail left ground arrow not recognized");
     }
     RaceMission mission;mission.start();RaceSnapshot ai;RacePlan traffic;traffic.fresh=true;traffic.state="LANE";
+    {cv::Mat plate(480,640,CV_8UC3,cv::Scalar(90,90,90));
+     cv::circle(plate,{320,220},90,{150,30,10},-1);
+     cv::putText(plate,"P",{273,244},cv::FONT_HERSHEY_SIMPLEX,3,{255,255,255},13);
+     require(raceParkingPShape(plate).area()>0,"Blue P shape not recognized");
+     RaceMission m;m.start();RaceSnapshot s;s.image=plate;
+     for(int i=1;i<=4;++i){s.sequence=i;s.captured=i*.07;m.observeSigns(s,true);}
+     require(m.json()["park_evidence"]=="BLUE_P_SHAPE"&&!m.parkingZone(),"Shape bypasses first-lap stage restriction");
+     RacePlan t;t.fresh=true;t.selectedBranch=true;t.guideDirection=-1;t.state="FORK_LEFT";m.observe(s,t,false);
+     t.selectedBranch=false;t.state="LANE";m.observe(s,t,false);
+     for(int i=5;i<=7;++i){s.sequence=i;s.captured=i*.07;m.observeSigns(s,true);}
+     require(m.parkingZone()&&m.routeDirection()==-1,"Fresh P shape does not authorize eligible second-lap entry");
+     for(const char *letter:{"O","B","R"}){
+        cv::circle(plate,{320,220},90,{150,30,10},-1);
+        cv::putText(plate,letter,{273,244},cv::FONT_HERSHEY_SIMPLEX,3,{255,255,255},13);
+        require(raceParkingPShape(plate).empty(),"Non-P letter accepted as parking");}
+     cv::circle(plate,{320,220},90,{150,30,10},-1);cv::arrowedLine(plate,{360,220},{270,220},{255,255,255},16);
+     require(raceParkingPShape(plate).empty(),"Blue direction arrow accepted as parking");
+     require(raceParkingPShape({}).empty(),"Missing frame fabricates P sign");}
+    std::cout<<"PASS blue P shape; non-P rejection; first-lap isolation; eligible repeated shape entry\n";
     RaceGroundArrow arrow;arrow.allowed=RoadLeft;
     for(int i=1;i<5;++i)mission.observeExitArrow(arrow,i,true);
     require(!mission.exitArrowTurnAuthorized(),"Ground arrow triggers before parking");
@@ -167,10 +206,11 @@ int main(int argc,char **argv){try{
     // Strong signed guidance must hand over gradually, then permit correction
     // in either direction once the target-road pilot owns the steering.
     {RacePlan p;p.fresh=true;p.guideDirection=-1;p.guidePwm=320;p.selectedBranch=true;
-     p.laneBlend=0;require(raceDirectionServo(p,1600)==1180,"Handoff drops initial strong guidance");
-     p.laneBlend=.5;require(raceDirectionServo(p,1600)==1390,"Handoff is not blended");
+     p.laneBlend=0;require(raceDirectionServo(p,1400)==1180,"Same-direction handoff drops guidance");
+     require(raceDirectionServo(p,1600)==1600,"Initial handoff cancels countersteer");
+     p.laneBlend=.5;require(raceDirectionServo(p,1400)==1290,"Same-direction handoff is not blended");
      p.laneBlend=1;require(raceDirectionServo(p,1600)==1600,"Left commitment blocks rightward centering correction");
-     p.guideDirection=1;p.laneBlend=0;require(raceDirectionServo(p,1400)==1820,"Right guidance not mirrored");
+     p.guideDirection=1;p.laneBlend=0;require(raceDirectionServo(p,1400)==1400,"Right guidance cancels countersteer");
      p.laneBlend=1;require(raceDirectionServo(p,1400)==1400,"Right commitment blocks leftward centering correction");}
     cv::Mat split=binary.clone();cv::rectangle(split,{260,0,120,300},{0},-1);
     for(int sign:{LABEL_YLEFT,LABEL_YRIGHT}) {
@@ -193,17 +233,35 @@ int main(int argc,char **argv){try{
         snapshot.detections={box(direction<0?LABEL_YLEFT:LABEL_YRIGHT)};
         auto step=[&](const cv::Mat &b){snapshot.sequence=++i;snapshot.captured=i*.07;
             return manager.update(snapshot,snapshot.captured,.07,true,b,track,{},false,true,0,true);};
-        for(int j=0;j<22;++j){p=step(curve(direction<0?490:150));
+        for(int j=0;j<12;++j){p=step(curve(direction<0?490:150));
             require(!p.selectedBranch&&p.guidePwm<=300,"Y guidance uses parking lock or accepts opposite road");}
-        require(raceDirectionSeeking(p)&&p.guidePwm<=151,"Y seek keeps a large steering demand indefinitely");
-        for(int j=0;j<3;++j)p=step(binary);
+        for(int j=0;j<11;++j)p=step(binary);
         require(p.selectedBranch,"Centered road after Y turn cannot be acquired");
         for(int j=0;j<5;++j)p=step(binary);
         require(p.selectedBranch&&p.laneBlend==1,"Y handoff remains biased too long");
         require(raceDirectionServo(p,direction<0?1700:1300)==(direction<0?1700:1300),"Y handoff prevents countersteer");
         p=step(curve(direction<0?490:150));
-        require(!p.selectedBranch&&p.guidePwm<=151,"Target loss restarts the large Y pulse");
+        require(!p.selectedBranch&&p.guidePwm==0&&p.guideDirection==0&&p.alignRoad,"Target loss restarts Y bias instead of road alignment");
     }
+    for(int direction:{-1,1}) {
+        RaceManager manager(config);RaceSnapshot s;RacePlan p;
+        s.detections={box(direction<0?LABEL_YLEFT:LABEL_YRIGHT)};
+        cv::Mat missing=cv::Mat::zeros(480,640,CV_8UC1);
+        for(int i=1;i<=35;++i){s.sequence=i;s.captured=i*.07;
+            p=manager.update(s,s.captured,.07,true,missing,track,{},false,true,0,true);}
+        require(!p.stop&&!raceDirectionSeeking(p)&&p.guidePwm==0&&p.alignRoad,"Missing road leaves a permanent sign steering bias");
+    }
+    {auto alignment=[](float offset,float slope){std::vector<PointX> centers;
+        for(int row=476;row>=100;row-=4)centers.emplace_back(row,int(320+offset+(476-row)*slope));
+        return raceLaneAlignment(centers);};
+     auto a=alignment(0,0);require(a.valid&&a.aligned&&a.servo==1500,"Straight alignment changes neutral steering");
+     for(int direction:{-1,1}){
+        a=alignment(-25*direction,.5f*direction);
+        require(a.valid&&!a.aligned&&direction*(int(a.servo)-1500)>0,"Near-road heading cannot countersteer against lateral offset");
+        a=alignment(60*direction,0);require(!a.aligned&&direction*(int(a.servo)-1500)>0,"Lateral alignment sign reversed");
+     }
+     require(!raceLaneAlignment({}).valid,"Missing geometry fabricates an alignment measurement");}
+    std::cout<<"PASS finite Y pulse; immediate countersteer; target-loss road recovery; mirrored near-road heading correction\n";
     {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
      for(int i=0;i<8;++i)settings.adjust('+');
      for(int i=0;i<4;++i){settings.adjust(']');settings.adjust('.');settings.adjust('k');}
@@ -250,7 +308,7 @@ int main(int argc,char **argv){try{
      require(p.selectedBranch,"Left target not acquired before disappearance check");
      snapshot.sequence=9;snapshot.captured=.63;
      p=manager.update(snapshot,.63,.07,true,curve(490),track,{},false,true,-1,false,true);
-     require(!p.stop&&raceDirectionSeeking(p)&&p.guideDirection==-1,"Lost target latches stop or takes over the opposite road");
+     require(!p.stop&&!p.selectedBranch&&p.guideDirection==0&&p.alignRoad,"Lost acquired road restarts signed turn or latches stop");
      p=manager.update(snapshot,1.2,.07,true,binary,track);
      require(p.stop&&!raceDirectionSeeking(p),"Strong guidance ignores stale AI stop");}
     {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;

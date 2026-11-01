@@ -1,5 +1,6 @@
 #pragma once
 #include "race_ground_arrow.hpp"
+#include "race_parking_sign.hpp"
 // Route stages are explicit; repeated arrows cannot identify a lap or finish.
 // n at the physical start is the user's currently selected lap/finish landmark.
 class RaceMission {
@@ -9,6 +10,8 @@ private:
     Stage stage=Stage::Ready;bool lab=false,branch=false;int branchDirection=0;uint64_t sequence=0;int parkCount=0;
     std::string reason="PRESS_A_START";int completedParking=0;bool parkingSign=false;
     int exitArrowCount=0;uint64_t exitArrowFrame=0;bool exitArrowConfirmed=false;
+    float parkModelScore=0;cv::Rect parkShapeBox;const char *parkEvidence="NONE";
+    double parkCaptured=0;cv::Rect previousParkBox;
     bool entryGateSeen=false,entryGateReleased=false,exitGateSeen=false,exitGateReleased=false;
 public:
     explicit RaceMission(bool laboratory=false):lab(laboratory){}
@@ -54,11 +57,19 @@ public:
     int routeDirection()const{return (stage==Stage::SecondFork&&parkingSign)||stage==Stage::ParkingExit?-1:0;}
     void observeSigns(const RaceSnapshot &ai,bool fresh) {
         if(!running()||lab||!fresh||ai.sequence<=sequence)return;sequence=ai.sequence;
-        bool park=false;
-        for(auto d:ai.detections)if(d.score>=.65f) {
-            park|=d.type==LABEL_PARK;
+        parkModelScore=0;cv::Rect modelBox;
+        for(auto d:ai.detections)if(d.type==LABEL_PARK&&d.score>parkModelScore){
+            parkModelScore=d.score;modelBox={d.x,d.y,d.width,d.height};
         }
-        parkCount=park?std::min(3,parkCount+1):0;
+        parkShapeBox=raceParkingPShape(ai.image);
+        parkEvidence=parkModelScore>=.65f?"MODEL_PARK":parkShapeBox.area()>0?"BLUE_P_SHAPE":"NONE";
+        const bool park=parkModelScore>=.65f||parkShapeBox.area()>0;
+        const auto box=parkModelScore>=.65f?modelBox:parkShapeBox;
+        const bool continuous=previousParkBox.area()>0&&std::abs(box.x+box.width/2-previousParkBox.x-previousParkBox.width/2)<100&&
+            std::abs(box.y+box.height/2-previousParkBox.y-previousParkBox.height/2)<80&&
+            (parkCaptured<=0||ai.captured-parkCaptured<=.30);
+        parkCount=park?(continuous?std::min(3,parkCount+1):1):0;
+        previousParkBox=park?box:cv::Rect{};parkCaptured=ai.captured;
         // Beijing: FLOW on lap one, PARK on lap two. After completing the
         // signed Y fork, the newly switched PARK is route evidence for lap two;
         // it is not a global position measurement. n at the start also works.
@@ -91,6 +102,9 @@ public:
         // A park sign supplies context, but never substitutes for a visible bay or completed turn.
     }
     nlohmann::json json()const{return {{"state",name()},{"reason",reason},{"lab_single_loop",lab},{"parking_completed",completedParking},
+        {"park_model_score",parkModelScore},{"park_evidence",parkEvidence},{"park_evidence_frames",parkCount},
+        {"park_shape_box",{parkShapeBox.x,parkShapeBox.y,parkShapeBox.width,parkShapeBox.height}},
+        {"park_stage_eligible",stage==Stage::FirstReturn||stage==Stage::SecondFork},
         {"route_policy","beijing_lap1_flow_signed_fork_lap2_parking"},
         {"lap_finish_source","after_signed_fork_new_park_or_operator_n; finish_operator_n"},{"parking_sign_confirmed",parkingSign},
         {"route_direction",routeDirection()},{"parking_exit_arrow_authorized",exitArrowTurnAuthorized()},

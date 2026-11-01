@@ -114,6 +114,8 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
          !timer.ready(3.19,true,true,true,true)&&timer.ready(3.21,true,true,true,true),"Movement does not reset dwell");
      require(!timer.ready(4,false,true,true,true)&&!timer.ready(4.1,true,true,true,true),"Stale frame does not reset dwell");}
     require(raceParkingReadyToRejoin(space,{.04f,.2f,.15f}),"Small residual angle should permit lane rejoin");
+    for(float side:{-1.f,1.f})require(!raceParkingReadyToRejoin(space,{side*.11f,.2f,-side*.18f}),
+        "Inside but outward-facing body is released into ordinary lane control");
     for(float yaw:{.35f,-.35f,.496f,-.496f})
         require(!raceParkingReadyToRejoin(space,{0,.2f,yaw}),"20-28 degree exit is still accepted as aligned");
     require(!raceParkingReadyToRejoin(space,{0,.2f,.7f}),"A large sideways heading is incorrectly called basic alignment");
