@@ -74,7 +74,7 @@ int racePreviewParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGro
     cv::Mat image;RaceParkingRoute route;RaceParkingFrame bayFrame;bool taught=false;
     std::cout<<"停车路径预览，不连接电机。小车摆在通道内、完整可见车位之前，车头朝出口方向。\n"
         <<"f冻结，点击左侧或右侧车位靠通道的两个口角：近角、远角；p规划；s保存预览；r重选；q退出。\n"
-        <<"尺寸：通道45cm，车位四边41cm、垂直进深38cm；停车3秒。图中路线仅是几何预览，不能当成已执行停车。\n";
+        <<"尺寸：通道45cm，车位四边41cm、垂直进深38cm；停车1秒。图中路线仅是几何预览，不能当成已执行停车。\n";
     auto world=[&](cv::Point2f p){return bayFrame.world(p,dims.aisle);};
     while(!stop.load()) {
         if(!state.frozen){if(!video.read(image)||image.empty())throw std::runtime_error("Parking preview camera unavailable");

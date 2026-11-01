@@ -205,10 +205,10 @@ int main(int argc,char **argv){try{
         if(std::string(command.state)=="PARK_DWELL"&&dwell<0)dwell=time;
         if(command.speed<0&&reverse<0)reverse=time;
         observation.pose=raceParkingAdvance(observation.pose,command.speed*.08,command.curvature,dimensions);}
-    require(parking.done()&&reverse-dwell>=3,"Entry/dwell/reverse no longer completes");
+    require(parking.done()&&reverse-dwell>=1&&reverse-dwell<1.5,"Entry/dwell/reverse no longer completes");
     RaceParkingBaySearch search;search.reject({-.22,.3},{-.22,.7});RaceParkingMouthCandidate failed;failed.nearGround={-.22,.3};failed.farGround={-.22,.7};require(!search.accepts(failed),"Failed bay not skipped");
     RaceParkingMouthCandidate next=failed;next.nearGround={-.22,.7};next.farGround={-.22,1.1};require(search.accepts(next),"Adjacent bay incorrectly excluded");
-    std::cout<<"PASS metric parking entry/3s dwell/reverse and next-bay selection unchanged\n";
+    std::cout<<"PASS metric parking entry/1s dwell/reverse and next-bay selection unchanged\n";
     parkingAreaChecks(config,ground,binary,track);
 
     RaceSnapshot snapshot;snapshot.sequence=1;snapshot.captured=1;snapshot.image=image;snapshot.detections={box(LABEL_CONE)};

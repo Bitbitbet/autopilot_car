@@ -54,12 +54,12 @@ public:
     std::string progress()const {
         const auto &a=attempts.back();
         auto flag=[](bool ok){return ok?"OK":"--";};
-        return std::string("PLAN ")+flag(a.route)+" | IN "+flag(a.inside)+" | 3S "+flag(a.dwell)+" | OUT "+flag(a.returned)+(a.estimateUsed?" | EST":"")+(a.terminalRecovery?" | RECOVER":"");
+        return std::string("PLAN ")+flag(a.route)+" | IN "+flag(a.inside)+" | 1S "+flag(a.dwell)+" | OUT "+flag(a.returned)+(a.estimateUsed?" | EST":"")+(a.terminalRecovery?" | RECOVER":"");
     }
     nlohmann::json toJson()const {
         auto list=nlohmann::json::array();
         for(const auto &a:attempts)list.push_back({{"attempt",a.id},{"route_generated",a.route},{"started",a.started},
-            {"entry_motion_commanded",a.entry},{"full_body_inside_observed",a.inside},{"three_second_dwell_confirmed",a.dwell},
+            {"entry_motion_commanded",a.entry},{"full_body_inside_observed",a.inside},{"one_second_dwell_confirmed",a.dwell},
             {"reverse_motion_commanded",a.reverse},{"returned_to_aisle_observed",a.returned},{"lane_motion_resumed",a.lane},
             {"moving_command_frames",a.movingFrames},{"steering_wait_frames",a.steeringWaitFrames},
             {"outcome",a.outcome},{"reason",a.reason}});
@@ -69,7 +69,7 @@ public:
             list[i]["terminal_recovery_used"]=attempts[i].terminalRecovery;
             list[i]["parking_validated"]=attempts[i].inside&&attempts[i].dwell&&attempts[i].returned&&!attempts[i].terminalRecovery&&!attempts[i].estimateUsed;
         }
-        return {{"version",1},{"scope","parking aisle entry, 3s dwell, reverse exit and lane rejoin"},
+        return {{"version",2},{"required_dwell_seconds",1},{"scope","parking aisle entry, 1s dwell, reverse exit and lane rejoin"},
             {"entrance_and_exit_arrow_turns_included",false},{"independent_physical_measurement",false},
             {"stages_based_on","live controller and visual odometry; motion commands alone are not physical completion"},
             {"retained_attempts",list}};

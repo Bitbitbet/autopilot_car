@@ -106,9 +106,20 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
 
     RaceParkingSpace space(dims);auto route=racePlanTrackableParking(space,{0,-.4f,0},.30f);
     require(route.valid,"No model-trackable parking route at the new target speed");
-    require(raceParkingReadyToRejoin(space,{.04f,.2f,.35f}),"Basic alignment with slight paint overlap still demands precise reverse alignment");
+    {RaceParkingDwell timer;
+     require(dims.dwellSeconds==1.f,"Runtime dwell still defaults to three seconds");
+     require(!timer.ready(1,true,true,true,true)&&!timer.ready(1.99,true,true,true,true)&&
+         timer.ready(2,true,true,true,true),"One-second dwell boundary is incorrect");
+     require(!timer.ready(2.1,true,false,true,true)&&!timer.ready(2.2,true,true,true,true)&&
+         !timer.ready(3.19,true,true,true,true)&&timer.ready(3.21,true,true,true,true),"Movement does not reset dwell");
+     require(!timer.ready(4,false,true,true,true)&&!timer.ready(4.1,true,true,true,true),"Stale frame does not reset dwell");}
+    require(raceParkingReadyToRejoin(space,{.04f,.2f,.15f}),"Small residual angle should permit lane rejoin");
+    for(float yaw:{.35f,-.35f,.496f,-.496f})
+        require(!raceParkingReadyToRejoin(space,{0,.2f,yaw}),"20-28 degree exit is still accepted as aligned");
     require(!raceParkingReadyToRejoin(space,{0,.2f,.7f}),"A large sideways heading is incorrectly called basic alignment");
     require(!raceParkingReadyToRejoin(space,{-.4f,.2f,.2f}),"A car still in the bay is incorrectly called back in the aisle");
+    require(!raceParkingReadyToRejoin(space,{-.16987824f,.1548803f,.496f}),
+        "Recorded Nov-1 premature rejoin pose is still accepted");
     RaceParkingControl control(space,.30f);RaceParkingObservation observation{route.entry.front(),1,1,1,true};
     require(control.arm(route,observation,1,true),"Cannot arm target-speed parking");
     RaceParkingFrame rightBay;rightBay.locate({dims.aisle/2,.4f},{dims.aisle/2,.4f+dims.side});
@@ -130,13 +141,13 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         physical=raceParkingAdvance(physical,command.speed*.04,rightBay.handedness()*command.curvature,dims);
         observation.pose=rightBay.local(physical,dims.aisle);
     }
-    require(control.done()&&reverse-dwell>=3&&peak>.15f,"Target-speed entry/dwell/reverse did not finish or stayed at the old crawl speed");
+    require(control.done()&&reverse-dwell>=1&&reverse-dwell<1.5&&peak>.15f,"Target-speed entry/dwell/reverse did not finish or stayed at the old crawl speed");
     require(!control.exitRecoveryUsed(),"Nominal right parking relies on command-distance recovery");
     require(control.reverseReference().back().z>route.entry.front().z+.03f,"Reverse reference still follows the long original approach straight");
-    std::cout<<"PASS target-speed mirrored right parking model; 3s dwell; long gate pause/resume; peak command="<<peak<<" m/s\n";
+    std::cout<<"PASS target-speed mirrored right parking model; 1s dwell; long gate pause/resume; peak command="<<peak<<" m/s\n";
 
-    // A persistently biased position/heading must not request endless reverse.
-    // This is an estimated completion, deliberately distinct from observed exit.
+    // Exhausted reverse budget must retain heading control, not complete while
+    // sideways. Forward correction must converge before ordinary lane handoff.
     RaceParkingControl biased(space,.30f);observation={route.entry.front(),1,1,1,true};
     require(biased.arm(route,observation,1,true),"Cannot arm reverse-budget case");
     clock=1;bool reversing=false;float previousSpeed=0;RaceParkingCommand command;
@@ -148,7 +159,8 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         previousSpeed=command.speed;reversing=std::string(command.state)=="PARK_EXIT";
     }
     require(reversing,"Budget case never reaches reverse");
-    for(int i=0;i<1200&&!biased.done();++i) {
+    bool correcting=false,sawUnalignedCorrection=false;double alignedSince=-1;
+    for(int i=0;i<1600&&!biased.done();++i) {
         if(i==30) {
             const float before=biased.reverseDistanceEstimate();
             for(int wait=0;wait<50;++wait){clock+=.04;observation.captured=clock;++observation.sequence;
@@ -158,12 +170,22 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
             previousSpeed=0;
         }
         clock+=.04;observation.captured=clock;++observation.sequence;
+        if(raceParkingReadyToRejoin(space,observation.pose)){if(alignedSince<0)alignedSince=clock;}
+        else alignedSince=-1;
         command=biased.update(observation,clock,.04,true,.3,previousSpeed);
         require(!biased.failed(),"Biased reverse becomes a terminal race fault instead of forward rejoin");
-        observation.pose.z-=std::abs(command.speed)*.04;previousSpeed=command.speed;
+        if(std::string(command.state)=="PARK_EXIT_ALIGN"){
+            correcting=true;sawUnalignedCorrection|=std::abs(observation.pose.yaw)>.20f;
+            require(!biased.done()&&command.speed>0,"Budget ends parking before alignment correction");
+        }
+        if(correcting)observation.pose=raceParkingAdvance(observation.pose,command.speed*.04,command.curvature,dims);
+        else observation.pose.z-=std::abs(command.speed)*.04;
+        previousSpeed=command.speed;
     }
-    require(biased.done()&&biased.exitRecoveryUsed()&&command.speed==0&&
-        std::string(command.reason)=="REVERSE_DISTANCE_BUDGET_FORWARD_REJOIN","Bad alignment still causes unbounded reverse");
+    require(biased.done()&&biased.exitRecoveryUsed()&&command.speed==0&&sawUnalignedCorrection&&
+        std::string(command.reason)=="CORRECTED_AISLE_ALIGNMENT_FORWARD_REJOIN","Reverse-budget correction failed to rejoin");
+    require(alignedSince>0&&clock-alignedSince>=.19&&raceParkingReadyToRejoin(space,observation.pose),
+        "Reverse budget bypasses continuous alignment confirmation");
     require(biased.reverseDistanceEstimate()<=biased.reverseBudget()+.03f,"Reverse distance budget is substantially exceeded");
-    std::cout<<"PASS basic aisle alignment; clipped reverse straight; bounded reverse estimate transitions to forward rejoin\n";
+    std::cout<<"PASS strict aisle alignment; 28 degree rejection; bounded reverse with forward correction; continuous aligned handoff\n";
 }

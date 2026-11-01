@@ -51,11 +51,11 @@ struct RaceParkingCommand {
     bool entryMouthRecovery=false;
     bool exitHeadingRecovery=false;
 };
-// A loose handoff envelope: finish reversing when forward lane following can
-// take over. This is not a precise parked-pose or line-clearance judgement.
+// Require near-parallel aisle alignment before ordinary lane control takes over.
+// Keep the paint allowance; do not confuse it with a heading allowance.
 inline bool raceParkingReadyToRejoin(const RaceParkingSpace &space,RaceParkingPose pose) {
     if(!std::isfinite(pose.x)||!std::isfinite(pose.z)||!std::isfinite(pose.yaw))return false;
-    if(std::abs(raceParkingAngle(pose.yaw))>.50f)return false;
+    if(std::abs(raceParkingAngle(pose.yaw))>.20f)return false;
     for(auto point:space.body(pose,0))if(std::abs(point.x)>space.dimensions().aisle/2+.025f)return false;
     return true;
 }
@@ -79,6 +79,8 @@ class RaceParkingControl {
     bool mouthRecoveryActive=false;
     bool exitDistanceRecovery=false;
     float reversedDistance=0,reverseDistanceBudget=0;
+    double rejoinSince=-1;
+    int rejoinFrames=0;
     const char *completionReason="RETURNED_TO_AISLE";
     const char *faultReason="PARK_FAULT";
     static cv::Point2f rear(RaceParkingPose p,const RaceParkingDimensions &d) {
@@ -89,7 +91,7 @@ class RaceParkingControl {
         return {0,0,"PARK_FAULT",faultReason,segment};
     }
     RaceParkingCommand finishExit(const char *reason,bool estimated=false) {
-        phase=Phase::Done;lastSpeed=0;completionReason=reason;exitDistanceRecovery=estimated;
+        phase=Phase::Done;lastSpeed=0;completionReason=reason;exitDistanceRecovery|=estimated;
         return {0,0,"PARK_COMPLETE",reason,segment};
     }
 public:
@@ -141,6 +143,7 @@ public:
         if(o.epoch!=epoch)return fault("PARK_ODOMETRY_EPOCH_CHANGED");
         if(o.sequence<lastSequence||(o.sequence>lastSequence&&o.captured<=lastCapture))return fault("PARK_OBSERVATION_REORDERED");
         if(!taskClear) {
+            rejoinSince=-1;rejoinFrames=0;
             lastSpeed=0;progressSince=now;dwell.ready(now,false,false,false,reverse);
             if(o.valid&&o.sequence>lastSequence&&now>=o.captured&&now-o.captured<=.18) {
                 previous=o.pose;lastCapture=o.captured;lastSequence=o.sequence;badSince=-1;
@@ -148,6 +151,7 @@ public:
             return {0,0,"PARK_HOLD","TRAFFIC_STOP_PRIORITY",segment};
         }
         if(!o.valid||!o.sequence||now<o.captured||now-o.captured>.18) {
+            rejoinSince=-1;rejoinFrames=0;
             lastSpeed=0;dwell.ready(now,false,false,false,reverse);
             if(badSince<0)badSince=now;
             if(now-badSince>.65)return fault("PARK_MOTION_OR_TASK_INTERRUPTED_RETEACH");
@@ -181,7 +185,7 @@ public:
            std::abs(raceParkingAngle(o.pose.yaw-measuredEntry.back().yaw))>.02f))measuredEntry.push_back(o.pose);
         if(phase==Phase::Dwell) {
             // Arrival is latched: loss of painted containment must never restart
-            // forward entry. Stop for three stationary seconds, then reverse the
+            // forward entry. Stop for the configured stationary dwell, then reverse the
             // actual entry path. Terminal recovery is not a valid-bay success.
             const bool stationary=move/gap<.012f&&turn/gap<.06f;
             terminalRecovery|=!space.parkedObserved(o.pose);
@@ -199,35 +203,46 @@ public:
                 lastSpeed=0;return {0,0,"PARK_EXIT","DWELL_COMPLETE_REVERSE_NEXT_FRAME",0};
             }
             lastSpeed=0;return {0,0,"PARK_DWELL",stationary?
-                (terminalRecovery?"TERMINAL_RECOVERY_THREE_SECONDS":"THREE_SECONDS_STATIONARY_INSIDE"):"WAIT_PHYSICAL_STOP",segment};
+                (terminalRecovery?"TERMINAL_RECOVERY_DWELL":"STATIONARY_INSIDE_DWELL"):"WAIT_PHYSICAL_STOP",segment};
         }
         const bool leaving=phase==Phase::Exit;const auto &path=leaving?route.exit:route.entry;
         const auto &goal=path.back();const auto &d=space.dimensions();
         const float goalError=std::hypot(o.pose.x-goal.x,o.pose.z-goal.z);
-        if(leaving&&raceParkingReadyToRejoin(space,o.pose)) {
-            // Entry may include a long straight approach. Once the full body
-            // is back in the aisle and aligned, do not replay that straight all
-            // the way to the original start (75cm behind the mouth in the run).
-            if(std::hypot(o.pose.x-path.front().x,o.pose.z-path.front().z)>.10f)
-                return finishExit("BASIC_AISLE_ALIGNMENT_FORWARD_REJOIN");
+        if(leaving&&raceParkingReadyToRejoin(space,o.pose)&&
+           std::hypot(o.pose.x-path.front().x,o.pose.z-path.front().z)>.10f) {
+            if(rejoinSince<0)rejoinSince=o.captured;
+            ++rejoinFrames;lastSpeed=0;
+            if(o.captured-rejoinSince>=.20&&rejoinFrames>=3)
+                return finishExit(exitDistanceRecovery?"CORRECTED_AISLE_ALIGNMENT_FORWARD_REJOIN":"CONFIRMED_AISLE_ALIGNMENT_FORWARD_REJOIN",exitDistanceRecovery);
+            return {0,0,"PARK_EXIT","AISLE_ALIGNMENT_CONFIRMING",segment};
         }
-        // Command distance is an explicit fallback estimate, not odometry.
-        // An unsettled heading must not keep replaying the approach straight.
+        rejoinSince=-1;rejoinFrames=0;
+        // Bound reversing without falsely reporting an unaligned pose as done.
+        // If the distance estimate is exhausted, retain parking control and
+        // correct forward toward the taught aisle before handing over to Pilot.
         if(leaving&&reversedDistance>=reverseDistanceBudget)
-            return finishExit("REVERSE_DISTANCE_BUDGET_FORWARD_REJOIN",true);
+            exitDistanceRecovery=true;
+        if(leaving&&exitDistanceRecovery) {
+            const auto axle=rear(o.pose,d);
+            const float desiredYaw=std::atan2(axle.x,.45f);
+            const float error=raceParkingAngle(o.pose.yaw-desiredYaw);
+            const float lock=d.fullLockDegrees*float(CV_PI)/180;
+            const float angle=std::atan(d.wheelbase*(-4.f*error));
+            const float target=std::clamp(angle,-lock,lock),rate=lock*600/400;
+            steeringAngle+=std::clamp(target-steeringAngle,-rate*dt,rate*dt);
+            lastSpeed=std::min({speedLimit,taskSpeed,.12f});
+            return {lastSpeed,std::tan(steeringAngle)/d.wheelbase,"PARK_EXIT_ALIGN",
+                "REVERSE_BUDGET_FORWARD_ALIGNMENT",segment};
+        }
         // A fully contained vehicle near the end is already parked; continuing
         // to chase one exact pose can push an otherwise valid body toward a line.
         // Exit finishes once the complete body is in the aisle near its starting
         // position; do not keep reversing toward the gate to match one exact point.
         if((goalError<(leaving?.045f:.05f)||(!leaving&&space.parked(o.pose)))&&
-            std::abs(raceParkingAngle(o.pose.yaw-goal.yaw))<(leaving?.50f:.20f)) {
+            std::abs(raceParkingAngle(o.pose.yaw-goal.yaw))<.20f) {
             if(!leaving&&space.parked(o.pose)) {
                 phase=Phase::Dwell;phaseSince=now;lastSpeed=0;steeringAngle=0;
                 return {0,0,"PARK_DWELL","FULL_BODY_INSIDE_STOPPING",segment};
-            }
-            if(leaving) {
-                // Full body back in the aisle, parallel to the taught direction.
-                if(raceParkingReadyToRejoin(space,o.pose))return finishExit("BASIC_AISLE_ALIGNMENT_FORWARD_REJOIN");
             }
         }
         const auto axle=rear(o.pose,d);float best=1e9f,projection=0;size_t selected=segment;

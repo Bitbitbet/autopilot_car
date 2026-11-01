@@ -59,7 +59,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
         <<" a开始；n仅在实际起点确认计圈/终点；空格停；g复位；s保存当前图。\n";
     else std::cout<<"[Parking] "<<directory<<"\n默认从当前车载图自动找左右两侧完整可见车位口并规划，不需逐次点选；出现黄色车位和绿色路线后按a执行。\n"
         <<"按g重新识别；f进入手动点选诊断。后方有道闸时不要求后退，车身扫掠不得超过起始后沿。\n"
-        <<"入库->实测停稳3秒->倒车回通道->恢复原巡线向前。空格立即停；中断后r重新点位。s保存静止样本。\n"
+        <<"入库->实测停稳1秒->倒车回通道->恢复原巡线向前。空格立即停；中断后r重新点位。s保存静止样本。\n"
         <<"入口左转和出口地面箭头转弯尚待车载样本，不能把本次车位动作当作整场自动停车验收。\n";
     std::jthread driving([&]{
         RaceParkingTestReport test;
@@ -350,7 +350,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     else if(!traffic.stop&&pilot.ready&&!pilot.lost&&raceTime()-captured<=.18) {
                         speed=pilot.speedFor(std::min(taskCruise,traffic.speedCap),dt);servo=raceDirectionServo(traffic,pilot.servo);
                         command.state=missionEnabled&&!controller.done()?mission.name():"PARK_REJOIN_LANE";
-                        command.reason=missionEnabled?"MISSION_LANE_FOLLOWING":"PARKED_THREE_SECONDS_AND_EXITED_CONTINUE_FORWARD";
+                        command.reason=missionEnabled?"MISSION_LANE_FOLLOWING":"PARKED_AND_ALIGNED_CONTINUE_FORWARD";
                     }
                     else if((missionEnabled||searchAdvance||continueLane)&&!traffic.stop&&raceTime()-captured<=.18) {
                         // Missing paint is recoverable in competition. Keep the

@@ -15,7 +15,7 @@ struct RaceParkingDimensions {
     float side=.41f,depth=.38f,aisle=.45f,length=.31f,width=.18f,wheelbase=.20f;
     // Two field runs imply ~33deg effective full-lock response, not the old
     // assumed 45deg. Experimental visual estimate, not wheel-angle calibration.
-    float frontToRearAxle=.255f,clearance=.005f,fullLockDegrees=33.f,dwellSeconds=3.f;
+    float frontToRearAxle=.255f,clearance=.005f,fullLockDegrees=33.f,dwellSeconds=1.f;
     int bay=2;
     void validate() const {
         for(float v:{side,depth,aisle,length,width,wheelbase,frontToRearAxle,clearance,fullLockDegrees,dwellSeconds})
@@ -270,8 +270,8 @@ inline RaceParkingRoute racePlanParking(const RaceParkingSpace &space,RaceParkin
 class RaceParkingDwell {
     double stoppedSince=-1;
 public:
-    bool ready(double now,bool fresh,bool stopped,bool fullyInside,bool reverseVerified,float seconds=3.f) {
-        if(!std::isfinite(now)||!std::isfinite(seconds)||seconds<3||!fresh||!stopped||!fullyInside){stoppedSince=-1;return false;}
+    bool ready(double now,bool fresh,bool stopped,bool fullyInside,bool reverseVerified,float seconds=1.f) {
+        if(!std::isfinite(now)||!std::isfinite(seconds)||seconds<1||!fresh||!stopped||!fullyInside){stoppedSince=-1;return false;}
         if(stoppedSince<0||now<stoppedSince)stoppedSince=now;
         return now-stoppedSince>=seconds&&reverseVerified;
     }
