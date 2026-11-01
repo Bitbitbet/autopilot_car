@@ -83,12 +83,15 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     }
 
     RaceMission mission;mission.start();RaceSnapshot signs;signs.detections={box(LABEL_PARK)};
+    RacePlan firstFork;firstFork.fresh=true;firstFork.state="FORK_RIGHT";firstFork.selectedBranch=true;firstFork.guideDirection=1;
+    mission.observe(signs,firstFork,false);firstFork.state="LANE";firstFork.selectedBranch=false;mission.observe(signs,firstFork,false);
+    mission.markStart();
     for(int i=1;i<=3;++i){signs.sequence=i;mission.observeSigns(signs,true);}
     RacePlan traffic;traffic.fresh=true;traffic.state="GATE_WAIT";traffic.stop=traffic.gateWaiting=true;
     mission.observeGate(traffic);require(mission.speedLimit(.5,.3)==.3f,"Parking sign does not establish area speed cap");
     traffic.stop=traffic.gateWaiting=false;traffic.gateOpened=true;mission.observeGate(traffic);
     require(mission.speedLimit(.5,.3)==.3f,"Entrance gate opening restores full cruise too early");
-    traffic.gateOpened=false;traffic.state="FORK_LEFT";traffic.selectedBranch=true;mission.observe(signs,traffic,false);
+    traffic.gateOpened=false;traffic.state="FORK_LEFT";traffic.selectedBranch=true;traffic.guideDirection=-1;mission.observe(signs,traffic,false);
     traffic.state="LANE";traffic.selectedBranch=false;mission.observe(signs,traffic,true);
     require(mission.parkingSearch(),"Gate test cannot enter parking search");
     mission.parkingStarted();mission.parkingFinished();

@@ -77,9 +77,38 @@ int main(int argc,char **argv){try{
     RaceGroundArrow arrow;arrow.allowed=RoadLeft;
     for(int i=1;i<5;++i)mission.observeExitArrow(arrow,i,true);
     require(!mission.exitArrowTurnAuthorized(),"Ground arrow triggers before parking");
+    ai.detections={box(LABEL_FLOW)};
+    for(int i=1;i<=8;++i){ai.sequence=i;mission.observeSigns(ai,true);}
+    mission.markStart();
+    require(std::string(mission.name())=="LAP1_FLOW_THEN_SIGNED_FORK"&&mission.routeDirection()==0,
+        "Starting FLOW or n skips lap one or masks signed Y decisions");
+    traffic.selectedBranch=true;traffic.guideDirection=0;traffic.state="FORK_STRAIGHT";mission.observe(ai,traffic,false);
+    traffic.selectedBranch=false;traffic.state="LANE";mission.observe(ai,traffic,true);
+    require(std::string(mission.name())=="LAP1_FLOW_THEN_SIGNED_FORK"&&!mission.parkingSearch(),
+        "Straight parking bypass is mistaken for completion of the signed Y fork");
     ai.detections={box(LABEL_PARK)};
-    for(int i=1;i<=3;++i){ai.sequence=i;mission.observeSigns(ai,true);}
-    traffic.selectedBranch=true;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);
+    for(int i=9;i<=11;++i){ai.sequence=i;mission.observeSigns(ai,true);}
+    require(!mission.parkingZone()&&mission.routeDirection()==0,"Unexpected lap-one PARK arms parking before the Y fork");
+    traffic.selectedBranch=true;traffic.guideDirection=-1;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);
+    traffic.selectedBranch=false;traffic.guideDirection=0;traffic.state="LANE";mission.observe(ai,traffic,false);
+    require(std::string(mission.name())=="LAP1_RETURN_PRESS_N_AT_START","Signed Y completion does not enter lap-one return");
+    ai.detections={box(LABEL_FLOW)};
+    for(int i=12;i<=16;++i){ai.sequence=i;mission.observeSigns(ai,true);}
+    require(std::string(mission.name())=="LAP1_RETURN_PRESS_N_AT_START","Repeated FLOW prematurely advances the lap");
+    {auto manual=mission;manual.markStart();require(std::string(manual.name())=="LAP2_WAIT_PARK_SIGN"&&manual.routeDirection()==0,
+        "Manual lap landmark no longer permits the second-lap approach");}
+    ai.detections={box(LABEL_PARK)};
+    ai.sequence=17;mission.observeSigns(ai,true);mission.observeSigns(ai,true);ai.sequence=18;mission.observeSigns(ai,false);
+    require(mission.routeDirection()==0,"Repeated/stale PARK triggers the entrance turn");
+    for(int i=19;i<=21;++i){ai.sequence=i;mission.observeSigns(ai,true);}
+    require(std::string(mission.name())=="LAP2_LEFT_TO_PARKING"&&mission.routeDirection()==-1,
+        "Second-lap switched PARK cannot arm the entrance without a manual key");
+    {RaceManager entrance(config);RacePlan p;RaceSnapshot s;
+     for(int i=1;i<=5;++i){s.sequence=i;s.captured=i*.07;
+         p=entrance.update(s,s.captured,.07,true,binary,track,{},false,true,mission.routeDirection(),true,mission.parkingApproach(),.3);}
+     require(raceDirectionSeeking(p)&&p.guideDirection==-1&&raceDirectionServo(p,1500)==1100&&!p.stop,
+         "Confirmed parking sign cannot demand full configured turn before a road split is visible");}
+    traffic.selectedBranch=true;traffic.guideDirection=-1;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);
     traffic.selectedBranch=false;traffic.state="LANE";mission.observe(ai,traffic,true);require(mission.parkingSearch(),"Mission cannot reach visible bay");
     mission.parkingStarted();mission.parkingFinished();
     mission.observeExitArrow(arrow,10,true);mission.observeExitArrow(arrow,10,true);mission.observeExitArrow(arrow,11,false);
@@ -90,9 +119,16 @@ int main(int argc,char **argv){try{
      for(int i=1;i<=5;++i){snapshot.sequence=i;snapshot.captured=i*.07;p=manager.update(snapshot,snapshot.captured,.07,true,binary,track,{},false,true,-1,true,mission.exitArrowTurnAuthorized());}
      require(raceDirectionSeeking(p)&&p.guideDirection==-1&&raceDirectionServo(p,1500)<1500,"Exit arrow waits for a visible split");}
     traffic.selectedBranch=true;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);traffic.selectedBranch=false;traffic.state="LANE";mission.observe(ai,traffic,false);
-    mission.markStart();for(int i=20;i<25;++i)mission.observeExitArrow(arrow,i,true);
-    require(mission.routeDirection()==2&&!mission.exitArrowTurnAuthorized(),"Second lap reuses parking exit arrow");
-    std::cout<<"PASS exit-only ground arrow; duplicate/stale rejection; no-road left seek; second-lap isolation\n";
+    for(int i=20;i<25;++i)mission.observeExitArrow(arrow,i,true);
+    require(std::string(mission.name())=="LAP2_RETURN_PRESS_N_TO_FINISH"&&mission.routeDirection()==0&&!mission.exitArrowTurnAuthorized(),
+        "Parking exit starts an extra outer lap or reuses the exit arrow");
+    ai.detections={box(LABEL_PARK),box(LABEL_FLOW)};
+    for(int i=30;i<=34;++i){ai.sequence=i;mission.observeSigns(ai,true);}
+    require(!mission.parkingSearch()&&mission.routeDirection()==0,"Completed parking can be retriggered");
+    mission.markStart();require(mission.complete(),"Final manual landmark cannot finish after lap-two parking");
+    RaceMission lab(true);lab.start();lab.markStart();require(lab.complete(),"Laboratory single loop behavior changed");
+    std::cout<<"PASS Beijing lap1 FLOW and signed Y; lap2 switched PARK; no FLOW lap skip; full entrance guidance; parking exit then finish\n";
+    std::cout<<"PASS exit-only ground arrow; duplicate/stale rejection; no-road left seek; outside-exit isolation\n";
 
     // Strong signed guidance must hand over gradually, then permit correction
     // in either direction once the target-road pilot owns the steering.
@@ -103,6 +139,14 @@ int main(int argc,char **argv){try{
      p.guideDirection=1;p.laneBlend=0;require(raceDirectionServo(p,1400)==1820,"Right guidance not mirrored");
      p.laneBlend=1;require(raceDirectionServo(p,1400)==1400,"Right commitment blocks leftward centering correction");}
     cv::Mat split=binary.clone();cv::rectangle(split,{260,0,120,300},{0},-1);
+    for(int sign:{LABEL_YLEFT,LABEL_YRIGHT}) {
+        RaceMission flowMission;flowMission.start();RaceManager signedManager(config);RaceSnapshot s;RacePlan p;
+        s.detections={box(LABEL_FLOW),box(sign)};
+        for(int i=1;i<=8;++i){s.sequence=i;s.captured=i*.07;flowMission.observeSigns(s,true);
+            p=signedManager.update(s,s.captured,.07,true,split,track,{},false,true,flowMission.routeDirection(),true);}
+        const int direction=sign==LABEL_YLEFT?-1:1;
+        require(p.selectedBranch&&p.guideDirection==direction,"FLOW or mission masks the explicit Y side");
+    }
     {auto weak=config;weak.minBranchRows=1000;
      const auto locked=raceBranchPath(split,track,-1,weak,{},true);
      const auto row=std::find_if(locked.right.begin(),locked.right.end(),[](auto p){return p.x>=198&&p.x<=202;});

@@ -176,7 +176,9 @@ class RaceManager {
     PredictResult gateBox{};
     void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0;seekSince=-1;
         targetVisibleTime=handoffTime=alignedTime=0;targetCenter=std::numeric_limits<float>::quiet_NaN(); }
-    static float guidancePwm(double elapsed) {return 300+40*std::clamp(float(elapsed/.35),0.f,1.f);}
+    // Experimental PWM demand, not a calibrated wheel angle. Use the existing
+    // actuator range; target-road visibility still governs the handoff.
+    static float guidancePwm(double elapsed) {return 360+40*std::clamp(float(elapsed/.20),0.f,1.f);}
     static bool corridorCenters(const RacePath &path,float &nearCenter,float &farCenter,float &heading) {
         if(path.left.size()<20||path.right.size()!=path.left.size())return false;
         nearCenter=farCenter=heading=0;constexpr size_t samples=8;
@@ -376,13 +378,13 @@ public:
                 direction=routeDirection;routeArmed=true;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
             }
             else if(routeDirection!=0) {}
-            else if(seen(LABEL_FLOW)&&geometry.splitRows>=cfg.minBranchRows) {
-                direction=2;routeArmed=false;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
-            }
             else if(leftSign&&rightSign) { direction=0; }
             else if(leftSign||rightSign) {
                 direction=leftSign?-1:1;routeArmed=false;
                 directionUntil=now+cfg.directionMemory; enter(State::ForkArmed);
+            }
+            else if(seen(LABEL_FLOW)&&geometry.splitRows>=cfg.minBranchRows) {
+                direction=2;routeArmed=false;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
             }
         }
         if(state==State::ForkArmed) {

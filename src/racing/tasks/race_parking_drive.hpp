@@ -55,7 +55,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
         if(q.clicks.size()<2)q.clicks.emplace_back(float(x),float(y));
     },&input);
     if(missionEnabled)std::cout<<"[Mission] "<<directory<<"\n"<<(previewOnly?"NO MOTOR | ":"")
-        <<(labMission?"实验室单圈；不套用比赛停车路线。":"比赛两圈；第一圈停车/出库左转，第二圈走外圈。")
+        <<(labMission?"实验室单圈；不套用比赛停车路线。":"北京比赛两圈；第一圈按直行及岔路牌绕行，第二圈识别PARK左转停车，出库后左转返回终点。")
         <<" a开始；n仅在实际起点确认计圈/终点；空格停；g复位；s保存当前图。\n";
     else std::cout<<"[Parking] "<<directory<<"\n默认从当前车载图自动找左右两侧完整可见车位口并规划，不需逐次点选；出现黄色车位和绿色路线后按a执行。\n"
         <<"按g重新识别；f进入手动点选诊断。后方有道闸时不要求后退，车身扫掠不得超过起始后沿。\n"
