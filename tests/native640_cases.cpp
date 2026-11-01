@@ -14,6 +14,40 @@ static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--parking-stale-field") {
+        const fs::path run(argv[1]);nlohmann::json saved;std::ifstream(run/"parking-route.json")>>saved;
+        RaceParkingRoute route;route.valid=true;route.entryCurvaturePreview=saved.at("entry_curvature_preview_m");
+        for(auto p:saved.at("entry"))route.entry.push_back({p[0].get<float>(),p[1].get<float>(),p[2].get<float>()});
+        route.exit=route.entry;std::reverse(route.exit.begin(),route.exit.end());
+        RaceParkingSpace space;space.keepRearWithinStart(route.entry.front());RaceParkingControl control(space);
+        RaceParkingPoseFallback fallback;bool started=false,sawDelay=false,resumed=false;double last=0;
+        float appliedSpeed=0,appliedCurvature=0;RaceParkingCommand command;
+        std::ifstream input(run/"parking-control.jsonl");std::string line;
+        while(std::getline(input,line)) {
+            auto r=nlohmann::json::parse(line);if(!started&&!r.at("armed").get<bool>())continue;
+            auto p=r.at("visual_pose");RaceParkingObservation raw{{p[0],p[1],p[2]},r.at("captured"),r.at("frame"),r.at("motion_epoch"),r.at("motion_valid")};
+            const double now=r.at("time");
+            if(!started){require(control.arm(route,raw,now,true),"Cannot arm field delay replay");started=true;last=raw.captured;fallback.update(raw,now,0,0,space.dimensions());}
+            else {
+                const auto o=fallback.update(raw,now,appliedSpeed,appliedCurvature,space.dimensions());
+                // Runtime dt is measured before optical flow; telemetry time
+                // is after it. Older logs lack dt, so use capture intervals.
+                const float dt=r.value("control_dt_s",float(raw.captured-last));last=raw.captured;
+                command=control.update(o,now,dt,true,.1f,appliedSpeed);
+                if(control.failed())throw std::runtime_error("Field delay frame="+std::to_string(raw.sequence)+" reason="+command.reason);
+                if(now-raw.captured>.18){sawDelay=true;require(!o.valid&&command.speed==0,"Expired frame authorized motion");}
+                if(r.at("state")=="PARK_FAULT") {
+                    require(sawDelay&&o.valid&&o.estimated&&command.speed>0,"Fresh camera cannot resume after recorded permanent fault");
+                    resumed=true;break;
+                }
+            }
+            // Recorded commands are the only motion actually applied in this replay.
+            appliedSpeed=r.at("command_speed");appliedCurvature=r.at("physical_curvature");
+        }
+        require(resumed,"Field fault frame was not reached");
+        std::cout<<"PASS recorded 204-246ms parking delay: stale frames hold; fresh frame resumes entry without reteach; estimate labelled\n";
+        return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--reject-old-backend") {
         try {auto perception=createRacePerception(RaceConfig{});require(false,"Old configuration ABI was accepted");}
         catch(const std::exception &error){require(std::string(error.what()).find("backend version mismatch")!=std::string::npos,"Old backend was not rejected at the ABI boundary");}
@@ -237,6 +271,15 @@ int main(int argc,char **argv){try{
     RaceParkingBaySearch search;search.reject({-.22,.3},{-.22,.7});RaceParkingMouthCandidate failed;failed.nearGround={-.22,.3};failed.farGround={-.22,.7};require(!search.accepts(failed),"Failed bay not skipped");
     RaceParkingMouthCandidate next=failed;next.nearGround={-.22,.7};next.farGround={-.22,1.1};require(search.accepts(next),"Adjacent bay incorrectly excluded");
     std::cout<<"PASS metric parking entry/1s dwell/reverse and next-bay selection unchanged\n";
+    {RaceParkingControl c(space);RaceParkingObservation o{route.entry.front(),1,1,1,true};
+     require(c.arm(route,o,1,true),"Cannot arm resumable hold test");
+     for(int i=1;i<=20;++i){o.captured=1+i*.08;++o.sequence;o.valid=false;
+         const auto hold=c.update(o,o.captured,.08,true);require(!c.failed()&&hold.speed==0,"Missing pose permanently faults or moves");}
+     o.captured+=.08;++o.sequence;o.valid=true;
+     require(c.update(o,o.captured,.08,true).speed>0&&!c.failed(),"Valid stationary recovery after long hold cannot resume");
+     const auto stop=c.update(o,o.captured+.08,.08,false);require(stop.speed==0,"Recovery bypassed traffic stop");
+     c.abort();require(c.failed(),"Recovery bypassed explicit operator stop");}
+    std::cout<<"PASS parking data hold remains resumable; traffic and operator stop preserved\n";
     parkingAreaChecks(config,ground,binary,track);
 
     RaceSnapshot snapshot;snapshot.sequence=1;snapshot.captured=1;snapshot.image=image;snapshot.detections={box(LABEL_CONE)};

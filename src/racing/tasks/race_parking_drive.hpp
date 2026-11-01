@@ -392,8 +392,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     if(mission.failed()||mission.complete()||!missionAutomatic) {speed=0;if(mission.complete()||mission.failed())car->pauseMotion();}
                 }
                 if(traffic.stop) {speed=0;command.reason=traffic.reason;}
-                if(raceTime()-captured>.18||!manager.aiReady(ai,raceTime())) {
-                    speed=0;if(armed||continueLane)command.reason="PARK_FINAL_FRAME_OR_AI_STALE";
+                const double finalTime=raceTime();
+                if(finalTime-captured>.18||!manager.aiReady(ai,finalTime)) {
+                    speed=0;if(armed||continueLane)command.reason=finalTime-captured>.18?"PARK_FINAL_CAMERA_STALE":"PARK_FINAL_AI_STALE";
                 }
                 if(controller.failed()){speed=0;servo=PWMSERVOMID;armed=false;car->pauseMotion();}
                 if(stop.load())speed=0;
@@ -419,7 +420,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(controller.active()&&!measured.valid&&firstMotionFailure.empty())firstMotionFailure=measured.reason;
                 const auto failure=controller.status();
                 nlohmann::json row={{"frame",frame},{"time",now},{"state",command.state},{"reason",command.reason},
-                    {"captured",captured},{"controller_reason",controller.failed()?failure.reason:command.reason},{"first_motion_failure",firstMotionFailure},
+                    {"captured",captured},{"control_dt_s",dt},{"camera_age_s",now-captured},{"control_pose_valid",observation.valid},
+                    {"controller_reason",controller.failed()?failure.reason:command.reason},{"first_motion_failure",firstMotionFailure},
                     {"armed",armed},{"frozen",frozen},{"command_speed",speed},{"pwm",servo},{"segment",command.segment},
                     {"parking_side",bayFrame.side<0?"left":"right"},{"task_cruise_limit",taskCruise},
                     {"cruise_setting",cruise},{"curve_setting",speedSettings.curve},{"degraded_setting",speedSettings.degraded},

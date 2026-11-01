@@ -48,6 +48,7 @@ class RaceGroundMotion {
     std::vector<Reference> references;
     size_t backupCursor=0;          // 备用参考轮转起点：每帧最多尝试一张
     float rigidResidualLimit=.005f;
+    bool parkingMode=false;
 
     cv::Mat mask(const RaceSnapshot &s) {
         regions.erase(std::remove_if(regions.begin(),regions.end(),[&](const Region &r){return s.captured-r.captured>.65;}),regions.end());
@@ -74,7 +75,7 @@ public:
     // scale variation, but 5.087mm rigid residual. Do not permanently freeze
     // the reference over that 0.087mm excess. Keep this opt-in for parking;
     // RANSAC, scale, span and motion-step checks are still applied.
-    void enableParkingNoiseTolerance(){rigidResidualLimit=.008f;}
+    void enableParkingNoiseTolerance(){rigidResidualLimit=.008f;parkingMode=true;}
     // 与绕行规划共用同一米制尺度；里程增量必须与路线在同一个坐标系里。
     void setMetricScale(float s) {
         if(std::abs(s-map.scale())<1e-6f)return;
@@ -192,7 +193,10 @@ public:
         // 计算预算：每帧只尝试 1 张（轮转），且复用该参考图缓存的角点。
         // 旧实现每帧把 4 张全部重跑角点检测+双向光流，把导航从约 25ms 抬到 58~77ms，
         // 直接导致规划结果超过 0.18s 新鲜度而停车。
-        if(!result.valid&&preserveCoordinates&&gap>0&&gap<=.8&&!references.empty()) {
+        // Parking already has an explicitly labelled applied-command fallback.
+        // A second pair of LK passes on a failed frame made field processing
+        // take 204-246ms, expiring both the camera frame and the fallback.
+        if(!parkingMode&&!result.valid&&preserveCoordinates&&gap>0&&gap<=.8&&!references.empty()) {
             const size_t count=references.size();
             Reference &ref=references[backupCursor%count];
             ++backupCursor;

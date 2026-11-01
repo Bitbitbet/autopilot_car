@@ -24,8 +24,8 @@ public:
                                   const RaceParkingDimensions &d) {
         const double gap=raw.captured-last.captured;
         if(!last.valid){if(raw.valid)last=raw;return raw;}
-        if(raw.epoch!=last.epoch||raw.sequence<=last.sequence||gap<=0||gap>.25||
-           now<raw.captured||now-raw.captured>.18||!std::isfinite(appliedSpeed)||!std::isfinite(appliedCurvature))return raw;
+        if(raw.epoch!=last.epoch||raw.sequence<=last.sequence||gap<=0||gap>.75||
+           now<raw.captured||now-raw.captured>.75||!std::isfinite(appliedSpeed)||!std::isfinite(appliedCurvature))return raw;
         if(!raw.valid||last.estimated) {
             auto predicted=raceParkingAdvance(last.pose,appliedSpeed*float(gap),appliedCurvature,d);
             if(raw.valid) {
@@ -38,7 +38,12 @@ public:
             }
             raw.pose=predicted;raw.valid=true;raw.estimated=true;
         }
-        last=raw;return raw;
+        // Keep the internal command history through a slow processing frame.
+        // It still cannot authorize motion until a fresh frame arrives. Dropping
+        // this checkpoint used to make every subsequent gap exceed the limit.
+        last=raw;
+        if(now-raw.captured>.18)raw.valid=false;
+        return raw;
     }
 };
 struct RaceParkingCommand {
@@ -133,13 +138,16 @@ public:
         if(phase==Phase::Fault)return {0,0,"PARK_FAULT",faultReason,segment};
         if(phase==Phase::Done)return {0,0,"PARK_COMPLETE",completionReason,segment};
         if(!active())return {};
-        if(!std::isfinite(now)||!std::isfinite(o.captured)||now<lastTime||!std::isfinite(dt)||dt<=0||dt>.25f||
+        if(!std::isfinite(now)||!std::isfinite(o.captured)||now<lastTime||!std::isfinite(dt)||dt<=0||dt>.75f||
            !std::isfinite(speedLimit)||speedLimit<0)return fault("PARK_TIME_OR_SPEED_INVALID");
         lastTime=now;
         if(phase==Phase::Exit) {
             const float applied=std::isfinite(appliedSpeed)?appliedSpeed:lastSpeed;
             reversedDistance+=std::max(0.f,-applied)*dt;
         }
+        // Match the bounded history recovery window, but do not turn one slow
+        // iteration into a large steering or acceleration step.
+        dt=std::min(dt,.25f);
         if(o.epoch!=epoch)return fault("PARK_ODOMETRY_EPOCH_CHANGED");
         if(o.sequence<lastSequence||(o.sequence>lastSequence&&o.captured<=lastCapture))return fault("PARK_OBSERVATION_REORDERED");
         if(!taskClear) {
@@ -154,7 +162,8 @@ public:
             rejoinSince=-1;rejoinFrames=0;
             lastSpeed=0;dwell.ready(now,false,false,false,reverse);
             if(badSince<0)badSince=now;
-            if(now-badSince>.65)return fault("PARK_MOTION_OR_TASK_INTERRUPTED_RETEACH");
+            // A temporary image/pose delay is resumable. Do not destroy the
+            // route after 650ms and require an operator to teach it again.
             return {0,0,"PARK_HOLD",taskClear?"FRESH_CONTINUOUS_MOTION_REQUIRED":"TRAFFIC_STOP_PRIORITY",segment};
         }
         const bool newFrame=o.sequence>lastSequence;
@@ -169,7 +178,7 @@ public:
         const float appliedCurvature=std::tan(steeringAngle)/dimensions.wheelbase;
         const float moveLimit=std::max(.025f,.008f+std::abs(lastSpeed)*gap*(1+dimensions.frontToRearAxle*std::abs(appliedCurvature))*1.6f);
         const float turnLimit=std::max(.11f,.04f+std::abs(lastSpeed*appliedCurvature)*gap*1.6f);
-        if(!std::isfinite(move)||!std::isfinite(turn)||gap<=0||gap>(badSince>=0?.75f:.25f)||
+        if(!std::isfinite(move)||!std::isfinite(turn)||gap<=0||(badSince<0&&gap>.75f)||
            move>moveLimit+.4f*recoveryExtra||turn>turnLimit+.8f*recoveryExtra)
             return fault("PARK_POSE_DISCONTINUITY");
         previous=o.pose;lastCapture=o.captured;lastSequence=o.sequence;badSince=-1;
