@@ -178,7 +178,14 @@ class RaceManager {
         targetVisibleTime=handoffTime=alignedTime=0;targetCenter=std::numeric_limits<float>::quiet_NaN(); }
     // Experimental PWM demand, not a calibrated wheel angle. Use the existing
     // actuator range; target-road visibility still governs the handoff.
-    static float guidancePwm(double elapsed) {return 360+40*std::clamp(float(elapsed/.20),0.f,1.f);}
+    float guidancePwm(double elapsed)const {
+        if(routeArmed)return 360+40*std::clamp(float(elapsed/.20),0.f,1.f);
+        // A Y fork is shallower than the parking entrance. Use an initial
+        // directional pulse, then ease off instead of holding full lock until
+        // a restrictive far-road test eventually succeeds.
+        if(elapsed<.40)return 260+40*std::clamp(float(elapsed/.20),0.f,1.f);
+        return 300-150*std::clamp(float((elapsed-.40)/.60),0.f,1.f);
+    }
     static bool corridorCenters(const RacePath &path,float &nearCenter,float &farCenter,float &heading) {
         if(path.left.size()<20||path.right.size()!=path.left.size())return false;
         nearCenter=farCenter=heading=0;constexpr size_t samples=8;
@@ -426,7 +433,9 @@ public:
                             corridorCenters(geometry,unionNear,unionFar,unionHeading)&&direction*(farCenter-unionFar)>24;
                         const bool sameTarget=visible&&targetVisibleTime>0&&std::isfinite(targetCenter)&&
                             std::abs(farCenter-targetCenter)<80;
-                        const bool target=visible&&(splitTarget||sameTarget||
+                        const bool centeredAfterTurn=!routeArmed&&elapsed>=.65&&geometry.splitRows==0&&
+                            std::abs(nearCenter-320)<60&&std::abs(farCenter-320)<80&&std::abs(heading)<24;
+                        const bool target=visible&&(splitTarget||sameTarget||centeredAfterTurn||
                             (direction*(farCenter-nearCenter)>40&&direction*(farCenter-320)>20));
                         // One visible patch must not cancel the strong turn.
                         // Confirm a continuous connected target, never the opposite corridor.
@@ -450,13 +459,13 @@ public:
                 float nearCenter=0,farCenter=0,heading=0;
                 const bool visible=corridorCenters(p.path,nearCenter,farCenter,heading);
                 const bool continuous=visible&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<96);
-                p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/.65f,0.f,1.f);
+                p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/(routeArmed?.65f:.25f),0.f,1.f);
                 if(continuous){handoffTime+=dt;targetCenter=farCenter;}
                 else {
                     // Do not feed an abruptly substituted opposite road to the
                     // pilot. Continue the signed turn instead of latching stop.
-                    enter(State::ForkArmed);seekSince=now;
-                    p.selectedBranch=false;p.path={};p.laneBlend=0;p.guidePwm=guidancePwm(0);
+                    enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.0);
+                    p.selectedBranch=false;p.path={};p.laneBlend=0;p.guidePwm=guidancePwm(now-seekSince);
                     p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
                     p.reason="TARGET_ROAD_LOST_KEEP_SIGN_GUIDANCE";return p;
                 }
@@ -487,9 +496,9 @@ public:
            failureReason=="SIGNED_ROAD_REACQUIRE_TIMEOUT"||failureReason=="FORK_NOT_CONFIRMED_TIMEOUT")) {
             // Painted geometry warnings must not latch the competition run.
             // Seek the committed side again, then reacquire current road edges.
-            enter(State::ForkArmed);seekSince=now;
+            enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.0);
             p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
-            p.guidePwm=p.guideDirection?guidancePwm(0):0;p.laneBlend=p.guideDirection?0:1;
+            p.guidePwm=p.guideDirection?guidancePwm(now-seekSince):0;p.laneBlend=p.guideDirection?0:1;
             p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
         }
         else if(state==State::Fault) { p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; }

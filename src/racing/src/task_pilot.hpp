@@ -3,6 +3,28 @@
 #include "task_track.hpp"
 #include "trackview_config.hpp"
 #include <nlohmann/json.hpp>
+// Runtime settings for the mission/parking window. Keep user settings separate
+// from temporary parking/traffic caps so per-frame updates cannot erase them.
+struct RaceSpeedSettings {
+    float cruise=.10f,curve,degraded,fork,minimum,maximum;
+    RaceSpeedSettings(const TrackviewConfig &c,float turn):curve(c.curveSpeed),degraded(c.degradedSpeed),
+        fork(turn),minimum(c.minSpeed),maximum(c.maxSpeed){}
+    const char *adjust(int key) {
+        float *value=nullptr;const char *name=nullptr;float step=.05f;
+        switch(key) {
+        case '-':case '_':step=-step;[[fallthrough]];
+        case '+':case '=':value=&cruise;name="cruiseSpeed";break;
+        case '[':step=-step;[[fallthrough]];
+        case ']':value=&curve;name="curveSpeed";break;
+        case ',':step=-step;[[fallthrough]];
+        case '.':value=&degraded;name="degradedSpeed";break;
+        case 'j':step=-step;[[fallthrough]];
+        case 'k':value=&fork;name="forkSpeed";break;
+        default:return nullptr;
+        }
+        *value=std::clamp(*value+step,minimum,maximum);return name;
+    }
+};
 // The master pilot owns path quality, single-edge ground reconstruction and PD.
 // This view only adapts task telemetry and supplies task-specific speed policies.
 class RaceTaskPilot {

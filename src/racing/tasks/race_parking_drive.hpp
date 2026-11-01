@@ -48,7 +48,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
     // Explicit client sizing avoids clipped AUTO-sized windows with remote X11
     // and Windows DPI scaling; the status strip is part of this same image.
     cv::namedWindow(window,cv::WINDOW_NORMAL|cv::WINDOW_KEEPRATIO);
-    cv::resizeWindow(window,640,560);
+    cv::resizeWindow(window,640,616);
     cv::setMouseCallback(window,[](int event,int x,int y,int,void *data){
         if(event!=cv::EVENT_LBUTTONDOWN||x<0||x>=640||y<0||y>=480)return;
         auto &q=*static_cast<Input*>(data);std::lock_guard lock(q.mutex);
@@ -78,7 +78,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
             cv::Mat frozenImage;std::vector<cv::Point2f> corners;
             RaceParkingFrame bayFrame;bool frozen=false,taught=false,armed=false,continueLane=false;
             double last=raceTime(),completedAt=-1;uint64_t frame=0;uint16_t previousServo=PWMSERVOMID;
-            float cruise=.10f,previousSpeed=0;std::string previousState;
+            RaceSpeedSettings speedSettings(config,raceConfig.forkSpeed);
+            float &cruise=speedSettings.cruise;
+            float previousSpeed=0;std::string previousState;
             std::string firstMotionFailure;
             std::string teachingFeedback,teachingDetails;
             bool autoEnabled=!missionEnabled,autoPlanning=false;double lastScan=-1e30;int stableMouths=0;
@@ -98,9 +100,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(image.size()!=cameraSize) {
                     cameraSize=image.size();
                     std::ofstream(directory/"camera-input.json")<<nlohmann::json({{"raw_width",cameraSize.width},{"raw_height",cameraSize.height},
-                        {"processing_width",640},{"processing_height",480},{"display_width",640},{"display_height",560},
+                        {"processing_width",640},{"processing_height",480},{"display_width",640},{"display_height",616},
                         {"resize_before_lens_correction",false},{"lens_fingerprint",calibration.lensFingerprint}}).dump(2);
-                    std::cout<<"[Parking camera] input="<<cameraSize.width<<'x'<<cameraSize.height<<" -> processing=640x480; display=640x560\n";
+                    std::cout<<"[Parking camera] input="<<cameraSize.width<<'x'<<cameraSize.height<<" -> processing=640x480; display=640x616\n";
                 }
                 if(cameraSize.width*3!=cameraSize.height*4)
                     throw std::runtime_error("Parking camera aspect ratio changed: restore calibrated 4:3 capture or recalibrate; refusing stretched geometry");
@@ -133,7 +135,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 auto traffic=manager.update(ai,before,dt,missionEnabled?missionAutomatic:true,bin,track,image,
                     virtualDecision.authorizeCone,true,missionEnabled?mission.routeDirection():0,missionEnabled,
                     missionEnabled&&((mission.parkingApproach()&&mission.routeDirection()==-1)||mission.exitArrowTurnAuthorized()),
-                    missionEnabled&&mission.parkingSpeedLimited()?raceConfig.parkingSpeed:0);
+                    missionEnabled&&mission.parkingSpeedLimited()?raceConfig.parkingSpeed:speedSettings.fork);
                 if(missionEnabled)mission.observeGate(traffic);
                 else if(controller.done()) {
                     if(traffic.gateWaiting)standaloneExitGateSeen=true;
@@ -142,7 +144,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 const float taskCruise=missionEnabled?mission.speedLimit(cruise,raceConfig.parkingSpeed):
                     standaloneExitReleased?cruise:std::min(cruise,raceConfig.parkingSpeed);
                 const bool areaLimited=missionEnabled?mission.parkingSpeedLimited():!standaloneExitReleased;
-                pilot.setCurveSpeed(areaLimited?std::min(taskCruise,raceConfig.parkingSpeed):config.curveSpeed);
+                pilot.setCurveSpeed(areaLimited?std::min(taskCruise,raceConfig.parkingSpeed):speedSettings.curve);
+                pilot.setDegradedSpeed(speedSettings.degraded);
+                virtualPilot.setCurveSpeed(speedSettings.curve);virtualPilot.setDegradedSpeed(speedSettings.degraded);
                 if(missionEnabled) {
                     auto visibleCandidates=missionAutomatic&&mission.parkingZone()&&!taught?
                         scanMouths():std::vector<RaceParkingMouthCandidate>{};
@@ -188,6 +192,11 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 }
                 for(int key:keys) {
                     if(key>='A'&&key<='Z')key=key-'A'+'a';
+                    if(const char *setting=speedSettings.adjust(key)) {
+                        std::cout<<"[Set] "<<setting<<" | cruise="<<cruise<<" curve="<<speedSettings.curve
+                            <<" degraded="<<speedSettings.degraded<<" fork="<<speedSettings.fork<<" m/s\n";
+                        continue;
+                    }
                     if(labMission&&(key=='f'||key=='p'))continue;
                     if(key==' ') {if(missionEnabled){mission.stop();missionAutomatic=false;}car->pauseMotion();controller.abort();armed=false;continueLane=false;searchAdvance=searchRequested=false;autoEnabled=false;previousSpeed=0;}
                     else if(missionEnabled&&key=='n')mission.markStart();
@@ -303,9 +312,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                             if(car->resumeMotion(commandEpoch)){armed=true;test.start();saveTest();if(missionEnabled){mission.parkingStarted();virtualBoundary=RaceVirtualBoundary(navConfig);}}
                             else {controller.abort();std::cout<<"[Parking] Stop epoch changed; reteach.\n";}
                         } else {teachingFeedback="G_RESCAN_CURRENT_POSE_OR_STALE_ROUTE";test.startBlocked(teachingFeedback);saveTest();std::cout<<"[Parking] Start blocked: current pose/route continuity; press g to rescan.\n";}
-                    } else if(key=='+'||key=='=')cruise=std::min(config.maxSpeed,cruise+.05f);
-                    else if(key=='-'||key=='_')cruise=std::max(config.minSpeed,cruise-.05f);
-                    else if(key=='s'&&(missionEnabled||std::abs(previousSpeed)<1e-5f)) {
+                    } else if(key=='s'&&(missionEnabled||std::abs(previousSpeed)<1e-5f)) {
                         cv::imwrite((directory/("sample-"+std::to_string(frame)+".png")).string(),image);
                     }
                 }
@@ -402,6 +409,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["traffic_state"]=traffic.state;row["traffic_reason"]=traffic.reason;row["parking_state"]=command.state;
                     row["guide_direction"]=traffic.guideDirection;row["guide_pwm"]=traffic.guidePwm;row["lane_blend"]=traffic.laneBlend;
                     row["cruise_setting"]=cruise;row["task_cruise_limit"]=taskCruise;
+                    row["curve_setting"]=speedSettings.curve;row["degraded_setting"]=speedSettings.degraded;
+                    row["fork_setting"]=speedSettings.fork;row["traffic_speed_cap"]=traffic.speedCap;
                     row["gate_waiting"]=traffic.gateWaiting;row["gate_opened"]=traffic.gateOpened;
                     row["decision_reason"]=command.reason;row["arrow_allowed"]=groundArrow.allowed;row["arrow_box"]={groundArrow.box.x,groundArrow.box.y,groundArrow.box.width,groundArrow.box.height};
                     row["bypass"]=raceObstacleJson(virtualPlan,navConfig);missionLog<<row.dump()<<'\n';
@@ -413,6 +422,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"captured",captured},{"controller_reason",controller.failed()?failure.reason:command.reason},{"first_motion_failure",firstMotionFailure},
                     {"armed",armed},{"frozen",frozen},{"command_speed",speed},{"pwm",servo},{"segment",command.segment},
                     {"parking_side",bayFrame.side<0?"left":"right"},{"task_cruise_limit",taskCruise},
+                    {"cruise_setting",cruise},{"curve_setting",speedSettings.curve},{"degraded_setting",speedSettings.degraded},
+                    {"fork_setting",speedSettings.fork},{"traffic_speed_cap",traffic.speedCap},
                     {"requested_pwm",requestedServo},{"requested_speed",command.speed},{"actuator_reason",actuatorReason},
                     {"predicted_boundary_warning",command.predictedBoundaryWarning},
                     {"entry_heading_recovery",command.entryHeadingRecovery},{"heading_error_rad",command.headingError},
@@ -507,10 +518,15 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     const auto bay=space.bay();for(size_t i=0;i<bay.size();++i)line(bay[i],bay[(i+1)%bay.size()],{0,255,255});
                     for(size_t i=1;i<route.entry.size();++i)line({route.entry[i-1].x,route.entry[i-1].z},{route.entry[i].x,route.entry[i].z},{0,255,0});
                 }
-                cv::copyMakeBorder(shown,shown,0,80,0,0,cv::BORDER_CONSTANT,{0,0,0});
+                cv::copyMakeBorder(shown,shown,0,136,0,0,cv::BORDER_CONSTANT,{0,0,0});
                 cv::putText(shown,std::string(command.state)+" "+command.reason,{5,500},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
                 cv::putText(shown,missionEnabled?std::string(mission.name())+(previewOnly?" NO MOTOR":""):frozen&&!teachingDetails.empty()?teachingDetails:test.progress(),{5,522},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
-                cv::putText(shown,"SPACE stop | g reset | n lap/finish | s sample | q quit",{5,546},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
+                std::ostringstream settings;settings<<std::fixed<<std::setprecision(2)
+                    <<"SET "<<cruise<<" CURVE "<<speedSettings.curve<<" QUALITY "<<speedSettings.degraded
+                    <<" FORK "<<speedSettings.fork<<" CMD "<<speed;
+                cv::putText(shown,settings.str(),{5,546},cv::FONT_HERSHEY_PLAIN,1,{0,255,0});
+                cv::putText(shown,"+/- cruise | [/] curve | ,/. quality | j/k fork",{5,570},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
+                cv::putText(shown,"SPACE stop | g reset | n lap/finish | s sample | q quit",{5,594},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
                 display.publish(shown,{});
                 }
             }

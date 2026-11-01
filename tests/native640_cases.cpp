@@ -154,6 +154,34 @@ int main(int argc,char **argv){try{
     auto curve=[&](int farCenter){cv::Mat b=cv::Mat::zeros(480,640,CV_8UC1);
         const std::vector<cv::Point> polygon{{80,479},{560,479},{std::min(639,farCenter+100),0},{std::max(0,farCenter-100),0}};
         cv::fillPoly(b,std::vector<std::vector<cv::Point>>{polygon},{255});return b;};
+    for(int direction:{-1,1}) {
+        RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;int i=0;
+        snapshot.detections={box(direction<0?LABEL_YLEFT:LABEL_YRIGHT)};
+        auto step=[&](const cv::Mat &b){snapshot.sequence=++i;snapshot.captured=i*.07;
+            return manager.update(snapshot,snapshot.captured,.07,true,b,track,{},false,true,0,true);};
+        for(int j=0;j<22;++j){p=step(curve(direction<0?490:150));
+            require(!p.selectedBranch&&p.guidePwm<=300,"Y guidance uses parking lock or accepts opposite road");}
+        require(raceDirectionSeeking(p)&&p.guidePwm<=151,"Y seek keeps a large steering demand indefinitely");
+        for(int j=0;j<3;++j)p=step(binary);
+        require(p.selectedBranch,"Centered road after Y turn cannot be acquired");
+        for(int j=0;j<5;++j)p=step(binary);
+        require(p.selectedBranch&&p.laneBlend==1,"Y handoff remains biased too long");
+        require(raceDirectionServo(p,direction<0?1700:1300)==(direction<0?1700:1300),"Y handoff prevents countersteer");
+        p=step(curve(direction<0?490:150));
+        require(!p.selectedBranch&&p.guidePwm<=151,"Target loss restarts the large Y pulse");
+    }
+    {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
+     for(int i=0;i<8;++i)settings.adjust('+');
+     for(int i=0;i<4;++i){settings.adjust(']');settings.adjust('.');settings.adjust('k');}
+     for(int i=0;i<5;++i){p.setCurveSpeed(settings.curve);p.setDegradedSpeed(settings.degraded);}
+     require(std::abs(settings.cruise-.5f)<1e-5&&p.curveSpeed()>.29f&&p.degradedSpeed()>.29f&&settings.fork>.34f,
+         "Mission speed settings are erased or remain at initial limits");
+     settings.adjust('[');settings.adjust(',');settings.adjust('j');settings.adjust('-');
+     require(std::abs(settings.cruise-.45f)<1e-5&&std::abs(settings.fork-.30f)<1e-5,"Decrease keys fail");
+     require(settings.adjust('a')==nullptr,"Speed keys consume the start command");
+     for(int i=0;i<250;++i)settings.adjust('+');require(settings.cruise==c.maxSpeed,"Speed exceeds configured maximum");
+     for(int i=0;i<250;++i)settings.adjust('-');require(settings.cruise==c.minSpeed,"Speed drops below configured minimum");}
+    std::cout<<"PASS Y bounded guidance and fast centered-road handoff; no full-lock restart; mission speed keys and limits\n";
     {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;double t=0;uint64_t sequence=0;
      auto step=[&](const cv::Mat &b){t+=.07;snapshot.sequence=++sequence;snapshot.captured=t;
          return manager.update(snapshot,t,.07,true,b,track,{},false,true,-1,true,true);};
