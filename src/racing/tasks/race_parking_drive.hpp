@@ -138,7 +138,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     missionEnabled&&((mission.parkingApproach()&&mission.routeDirection()==-1)||mission.exitArrowTurnAuthorized()),
                     missionEnabled&&mission.parkingSpeedLimited()?raceConfig.parkingSpeed:speedSettings.fork,
                     {true,pilot.ready&&pilot.alignment.valid&&!virtualDecision.involved&&!armed,
-                     pilot.alignment.offset,pilot.alignment.heading,previousSpeed});
+                     pilot.alignment.offset,pilot.alignment.heading,previousSpeed},
+                    missionEnabled&&mission.parkingEntrancePending(),missionEnabled&&mission.parkingEntranceNear());
                 if(missionEnabled)mission.observeGate(traffic);
                 else if(controller.done()) {
                     if(traffic.gateWaiting)standaloneExitGateSeen=true;

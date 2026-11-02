@@ -100,7 +100,12 @@ template<class Plan>inline uint16_t raceDirectionServo(const Plan &p,uint16_t la
     if(p.selectedBranch){
         // Once the selected road asks for countersteer, old sign guidance must
         // not cancel it while the timed blend is still ramping up.
-        if(p.guideDirection*(float(laneServo)-PWMSERVOMID)<-20)return laneServo;
+        if(p.guideDirection*(float(laneServo)-PWMSERVOMID)<-20){
+            if(!p.parkingEntryCommit||p.laneBlend>=1)return laneServo;
+            // Entrance-only acquisition: blend toward neutral first. A right
+            // command from the old aisle cannot cancel the first left frame.
+            laneServo=PWMSERVOMID;
+        }
         const float blend=std::clamp(p.laneBlend,0.f,1.f);
         const float guided=PWMSERVOMID+p.guideDirection*p.guidePwm;
         return uint16_t(std::lround(std::clamp(guided*(1-blend)+laneServo*blend,float(PWMSERVOMIN),float(PWMSERVOMAX))));

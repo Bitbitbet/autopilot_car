@@ -172,6 +172,7 @@ struct RacePlan {
     bool stop=false,buzzer=false,fresh=false;
     bool selectedBranch=false;
     bool alignRoad=false;
+    bool parkingEntryCommit=false;
     bool gateWaiting=false,gateOpened=false;
     int guideDirection=0;
     int completedDirection=0;
@@ -286,7 +287,7 @@ public:
         return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
     }
     RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track,
-                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false,float parkingAreaSpeed=0,const RaceForkFeedback &road={}) {
+                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false,float parkingAreaSpeed=0,const RaceForkFeedback &road={},bool parkingEntrance=false,bool parkingEntryNear=false) {
         now=time;
         RacePlan p;
         p.gateWaiting=gateWaiting;
@@ -423,6 +424,12 @@ public:
         if(routeArmed&&routeDirection&&routeDirection!=direction&&(state==State::ForkArmed||state==State::ForkSelect)) {
             enter(State::Lane);routeArmed=false;
         }
+        if(parkingEntrance&&!routeArmed&&!parkingEntryNear){
+            p.speedCap=std::min(p.speedCap,forkSpeed);
+            p.state="PARKING_ENTRY_APPROACH";p.reason="PARK_SIGN_DISTANT_FOLLOW_CURRENT_ROAD";
+            return p; // Continue forward; do not steer just because PARK was recognized.
+        }
+        p.parkingEntryCommit=parkingEntrance;
         if(state==State::Lane&&now>=cooldownUntil&&newFrame) {
             if(routeDirection!=0&&(geometry.splitRows>=cfg.minBranchRows||
                 (confirmedRouteSign&&routeDirection==-1)||
@@ -494,7 +501,8 @@ public:
                         // allowing alignment control is a circular dependency.
                         const bool centeredAfterTurn=!routeArmed&&yProgress.pulsePhase>=1.0&&geometry.splitRows==0&&
                             std::abs(nearCenter-320)<130;
-                        const bool target=visible&&(splitTarget||sameTarget||centeredAfterTurn||
+                        const bool entrySide=!parkingEntrance||(direction*(nearCenter-320)>-64&&direction*(farCenter-320)>20);
+                        const bool target=visible&&entrySide&&(splitTarget||sameTarget||centeredAfterTurn||
                             (direction*(farCenter-nearCenter)>40&&direction*(farCenter-320)>20));
                         // One visible patch must not cancel the strong turn.
                         // Confirm a continuous connected target, never the opposite corridor.
@@ -515,12 +523,21 @@ public:
             p.speedCap=std::min(p.speedCap,forkSpeed);
             p.state=direction<0?"FORK_LEFT":direction==2?"FORK_STRAIGHT":"FORK_RIGHT"; p.reason=routeArmed?"MISSION_CONNECTED_BRANCH":"CONNECTED_BRANCH";
             p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true); p.selectedBranch=true;
-            if(geometry.splitRows==0)p.path=raceBranchPath(geometryBin,track,2,cfg,signRegions,false);
+            if(geometry.splitRows==0&&!parkingEntrance)p.path=raceBranchPath(geometryBin,track,2,cfg,signRegions,false);
             bool aligned=direction==2;
             if(direction!=2) {
                 float nearCenter=0,farCenter=0,heading=0;
                 const bool visible=corridorCenters(p.path,nearCenter,farCenter,heading);
                 const bool continuous=visible&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<96);
+                // During entrance acquisition, a corridor far on the opposite
+                // side is the old road, not permission to snap back to it.
+                const bool oppositeEntry=parkingEntrance&&handoffTime<.65f&&road.available&&road.roadReady&&
+                    direction*road.offset < -130;
+                if(parkingEntrance&&handoffTime<.65f&&(!continuous||oppositeEntry)){
+                    enter(State::ForkArmed);seekSince=now;
+                    p.selectedBranch=false;p.path={};p.guideDirection=direction;p.guidePwm=360;p.laneBlend=0;p.alignRoad=false;
+                    p.state="PARKING_ENTRY_REACQUIRE";p.reason="KEEP_ENTRANCE_SIDE_BEFORE_HANDOFF";return p;
+                }
                 p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/(routeArmed?.65f:.25f),0.f,1.f);
                 if(continuous){handoffTime+=dt;targetCenter=farCenter;}
                 else {

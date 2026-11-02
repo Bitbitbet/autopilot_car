@@ -14,6 +14,22 @@ static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--park-entry-field") {
+        RaceMission mission;mission.start();std::ifstream input(fs::path(argv[1])/"parking-control.jsonl");
+        require(bool(input),"Missing entrance telemetry");std::string line;bool checked=false;
+        while(std::getline(input,line)){
+            const auto r=nlohmann::json::parse(line);RaceSnapshot s;s.sequence=r.at("ai_sequence");
+            s.captured=r.at("time").get<double>()-r.at("ai_age_s").get<double>();
+            for(const auto &v:r.at("ai_detections")){
+                auto b=v.at("box");auto d=box(v.at("type"),b[0],b[1],b[2],b[3]);d.score=v.at("score");s.detections.push_back(d);
+            }
+            mission.observeSigns(s,r.at("ai_age_s").get<float>()<=.30);
+            if(r.at("frame")==779){require(mission.parkingEntrancePending()&&!mission.parkingEntranceNear(),
+                "Recorded distant 66x34 PARK still authorizes immediate entry turn");checked=true;break;}
+        }
+        require(checked,"Missing field frame779");
+        std::cout<<"PASS recorded frame779 PARK confirmed for approach, no premature entry turn (telemetry only)\n";return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--fork-exit-field") {
         std::ifstream input(fs::path(argv[1])/"parking-control.jsonl");require(bool(input),"Missing fork telemetry");
         RaceYForkProgress progress;std::string line;bool started=false;uint64_t previousSequence=0,completed=0;
@@ -350,6 +366,30 @@ int main(int argc,char **argv){try{
             step(false,true);require(p.speedCap>.20&&p.completedDirection==0,"Fork cap reapplied or completion event repeated");
         }
         std::cout<<"PASS speed-aware finite Y pulse; fresh curved-road exit from seek/select; fork cap and mission release\n";
+    }
+    {
+        RaceMission mission;mission.start();RaceSnapshot s;RaceConfig entryConfig=config;entryConfig.minBranchRows=20;
+        RaceManager manager(entryConfig);RacePlan p;int i=0;
+        auto step=[&](int width,int height,const RaceForkFeedback &feedback=RaceForkFeedback{}){
+            s.sequence=++i;s.captured=i*.07;s.detections={box(LABEL_PARK,500,2,width,height)};
+            mission.observeSigns(s,true);
+            return manager.update(s,s.captured,.07,true,split,track,{},false,true,mission.routeDirection(),true,
+                mission.parkingEntrancePending(),.30,feedback,mission.parkingEntrancePending(),mission.parkingEntranceNear());
+        };
+        for(int j=0;j<12;++j)p=step(66,34);
+        require(mission.parkingEntrancePending()&&!mission.parkingEntranceNear()&&!p.stop&&p.guidePwm==0&&
+            std::string(p.state)=="PARKING_ENTRY_APPROACH"&&p.speedCap<=.301,"Distant PARK does not approach under area cap");
+        p=step(100,70);require(!mission.parkingEntranceNear(),"Single near frame starts turn");
+        for(int j=0;j<6;++j)p=step(100,70);
+        require(mission.parkingEntranceNear()&&p.selectedBranch&&p.parkingEntryCommit,"Near PARK cannot acquire entrance");
+        require(raceDirectionServo(p,1900)<=1500,"Entrance initial handoff snaps from left lock to right lock");
+        p=step(100,70,{true,true,311,-24,.30});
+        require(!p.selectedBranch&&p.guideDirection==-1&&raceDirectionServo(p,1900)<1500&&
+            std::string(p.state)=="PARKING_ENTRY_REACQUIRE","Opposite old road cancels parking entrance commitment");
+        for(int j=0;j<20;++j)p=step(100,70,{true,true,-20,0,.30});
+        require(p.selectedBranch&&p.laneBlend==1&&raceDirectionServo(p,1700)==1700,"Established entrance road cannot countersteer");
+        require(std::abs(mission.speedLimit(.5,.30)-.30)<1e-5&&std::abs(mission.speedLimit(.2,.30)-.2)<1e-5,"Parking cap raises or ignores cruise setting");
+        std::cout<<"PASS parking entrance distant approach; near confirmation; side commitment; delayed countersteer; unchanged area cap\n";
     }
     {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
      for(int i=0;i<8;++i)settings.adjust('+');

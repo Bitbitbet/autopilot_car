@@ -12,6 +12,7 @@ private:
     int exitArrowCount=0;uint64_t exitArrowFrame=0;bool exitArrowConfirmed=false;
     float parkModelScore=0;cv::Rect parkShapeBox;const char *parkEvidence="NONE";
     double parkCaptured=0;cv::Rect previousParkBox;
+    int parkNearCount=0;bool parkTurnNear=false;
     bool entryGateSeen=false,entryGateReleased=false,exitGateSeen=false,exitGateReleased=false;
 public:
     explicit RaceMission(bool laboratory=false):lab(laboratory){}
@@ -26,6 +27,8 @@ public:
     bool running()const{return stage!=Stage::Ready&&stage!=Stage::Done&&stage!=Stage::Fault;}
     bool parkingSearch()const{return stage==Stage::ParkingSearch;}
     bool parkingRun()const{return stage==Stage::ParkingRun;}
+    bool parkingEntrancePending()const{return stage==Stage::SecondFork&&parkingSign;}
+    bool parkingEntranceNear()const{return parkTurnNear;}
     bool exitArrowTurnAuthorized()const{return stage==Stage::ParkingExit&&exitArrowConfirmed;}
     void observeExitArrow(const RaceGroundArrow &arrow,uint64_t frame,bool fresh){
         if(stage!=Stage::ParkingExit||lab||!fresh||frame<=exitArrowFrame)return;
@@ -73,13 +76,21 @@ public:
             (parkCaptured<=0||ai.captured-parkCaptured<=.30);
         parkCount=park?(continuous?std::min(3,parkCount+1):1):0;
         previousParkBox=park?box:cv::Rect{};parkCaptured=ai.captured;
+        // Recognition supplies route intent, not a measured turn location.
+        // Native640 experimental proximity cue: the field's 66x34 distant
+        // plate must not immediately command full left lock.
+        if(parkStageEligible()&&!parkTurnNear){
+            const bool close=park&&((box.width>=96&&box.height>=48)||(box.width>=48&&box.height>=64));
+            parkNearCount=close?(continuous?std::min(2,parkNearCount+1):1):0;
+            if(parkNearCount>=2&&parkCount>=3)parkTurnNear=true;
+        }
         // Beijing's switched PARK is the lap-two route landmark. Do not require
         // the image-based Y completion latch: it can remain pending on a bend.
         // Still require three fresh consistent observations and never retrigger
         // after parking or outside an active competition approach.
         if(parkStageEligible()&&parkCount>=3&&!parkingSign){
             stage=Stage::SecondFork;branch=false;branchDirection=0;parkingSign=true;
-            reason="LAP2_PARK_SIGN_TURN_LEFT_NOW";
+            reason="LAP2_PARK_SIGN_APPROACH_BEFORE_TURN";
         }
     }
     void start(){if(stage==Stage::Ready){stage=lab?Stage::LabLoop:Stage::FirstFork;reason="ROUTE_STARTED";}}
@@ -110,6 +121,7 @@ public:
     nlohmann::json json()const{return {{"state",name()},{"reason",reason},{"lab_single_loop",lab},{"parking_completed",completedParking},
         {"park_model_score",parkModelScore},{"park_evidence",parkEvidence},{"park_evidence_frames",parkCount},
         {"park_evidence_sequence",sequence},
+        {"parking_entrance_near",parkTurnNear},{"parking_near_frames",parkNearCount},
         {"park_shape_box",{parkShapeBox.x,parkShapeBox.y,parkShapeBox.width,parkShapeBox.height}},
         {"park_stage_eligible",parkStageEligible()},
         {"route_policy","beijing_lap1_flow_signed_fork_lap2_parking"},
