@@ -36,6 +36,7 @@ public:
     }
     bool parkingZone()const{return (stage==Stage::SecondFork&&parkingSign)||stage==Stage::ParkingApproach||parkingSearch()||parkingRun()||stage==Stage::ParkingExit;}
     bool parkingApproach()const{return stage==Stage::ParkingApproach||
+        (stage==Stage::SecondFork&&parkingSign)||
         ((stage==Stage::FirstReturn||stage==Stage::SecondFork)&&parkCount>0);}
     bool parkingSpeedLimited()const{return !lab&&running()&&!exitGateReleased&&
         (parkingZone()||parkingApproach()||completedParking>0);}
@@ -52,6 +53,8 @@ public:
     }
     bool complete()const{return stage==Stage::Done;}
     bool failed()const{return stage==Stage::Fault;}
+    bool parkStageEligible()const{return !lab&&completedParking==0&&
+        (stage==Stage::FirstFork||stage==Stage::FirstReturn||stage==Stage::SecondFork);}
     // FLOW and Y signs belong to the local traffic manager. A permanent
     // straight override would suppress the later left/right Y sign.
     int routeDirection()const{return (stage==Stage::SecondFork&&parkingSign)||stage==Stage::ParkingExit?-1:0;}
@@ -70,10 +73,11 @@ public:
             (parkCaptured<=0||ai.captured-parkCaptured<=.30);
         parkCount=park?(continuous?std::min(3,parkCount+1):1):0;
         previousParkBox=park?box:cv::Rect{};parkCaptured=ai.captured;
-        // Beijing: FLOW on lap one, PARK on lap two. After completing the
-        // signed Y fork, the newly switched PARK is route evidence for lap two;
-        // it is not a global position measurement. n at the start also works.
-        if((stage==Stage::FirstReturn||stage==Stage::SecondFork)&&parkCount>=3&&!parkingSign){
+        // Beijing's switched PARK is the lap-two route landmark. Do not require
+        // the image-based Y completion latch: it can remain pending on a bend.
+        // Still require three fresh consistent observations and never retrigger
+        // after parking or outside an active competition approach.
+        if(parkStageEligible()&&parkCount>=3&&!parkingSign){
             stage=Stage::SecondFork;branch=false;branchDirection=0;parkingSign=true;
             reason="LAP2_PARK_SIGN_TURN_LEFT_NOW";
         }
@@ -103,10 +107,11 @@ public:
     }
     nlohmann::json json()const{return {{"state",name()},{"reason",reason},{"lab_single_loop",lab},{"parking_completed",completedParking},
         {"park_model_score",parkModelScore},{"park_evidence",parkEvidence},{"park_evidence_frames",parkCount},
+        {"park_evidence_sequence",sequence},
         {"park_shape_box",{parkShapeBox.x,parkShapeBox.y,parkShapeBox.width,parkShapeBox.height}},
-        {"park_stage_eligible",stage==Stage::FirstReturn||stage==Stage::SecondFork},
+        {"park_stage_eligible",parkStageEligible()},
         {"route_policy","beijing_lap1_flow_signed_fork_lap2_parking"},
-        {"lap_finish_source","after_signed_fork_new_park_or_operator_n; finish_operator_n"},{"parking_sign_confirmed",parkingSign},
+        {"lap_finish_source","confirmed_switched_park_independent_of_fork_completion; finish_operator_n"},{"parking_sign_confirmed",parkingSign},
         {"route_direction",routeDirection()},{"parking_exit_arrow_authorized",exitArrowTurnAuthorized()},
         {"parking_speed_limited",parkingSpeedLimited()},{"entry_gate_seen",entryGateSeen},{"entry_gate_released",entryGateReleased},
         {"exit_gate_seen",exitGateSeen},{"exit_gate_released",exitGateReleased},

@@ -554,7 +554,33 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     diagnostic<<"P: "<<status["park_evidence"].get<std::string>()<<" model="<<std::fixed<<std::setprecision(2)
                         <<status["park_model_score"].get<float>()<<" hits="<<status["park_evidence_frames"].get<int>()
                         <<(status["park_stage_eligible"].get<bool>()?" ELIGIBLE":" STAGE_LOCKED");
-                    cv::putText(shown,diagnostic.str(),{5,612},cv::FONT_HERSHEY_PLAIN,.9,{0,255,0});}
+                    cv::putText(shown,diagnostic.str(),{5,612},cv::FONT_HERSHEY_PLAIN,.9,{0,255,0});
+                    // Draw detections on their own inference frame, not on the
+                    // newer live image (which can already have moved past them).
+                    cv::copyMakeBorder(shown,shown,0,0,0,320,cv::BORDER_CONSTANT,{0,0,0});
+                    if(!ai.image.empty()) {
+                        cv::Mat matched=ai.image.clone();
+                        for(const auto &d:ai.detections)if(d.type==LABEL_PARK) {
+                            const auto b=cv::Rect(d.x,d.y,d.width,d.height)&cv::Rect(0,0,matched.cols,matched.rows);
+                            if(b.empty())continue;
+                            const cv::Scalar color=d.score>=.65f?cv::Scalar(0,255,0):cv::Scalar(0,200,255);
+                            cv::rectangle(matched,b,color,2);std::ostringstream label;
+                            label<<"P MODEL "<<std::fixed<<std::setprecision(2)<<d.score;
+                            cv::putText(matched,label.str(),{b.x,std::max(16,b.y-4)},cv::FONT_HERSHEY_PLAIN,1,color,1);
+                        }
+                        const auto b=status["park_shape_box"].get<std::vector<int>>();
+                        if(status["park_evidence_sequence"].get<uint64_t>()==ai.sequence&&b.size()==4&&b[2]>0&&b[3]>0) {
+                            cv::rectangle(matched,{b[0],b[1],b[2],b[3]},{255,255,0},2);
+                            cv::putText(matched,"P SHAPE",{b[0],std::max(16,b[1]-4)},cv::FONT_HERSHEY_PLAIN,1,{255,255,0});
+                        }
+                        cv::Mat inset;cv::resize(matched,inset,{320,240});inset.copyTo(shown(cv::Rect(640,0,320,240)));
+                    }
+                    std::ostringstream age;age<<"MATCHED AI age="<<std::fixed<<std::setprecision(2)<<raceTime()-ai.captured<<"s";
+                    cv::putText(shown,age.str(),{646,260},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
+                    cv::putText(shown,"Green: model >= 0.65",{646,282},cv::FONT_HERSHEY_PLAIN,1,{0,255,0});
+                    cv::putText(shown,"Yellow: low-score candidate",{646,304},cv::FONT_HERSHEY_PLAIN,1,{0,200,255});
+                    cv::putText(shown,"Cyan: P shape",{646,326},cv::FONT_HERSHEY_PLAIN,1,{255,255,0});
+                }
                 display.publish(shown,{});
                 }
             }

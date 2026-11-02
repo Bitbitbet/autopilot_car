@@ -184,8 +184,8 @@ class RaceManager {
         // A Y fork is shallower than the parking entrance. Use an initial
         // directional pulse, then ease off instead of holding full lock until
         // a restrictive far-road test eventually succeeds.
-        if(elapsed<.40)return 260+40*std::clamp(float(elapsed/.20),0.f,1.f);
-        return 300*(1-std::clamp(float((elapsed-.40)/1.0),0.f,1.f));
+        if(elapsed<.40)return 360+40*std::clamp(float(elapsed/.12),0.f,1.f);
+        return 400*(1-std::clamp(float((elapsed-.40)/1.0),0.f,1.f));
     }
     static bool corridorCenters(const RacePath &path,float &nearCenter,float &farCenter,float &heading) {
         if(path.left.size()<20||path.right.size()!=path.left.size())return false;
@@ -381,6 +381,12 @@ public:
             return p;
         }
         const bool leftSign=seen(LABEL_YLEFT)||seen(LABEL_LEFT),rightSign=seen(LABEL_YRIGHT);
+        // A confirmed mission entrance is a new maneuver, even if the old Y
+        // task never declared completion and happens to have the same direction.
+        if(confirmedRouteSign&&routeDirection&&(!routeArmed||routeDirection!=direction)&&
+           (state==State::Lane||state==State::ForkArmed||state==State::ForkSelect)) {
+            enter(State::Lane);routeArmed=false;cooldownUntil=now;
+        }
         if(routeArmed&&routeDirection&&routeDirection!=direction&&(state==State::ForkArmed||state==State::ForkSelect)) {
             enter(State::Lane);routeArmed=false;
         }

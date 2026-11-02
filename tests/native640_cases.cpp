@@ -14,6 +14,22 @@ static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--park-switch-field") {
+        RaceMission mission;mission.start();std::ifstream input(fs::path(argv[1])/"parking-control.jsonl");
+        require(bool(input),"Missing recorded parking-sign telemetry");std::string line;uint64_t triggered=0;
+        while(std::getline(input,line)) {
+            const auto r=nlohmann::json::parse(line);RaceSnapshot s;s.sequence=r.at("ai_sequence");
+            s.captured=r.at("time").get<double>()-r.at("ai_age_s").get<double>();
+            for(const auto &v:r.at("ai_detections")) {
+                auto b=v.at("box");auto d=box(v.at("type"),b[0],b[1],b[2],b[3]);d.score=v.at("score");s.detections.push_back(d);
+            }
+            // No synthetic Y completion: this is exactly the blocked condition.
+            mission.observeSigns(s,r.at("ai_age_s").get<double>()<=.30);
+            if(mission.parkingZone()){triggered=r.at("frame");break;}
+        }
+        require(triggered==1245&&mission.routeDirection()==-1,"Recorded confirmed PARK does not switch at frame 1245");
+        std::cout<<"PASS recorded MODEL_PARK switches at frame 1245 despite unfinished Y (decision replay, not vehicle motion)\n";return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--park-sign-photo") {
         auto image=cv::imread(argv[1]);require(!image.empty(),"Missing supplied parking plate photo");
         const float scale=std::min(640.f/image.cols,480.f/image.rows);cv::Mat resized,canvas(480,640,CV_8UC3,cv::Scalar(80,80,80));
@@ -132,13 +148,12 @@ int main(int argc,char **argv){try{
      cv::circle(plate,{320,220},90,{150,30,10},-1);
      cv::putText(plate,"P",{273,244},cv::FONT_HERSHEY_SIMPLEX,3,{255,255,255},13);
      require(raceParkingPShape(plate).area()>0,"Blue P shape not recognized");
-     RaceMission m;m.start();RaceSnapshot s;s.image=plate;
+     RaceMission m;RaceSnapshot s;s.image=plate;
      for(int i=1;i<=4;++i){s.sequence=i;s.captured=i*.07;m.observeSigns(s,true);}
-     require(m.json()["park_evidence"]=="BLUE_P_SHAPE"&&!m.parkingZone(),"Shape bypasses first-lap stage restriction");
-     RacePlan t;t.fresh=true;t.selectedBranch=true;t.guideDirection=-1;t.state="FORK_LEFT";m.observe(s,t,false);
-     t.selectedBranch=false;t.state="LANE";m.observe(s,t,false);
-     for(int i=5;i<=7;++i){s.sequence=i;s.captured=i*.07;m.observeSigns(s,true);}
-     require(m.parkingZone()&&m.routeDirection()==-1,"Fresh P shape does not authorize eligible second-lap entry");
+     require(!m.parkingZone(),"P shape starts an unarmed mission");m.start();
+     for(int i=1;i<=4;++i){s.sequence=i;s.captured=i*.07;m.observeSigns(s,true);}
+     require(m.json()["park_evidence"]=="BLUE_P_SHAPE"&&m.parkingZone()&&m.routeDirection()==-1,
+        "Confirmed switched P shape remains blocked by unfinished Y");
      for(const char *letter:{"O","B","R"}){
         cv::circle(plate,{320,220},90,{150,30,10},-1);
         cv::putText(plate,letter,{273,244},cv::FONT_HERSHEY_SIMPLEX,3,{255,255,255},13);
@@ -146,7 +161,7 @@ int main(int argc,char **argv){try{
      cv::circle(plate,{320,220},90,{150,30,10},-1);cv::arrowedLine(plate,{360,220},{270,220},{255,255,255},16);
      require(raceParkingPShape(plate).empty(),"Blue direction arrow accepted as parking");
      require(raceParkingPShape({}).empty(),"Missing frame fabricates P sign");}
-    std::cout<<"PASS blue P shape; non-P rejection; first-lap isolation; eligible repeated shape entry\n";
+    std::cout<<"PASS blue P shape; non-P rejection; unarmed isolation; switched sign entry without Y completion\n";
     RaceGroundArrow arrow;arrow.allowed=RoadLeft;
     for(int i=1;i<5;++i)mission.observeExitArrow(arrow,i,true);
     require(!mission.exitArrowTurnAuthorized(),"Ground arrow triggers before parking");
@@ -160,8 +175,14 @@ int main(int argc,char **argv){try{
     require(std::string(mission.name())=="LAP1_FLOW_THEN_SIGNED_FORK"&&!mission.parkingSearch(),
         "Straight parking bypass is mistaken for completion of the signed Y fork");
     ai.detections={box(LABEL_PARK)};
-    for(int i=9;i<=11;++i){ai.sequence=i;mission.observeSigns(ai,true);}
-    require(!mission.parkingZone()&&mission.routeDirection()==0,"Unexpected lap-one PARK arms parking before the Y fork");
+    {auto switched=mission;
+     ai.sequence=9;switched.observeSigns(ai,true);switched.observeSigns(ai,true);
+     ai.sequence=10;switched.observeSigns(ai,false);
+     require(!switched.parkingZone(),"Duplicate/stale P bypasses confirmation");
+     for(int i=11;i<=13;++i){ai.sequence=i;switched.observeSigns(ai,true);}
+     require(switched.parkingZone()&&switched.routeDirection()==-1,"Switched PARK blocked by missing Y completion");
+     auto missing=ai;missing.sequence=14;missing.detections.clear();switched.observeSigns(missing,true);
+     require(switched.parkingApproach()&&switched.routeDirection()==-1,"Confirmed entrance forgotten when P leaves view");}
     traffic.selectedBranch=true;traffic.guideDirection=-1;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);
     traffic.selectedBranch=false;traffic.guideDirection=0;traffic.state="LANE";mission.observe(ai,traffic,false);
     require(std::string(mission.name())=="LAP1_RETURN_PRESS_N_AT_START","Signed Y completion does not enter lap-one return");
@@ -234,7 +255,8 @@ int main(int argc,char **argv){try{
         auto step=[&](const cv::Mat &b){snapshot.sequence=++i;snapshot.captured=i*.07;
             return manager.update(snapshot,snapshot.captured,.07,true,b,track,{},false,true,0,true);};
         for(int j=0;j<12;++j){p=step(curve(direction<0?490:150));
-            require(!p.selectedBranch&&p.guidePwm<=300,"Y guidance uses parking lock or accepts opposite road");}
+            require(!p.selectedBranch&&p.guidePwm<=400,"Y guidance exceeds servo range or accepts opposite road");
+            if(j==config.confirmFrames)require(p.guidePwm>=360,"Initial Y steering remains weak");}
         for(int j=0;j<11;++j)p=step(binary);
         require(p.selectedBranch,"Centered road after Y turn cannot be acquired");
         for(int j=0;j<5;++j)p=step(binary);
@@ -262,6 +284,18 @@ int main(int argc,char **argv){try{
      }
      require(!raceLaneAlignment({}).valid,"Missing geometry fabricates an alignment measurement");}
     std::cout<<"PASS finite Y pulse; immediate countersteer; target-loss road recovery; mirrored near-road heading correction\n";
+    for(int direction:{-1,1}) {
+        RaceManager manager(config);RaceSnapshot s;RacePlan p;int i=0;
+        auto step=[&](int route,bool confirmed){s.sequence=++i;s.captured=i*.07;
+            return manager.update(s,s.captured,.07,true,binary,track,{},false,true,route,true,confirmed);};
+        s.detections={box(direction<0?LABEL_YLEFT:LABEL_YRIGHT)};
+        for(int j=0;j<24;++j)p=step(0,false);
+        require(p.selectedBranch,"Preemption case did not acquire Y road");
+        s.detections.clear();p=step(-1,true);
+        require(raceDirectionSeeking(p)&&p.guideDirection==-1&&p.guidePwm>=360&&!p.stop,
+            "Confirmed parking entrance cannot preempt pending same/opposite Y task");
+    }
+    std::cout<<"PASS switched PARK preempts unfinished same/opposite Y; finite stronger initial pulse\n";
     {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
      for(int i=0;i<8;++i)settings.adjust('+');
      for(int i=0;i<4;++i){settings.adjust(']');settings.adjust('.');settings.adjust('k');}
