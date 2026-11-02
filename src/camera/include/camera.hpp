@@ -2,9 +2,6 @@
 
 #include <opencv2/opencv.hpp>
 
-// 黑色赛道：路面是否是暗色。
-constexpr bool BLACK_ROAD = true;
-
 class Camera {
   public:
     Camera();

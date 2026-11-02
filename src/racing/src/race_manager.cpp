@@ -1,13 +1,66 @@
 #include "race_manager.hpp"
+
+#include <algorithm>
+#include <vector>
+
 using cv::Mat;
 using cv::Rect;
+using std::array;
 using std::pair;
 using std::vector;
 
-vector<pair<int, int>> raceRoadBlocks(const Mat &bin, int row, int low,
-                                      int high, const RaceConfig &cfg,
-                                      const vector<Rect> &signRegions,
-                                      int minimumBlockWidth) {
+namespace {
+
+// 近处锥桶比行人更早触发：实测接近时会漏检，等满三帧确认已经太迟。
+constexpr int CONE_TRIGGER_ROW = 290;
+// 抬起的道闸在图像里至少这么高，才算真的抬起来了。
+constexpr int GATE_OPEN_HEIGHT = 60;
+// 斑马线的兜底超时：这么久还没确认开过去就交给人。
+constexpr double CROSS_TIMEOUT = 6.0;
+// 几何扫描的行步长。
+constexpr int SCAN_STEP = 4;
+// 牌面框外扩：留出检测抖动和异步帧位移的余量。
+constexpr int SIGN_MARGIN = 24;
+
+// 只有这些牌子的画面可能盖住路面：牌面上的深色图案不能当分隔带。
+bool isSignLabel(int label) {
+    switch (label) {
+    case LABEL_BUSY:
+    case LABEL_LIMIT:
+    case LABEL_UNLIMIT:
+    case LABEL_STOP:
+    case LABEL_FLOW:
+    case LABEL_PARK:
+    case LABEL_FORK:
+    case LABEL_LEFT:
+    case LABEL_CHOICE:
+    case LABEL_YLEFT:
+    case LABEL_YRIGHT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// 交通牌属于场景中的物体，牌面上的深色图案不能充当道路分隔带。
+// 只采用新鲜且达到阈值的有效检测框；行人、锥桶、道闸、斑马线不在此列。
+vector<Rect> signRegions(const DetectionSnapshot &snap) {
+    vector<Rect> regions;
+    for (const auto &d : snap.detections) {
+        if (!isSignLabel(d.type))
+            continue;
+        regions.push_back(cv::Rect(d.x - SIGN_MARGIN, d.y - SIGN_MARGIN,
+                                   d.width + 2 * SIGN_MARGIN,
+                                   d.height + 2 * SIGN_MARGIN) &
+                          cv::Rect(0, 0, RACE_COLS, RACE_ROWS));
+    }
+    return regions;
+}
+
+// 仅保留与近处路面相接的白色区段，并把细小黑点和已检出的牌面合并回路面。
+vector<pair<int, int>> roadBlocks(const Mat &bin, int row, int low, int high,
+                                  const RaceConfig &cfg,
+                                  const vector<Rect> &signs) {
     vector<pair<int, int>> blocks;
     for (int col = 0; col < bin.cols;) {
         if (bin.at<uint8_t>(row, col) <= 127) {
@@ -17,15 +70,14 @@ vector<pair<int, int>> raceRoadBlocks(const Mat &bin, int row, int low,
         const int first = col;
         while (col < bin.cols && bin.at<uint8_t>(row, col) > 127)
             ++col;
-        if (col - first <
-                (minimumBlockWidth ? minimumBlockWidth : cfg.minBranchWidth) ||
+        if (col - first < cfg.minBranchWidth ||
             std::min(col - 1, high) < std::max(first, low))
             continue;
         if (!blocks.empty()) {
             const int gapFirst = blocks.back().second + 1, gapLast = first - 1;
             const int middle = (gapFirst + gapLast) / 2;
-            const bool covered = std::any_of(
-                signRegions.begin(), signRegions.end(), [&](const cv::Rect &r) {
+            const bool covered =
+                std::any_of(signs.begin(), signs.end(), [&](const Rect &r) {
                     const int overlap = std::min(gapLast, r.x + r.width - 1) -
                                         std::max(gapFirst, r.x) + 1;
                     return r.contains({middle, row}) &&
@@ -40,30 +92,38 @@ vector<pair<int, int>> raceRoadBlocks(const Mat &bin, int row, int low,
     }
     return blocks;
 }
-RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
-                        int direction, const RaceConfig &cfg,
-                        const std::vector<cv::Rect> &signRegions) {
+
+// 判断“黑色分隔带”是否真的从车头一路延伸到图像顶端：
+//   * 每 SCAN_STEP 行取一次白色区段，分隔带必须一直存在、而且同一块；
+//   * 分隔带数量变化 / 断开 / 图像断层都算不连续；
+//   * 只在通过检查的那一段上按 direction 裁掉另一侧。
+// 圆环、牌面里的白块、车头图案都会在某个行上断开或跳变，因而被排除。
+RacePath branchPath(const Mat &bin, const TrackRows &edges, int direction,
+                    const RaceConfig &cfg, const vector<Rect> &signs) {
     RacePath out;
     if (bin.empty() || bin.type() != CV_8UC1 || edges.empty())
         return out;
-    int low = edges.begin()->second.first, high = edges.begin()->second.second;
     const int start = edges.begin()->first;
-    if (start < 0 || start >= bin.rows || low < 0 || high >= bin.cols ||
-        low >= high)
+    const int edgeLow = edges.begin()->second.first;
+    const int edgeHigh = edges.begin()->second.second;
+    if (start < 0 || start >= bin.rows || edgeLow < 0 || edgeHigh >= bin.cols ||
+        edgeLow >= edgeHigh)
         return out;
-    struct Row {
-        int number;
-        vector<std::pair<int, int>> blocks;
+
+    struct Scanned {
+        int row;
+        vector<pair<int, int>> blocks;
     };
-    vector<Row> rows;
+    vector<Scanned> scanned;
     vector<pair<int, int>> previousGaps;
+    int low = edgeLow, high = edgeHigh;
     int missing = 0, continuous = 0, forkStart = -1;
     bool rejected = false, reachedFarEnd = false;
     const char *rejection = "NO_CONTINUOUS_SPLIT";
 
-    for (int row = start; row >= 0;
-         row = (row == 0 ? -1 : std::max(0, row - 4))) {
-        auto blocks = raceRoadBlocks(bin, row, low, high, cfg, signRegions);
+    // 第一遍：逐行扫描，只判断“是不是一个连通到远处的分叉”。
+    for (int row = start; row >= 0;) {
+        auto blocks = roadBlocks(bin, row, low, high, cfg, signs);
         if (blocks.empty()) {
             // 图像断层不能拼成连续分叉，也不能宣称已看清远端。
             rejected = true;
@@ -71,64 +131,71 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
             rejection = "ROAD_ROWS_MISSING";
             if (++missing > 3)
                 break;
-            continue;
-        }
-        missing = 0;
-        vector<pair<int, int>> gaps;
-        for (size_t i = 1; i < blocks.size(); ++i) {
-            gaps.emplace_back(blocks[i - 1].second + 1, blocks[i].first - 1);
-        }
-        if (gaps.empty()) {
-            continuous = 0;
-            forkStart = -1;
-            previousGaps.clear();
-            rejected = false;
-            rejection = "NO_CONTINUOUS_SPLIT";
         } else {
-            if (!previousGaps.empty()) {
-                // 同一个黑色分隔带不能突然变成圆环的两条边，也不能跳到别处的黑点。
-                if (gaps.size() != previousGaps.size()) {
-                    rejected = true;
-                    rejection = "DIVIDER_COUNT_CHANGED";
-                } else
-                    for (size_t i = 0; i < gaps.size(); ++i) {
-                        const int middle =
-                            (previousGaps[i].first + previousGaps[i].second) /
-                            2;
-                        if (middle < gaps[i].first || middle > gaps[i].second) {
-                            rejected = true;
-                            rejection = "DIVIDER_DISCONTINUOUS";
+            missing = 0;
+            vector<pair<int, int>> gaps;
+            for (size_t i = 1; i < blocks.size(); ++i)
+                gaps.emplace_back(blocks[i - 1].second + 1,
+                                  blocks[i].first - 1);
+            if (gaps.empty()) {
+                // 本行是完整路面：之前的分叉结论作废，往上重新累计。
+                continuous = 0;
+                forkStart = -1;
+                previousGaps.clear();
+                rejected = false;
+                rejection = "NO_CONTINUOUS_SPLIT";
+            } else {
+                if (!previousGaps.empty()) {
+                    // 同一个分隔带不能突然变成圆环的两条边，也不能跳到别处的黑点。
+                    if (gaps.size() != previousGaps.size()) {
+                        rejected = true;
+                        rejection = "DIVIDER_COUNT_CHANGED";
+                    } else {
+                        for (size_t i = 0; i < gaps.size(); ++i) {
+                            const int middle = (previousGaps[i].first +
+                                                previousGaps[i].second) /
+                                               2;
+                            if (middle < gaps[i].first ||
+                                middle > gaps[i].second) {
+                                rejected = true;
+                                rejection = "DIVIDER_DISCONTINUOUS";
+                            }
                         }
                     }
+                }
+                if (!rejected && row > cfg.nearCutRow) {
+                    if (continuous == 0)
+                        forkStart = row;
+                    ++continuous;
+                }
+                previousGaps = std::move(gaps);
             }
-            if (!rejected && row > cfg.nearCutRow) {
-                if (continuous == 0)
-                    forkStart = row;
-                ++continuous;
-            }
-            previousGaps = std::move(gaps);
+            // 搜索区逐行收窄到本行路面，避免远处的牌面把范围拉宽。
+            low = blocks.front().first;
+            high = blocks.back().second;
+            if (row > cfg.nearCutRow)
+                scanned.push_back({row, std::move(blocks)});
+            reachedFarEnd = row == 0;
         }
-        // 几何检查保留所有连通支路，避免先选了牌面内部的白色而丢失两侧路面。
-        low = blocks.front().first;
-        high = blocks.back().second;
-        if (row > cfg.nearCutRow)
-            rows.push_back({row, std::move(blocks)});
-        reachedFarEnd = row == 0;
+        row = row == 0 ? -1 : std::max(0, row - SCAN_STEP);
     }
     if (reachedFarEnd && !rejected)
         out.splitRows = continuous;
-    out.geometryReason = !reachedFarEnd ? "FAR_END_NOT_VISIBLE"
-                         : rejected     ? rejection
-                         : out.splitRows >= cfg.minBranchRows
-                             ? "CONNECTED_SPLIT"
-                             : "NO_CONTINUOUS_SPLIT";
+    out.reason = !reachedFarEnd                       ? "FAR_END_NOT_VISIBLE"
+                 : rejected                           ? rejection
+                 : out.splitRows >= cfg.minBranchRows ? "CONNECTED_SPLIT"
+                                                      : "NO_CONTINUOUS_SPLIT";
 
-    low = edges.begin()->second.first;
-    high = edges.begin()->second.second;
+    // 第二遍：在扫过的行里挑一条通路。direction==0 时保持全宽，
+    // 否则从分叉起点往上只保留选中那一侧（分叉点以前仍贴合近处路面）。
+    const bool cut =
+        direction != 0 && out.splitRows >= cfg.minBranchRows && forkStart >= 0;
+    low = edgeLow;
+    high = edgeHigh;
     missing = 0;
-    for (const auto &r : rows) {
+    for (const auto &s : scanned) {
         vector<pair<int, int>> blocks;
-        for (const auto &b : r.blocks)
+        for (const auto &b : s.blocks)
             if (std::min(b.second, high) >= std::max(b.first, low))
                 blocks.push_back(b);
         if (blocks.empty()) {
@@ -139,39 +206,52 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
         missing = 0;
         auto best =
             std::min_element(blocks.begin(), blocks.end(), [&](auto a, auto b) {
-                return abs(a.first + a.second - low - high) <
-                       abs(b.first + b.second - low - high);
+                return std::abs(a.first + a.second - low - high) <
+                       std::abs(b.first + b.second - low - high);
             });
-        const bool fork =
-            out.splitRows >= cfg.minBranchRows && r.number <= forkStart;
-        if (fork && direction)
+        if (cut && s.row <= forkStart)
             best = direction < 0 ? blocks.begin() : blocks.end() - 1;
-        low = (!direction) ? blocks.front().first : best->first;
-        high = (!direction) ? blocks.back().second : best->second;
-        out.rows.emplace(r.number, std::pair<int, int>{low, high});
+        low = cut ? best->first : blocks.front().first;
+        high = cut ? best->second : blocks.back().second;
+        out.rows.emplace(s.row, pair<int, int>{low, high});
     }
     return out;
 }
 
+} // namespace
+
+bool RaceManager::updateObservation(const DetectionSnapshot &snap) {
+    if (snap.sequence <= lastSequence || snap.captured <= lastCapture)
+        return false;
+    // 太久没有新观测：旧的连续帧数不再有效。
+    if (lastCapture < 0 || snap.captured - lastCapture > cfg.confirmGap)
+        counts.fill(0);
+    lastSequence = snap.sequence;
+    lastCapture = snap.captured;
+
+    array<bool, LABEL_COUNT> present{};
+    for (const auto &d : snap.detections) {
+        if (!present[d.type] || d.score > boxes[d.type].score)
+            boxes[d.type] = d;
+        present[d.type] = true;
+    }
+    for (int i = 0; i < LABEL_COUNT; ++i) {
+        counts[i] = present[i] ? std::min(cfg.confirmFrames, counts[i] + 1) : 0;
+        confirmed[i] = counts[i] >= cfg.confirmFrames;
+    }
+    return true;
+}
+
 RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
-                             float dt, bool active, const cv::Mat &bin,
-                             const RaceRows &edges) {
+                             float dt, bool active, const Mat &bin,
+                             const TrackRows &edges) {
     now = time;
     RacePlan p;
     p.detectionAge = snap.sequence ? time - snap.captured : -1;
-    p.fresh = aiReady(snap, time);
-    const bool newFrame = updateObservation(snap, p.fresh);
-    const auto signRegions =
-        p.fresh ? raceSignRegions(snap, cfg) : std::vector<cv::Rect>{};
-    auto geometry = raceBranchPath(bin, edges, 0, cfg, signRegions);
-    if (p.colorRejectedComponents)
-        geometry = raceBranchPath(bin, edges, 0, cfg, signRegions);
-    p.geometrySplitRows = geometry.splitRows;
-    p.geometryReason = geometry.geometryReason;
+    const bool fresh = aiReady(snap, time);
+
     if (active != lastActive) {
-        // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a
-        // 取消限速。
-        if (state != State::ReviewStop && state != State::Fault) {
+        if (state != State::Review) {
             enter(State::Lane);
             direction = 0;
         }
@@ -184,27 +264,29 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
         p.reason = "MANUAL";
         return p;
     }
-    if (!p.fresh) {
+    if (!fresh) {
         p.stop = true;
         p.state = "AI_WAIT";
         p.reason = snap.failed ? "AI_FAILED" : "AI_STALE";
         counts.fill(0);
         confirmed.fill(false);
         splitTime = exitTime = 0;
-        // 无新观测时不累计恢复或穿越时间，也不能沿用旧方向继续完成动作。
-        if (state == State::ForkSelect) {
-            enter(State::Fault);
-            reviewReason = "FORK_AI_STALE";
-        }
         gateClearSince = hazardClearSince = -1;
+        // 选路途中没有新观测：方向已经没有依据，直接交给人。
+        if (state == State::ForkSelect) {
+            reviewReason = "FORK_AI_STALE";
+            enter(State::Review);
+        }
         return p;
     }
-    if (!std::isfinite(dt) || dt <= 0 || dt > 0.25f) {
+    if (dt > 0.25f) {
         p.stop = true;
         p.state = "FRAME_WAIT";
         p.reason = "FRAME_GAP";
         return p;
     }
+
+    const bool newFrame = updateObservation(snap);
     if (newFrame) {
         if (seen(LABEL_LIMIT))
             limited = true;
@@ -214,102 +296,92 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
     if (limited)
         p.speedCap = cfg.limitedSpeed;
 
-    // 施工区和泊车不能仅凭标签就宣称已完成；基础版明确停车等待专项规划验证。
-    if (state != State::ReviewStop && state != State::Fault && newFrame &&
+    // 施工区和泊车没有规划器，只能停下来等人；不能只凭标签就说已完成。
+    if (state != State::Review && newFrame &&
         (near(LABEL_PARK, cfg.triggerRow) ||
          near(LABEL_BUSY, cfg.triggerRow))) {
         reviewReason = seen(LABEL_PARK) ? "PARK_PLANNER_PENDING"
                                         : "CONSTRUCTION_PLANNER_PENDING";
-        enter(State::ReviewStop);
+        enter(State::Review);
     }
-    if (state == State::ReviewStop || state == State::Fault) {
+    if (state == State::Review) {
         p.stop = true;
         p.state = "REVIEW_STOP";
         p.reason = reviewReason;
         return p;
     }
+
+    // 禁止通行牌：先开过斑马线（stopAfterCross），再去等绿灯。
     if (state == State::Lane && newFrame && near(LABEL_STOP, cfg.triggerRow)) {
         crossBottomSeen = false;
         lastCrossSeen = now;
         enter(cfg.stopAfterCross ? State::CrossApproach : State::SignalWait);
     }
-    // 道闸优先于路线选择；绿色通行牌不能放行尚未抬起的杆。
+
+    // 道闸优先于选路：绿色通行牌不能放行尚未抬起的杆。
     if (newFrame && near(LABEL_GATE, cfg.triggerRow) &&
         boxes[LABEL_GATE].width >= boxes[LABEL_GATE].height && !gateWaiting) {
         gateBox = boxes[LABEL_GATE];
         gateWaiting = true;
         gateClearSince = -1;
     }
-    if (gateWaiting) {
-        if (newFrame) {
-            const auto &g = boxes[LABEL_GATE];
-            const bool sameArea =
-                std::abs((g.x + g.width / 2) -
-                         (gateBox.x + gateBox.width / 2)) < 80;
-            const bool open = seen(LABEL_GATE) && sameArea && g.height >= 60 &&
-                              g.width < float(g.height) * cfg.gateOpenAspect;
-            if (open) {
-                if (gateClearSince < 0)
-                    gateClearSince = now;
-            } else
-                gateClearSince = -1;
-            if (gateClearSince >= 0 && now - gateClearSince >= cfg.clearTime)
-                gateWaiting = false;
+    if (gateWaiting && newFrame) {
+        const auto &g = boxes[LABEL_GATE];
+        const bool sameGate = std::abs((g.x + g.width / 2) -
+                                       (gateBox.x + gateBox.width / 2)) < 80;
+        const bool open = seen(LABEL_GATE) && sameGate &&
+                          g.height >= GATE_OPEN_HEIGHT &&
+                          g.width < float(g.height) * cfg.gateOpenAspect;
+        if (open) {
+            if (gateClearSince < 0)
+                gateClearSince = now;
+        } else {
+            gateClearSince = -1;
         }
+        if (gateClearSince >= 0 && now - gateClearSince >= cfg.clearTime)
+            gateWaiting = false;
     }
 
-    // 近桶停车不等三次确认：真实记录曾在接近时漏检，等重新凑满三帧已太迟。
-    // 已看见的近桶在没有已验证绕行路线时保持停车，不能靠0.6秒漏检消除义务。
-    const bool nearCone =
-        newFrame && std::any_of(snap.detections.begin(), snap.detections.end(),
-                                [&](const PredictResult &d) {
-                                    return d.type == LABEL_CONE &&
-                                           d.y + d.height >=
-                                               std::min(cfg.obstacleRow, 290) &&
-                                           raceDetectionAccepted(d, cfg);
-                                });
-    if (nearCone) {
-        hazardConeWaiting = true;
-        hazardWaiting = true;
-        hazardClearSince = -1;
-    }
-    if (newFrame && (near(LABEL_PERSON, cfg.obstacleRow) ||
-                     (near(LABEL_CONE, cfg.obstacleRow)))) {
-        hazardWaiting = true;
-        hazardClearSince = -1;
-        if (near(LABEL_PERSON, cfg.obstacleRow))
-            hazardPersonWaiting = true;
-    }
-    if (hazardWaiting) {
-        if (newFrame) {
-            // 单次漏检不能放行，连续的新鲜无障碍观测才能恢复。
-            const bool any = counts[LABEL_PERSON] > 0 || hazardConeWaiting ||
-                             (counts[LABEL_CONE] > 0);
-            if (any)
-                hazardClearSince = -1;
-            else if (hazardClearSince < 0)
-                hazardClearSince = now;
-            if (hazardClearSince >= 0 &&
-                now - hazardClearSince >= cfg.clearTime) {
-                hazardWaiting = false;
-                hazardPersonWaiting = false;
-            }
+    // 近处锥桶不等三帧确认，而且没有绕行路线：看到就锁死停车。
+    bool hazardInFrame = false;
+    if (newFrame) {
+        for (const auto &d : snap.detections) {
+            if (d.type == LABEL_CONE && d.y + d.height >= CONE_TRIGGER_ROW)
+                coneLatched = true;
+            if (d.type == LABEL_PERSON || d.type == LABEL_CONE)
+                hazardInFrame = true;
+        }
+        if (!hazardWaiting && (near(LABEL_PERSON, cfg.obstacleRow) ||
+                               near(LABEL_CONE, cfg.obstacleRow))) {
+            hazardWaiting = true;
+            hazardClearSince = -1;
         }
     }
-    if (gateWaiting || hazardWaiting) {
-        // 高优先级停车叠加在当前任务之上，不丢失信号灯等待等低优先级义务。
-        // 停车期间不累计穿越/选路动作时间。
+    // 障碍：单次漏检不能放行，连续 clearTime 的新鲜无障碍观测才恢复。
+    if (hazardWaiting && newFrame) {
+        if (hazardInFrame)
+            hazardClearSince = -1;
+        else if (hazardClearSince < 0)
+            hazardClearSince = now;
+        if (hazardClearSince >= 0 && now - hazardClearSince >= cfg.clearTime)
+            hazardWaiting = false;
+    }
+
+    if (gateWaiting || hazardWaiting || coneLatched) {
+        // 停车叠在当前任务之上：不丢低优先级义务，只冻结它们的计时。
         stateSince += dt;
         splitTime = exitTime = 0;
         if (state == State::CrossApproach)
             lastCrossSeen = now;
         p.stop = true;
         p.state = gateWaiting ? "GATE_WAIT" : "OBSTACLE_WAIT";
-        p.reason = gateWaiting         ? "GATE_NOT_VERIFIED_OPEN"
-                   : hazardConeWaiting ? "CONE_ROUTE_OR_RESTART_REQUIRED"
-                                       : "OBSTACLE_PLANNER_PENDING";
+        p.reason = gateWaiting   ? "GATE_NOT_VERIFIED_OPEN"
+                   : coneLatched ? "CONE_ROUTE_OR_RESTART_REQUIRED"
+                                 : "OBSTACLE_PLANNER_PENDING";
         return p;
     }
+
+    // 斑马线：车已压过斑马线、且它消失 clearTime 之后才算通过。
     if (state == State::CrossApproach) {
         p.speedCap = std::min(p.speedCap, cfg.approachSpeed);
         p.state = "CROSS_APPROACH";
@@ -320,36 +392,46 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
                 if (seen(LABEL_CROSS) && near(LABEL_CROSS, cfg.crossPassedRow))
                     crossBottomSeen = true;
             } else if (crossBottomSeen &&
-                       now - lastCrossSeen >= cfg.crossClearTime)
+                       now - lastCrossSeen >= cfg.crossClearTime) {
                 enter(State::SignalWait);
+            }
         }
-        if (now - stateSince > 6 && state == State::CrossApproach) {
-            enter(State::Fault);
+        if (state == State::CrossApproach && now - stateSince > CROSS_TIMEOUT) {
             reviewReason = "CROSS_PASS_NOT_VERIFIED";
+            enter(State::Review);
         }
+        return p;
     }
     if (state == State::SignalWait) {
         p.stop = true;
         p.state = "SIGNAL_WAIT";
         p.reason = "WAIT_FRESH_FLOW";
+        // 绿灯（畅通牌）且禁止牌已消失，并至少等够 stopHoldTime。
         if (newFrame && seen(LABEL_FLOW) && counts[LABEL_STOP] == 0 &&
             now - stateSince >= cfg.stopHoldTime) {
             enter(State::Lane);
             cooldownUntil = now + cfg.cooldown;
             p.stop = false;
-            // 放行当帧同步更新显示，避免日志仍写等待、速度却已开始恢复。
             p.state = limited ? "LIMIT_ZONE" : "LANE";
             p.reason = limited ? "LIMIT_SIGN" : "CRUISE";
         }
         return p;
     }
+
+    // 一次扫描同时给出分叉判定和（方向已知时的）支路路径。
+    const auto signs = signRegions(snap);
+    RacePath scan = branchPath(bin, edges, direction, cfg, signs);
+    p.path.splitRows = scan.splitRows;
+    p.path.reason = scan.reason;
+
+    // 方向牌：左右同时出现视为没有方向；只有单侧才进入岔路流程。
     if (state == State::Lane && now >= cooldownUntil && newFrame) {
         if (seen(LABEL_YLEFT) && seen(LABEL_YRIGHT)) {
             direction = 0;
         } else if (seen(LABEL_YLEFT) || seen(LABEL_YRIGHT)) {
             direction = seen(LABEL_YLEFT) ? -1 : 1;
             directionUntil = now + cfg.directionMemory;
-            enter(State::ForkArmed);
+            // enter(State::ForkArmed); DEBUG!!!
         }
     }
     if (state == State::ForkArmed) {
@@ -357,67 +439,71 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
         p.state = "FORK_ARMED";
         p.reason = direction < 0 ? "WAIT_LEFT_SPLIT" : "WAIT_RIGHT_SPLIT";
         if (newFrame && seen(LABEL_YLEFT) && seen(LABEL_YRIGHT)) {
-            enter(State::Fault);
             reviewReason = "CONFLICTING_DIRECTIONS";
+            enter(State::Review);
         } else if (newFrame && ((direction < 0 && seen(LABEL_YRIGHT)) ||
                                 (direction > 0 && seen(LABEL_YLEFT)))) {
-            enter(State::Fault);
             reviewReason = "DIRECTION_CHANGED_BEFORE_SPLIT";
+            enter(State::Review);
         } else {
-            // Fresh same-direction observations renew memory, not the total
-            // approach budget.
+            // 同向的新观测只续记忆，不重置接近预算。
             if (newFrame && seen(direction < 0 ? LABEL_YLEFT : LABEL_YRIGHT))
                 directionUntil = now + cfg.directionMemory;
             if (now - stateSince > cfg.directionMemory + cfg.forkMaxTime) {
-                enter(State::Fault);
                 reviewReason = "FORK_NOT_CONFIRMED_TIMEOUT";
+                enter(State::Review);
             } else if (now > directionUntil) {
-                enter(State::Fault);
                 reviewReason = "DIRECTION_MEMORY_EXPIRED";
-            } else if (geometry.splitRows >= cfg.minBranchRows) {
+                enter(State::Review);
+            } else if (scan.splitRows >= cfg.minBranchRows) {
                 splitTime += dt;
                 if (splitTime >= cfg.forkConfirmTime) {
                     enter(State::ForkSelect);
                     p.buzzer = true;
                 }
-            } else
+            } else {
                 splitTime = 0;
+            }
         }
     }
     if (state == State::ForkSelect) {
         p.speedCap = std::min(p.speedCap, cfg.forkSpeed);
         p.state = direction < 0 ? "FORK_LEFT" : "FORK_RIGHT";
         p.reason = "CONNECTED_BRANCH";
-        p.path = raceBranchPath(bin, edges, direction, cfg, signRegions);
-        p.selectedBranch = true;
-        if (p.path.rows.size() < 8) {
-            enter(State::Fault);
+        if (scan.rows.size() < size_t(cfg.minBranchPathRows)) {
             reviewReason = "BRANCH_PATH_LOST";
+            enter(State::Review);
         } else if (now - stateSince > cfg.forkMaxTime) {
-            enter(State::Fault);
             reviewReason = "FORK_TIMEOUT";
-        } else if (now - stateSince >= cfg.forkMinTime &&
-                   geometry.splitRows == 0) {
-            exitTime += dt;
-            if (exitTime >= cfg.forkExitTime) {
-                enter(State::Lane);
-                cooldownUntil = now + cfg.cooldown;
-                p.selectedBranch = false;
-                p.path = {};
+            enter(State::Review);
+        } else {
+            p.selectedBranch = true;
+            p.path.rows = std::move(scan.rows);
+            // 分叉消失并持续 forkExitTime：说明已经开出去了。
+            if (now - stateSince >= cfg.forkMinTime && scan.splitRows == 0) {
+                exitTime += dt;
+                if (exitTime >= cfg.forkExitTime) {
+                    p.selectedBranch = false;
+                    p.path.rows.clear();
+                    enter(State::Lane);
+                    cooldownUntil = now + cfg.cooldown;
+                }
+            } else {
+                exitTime = 0;
             }
-        } else
-            exitTime = 0;
+        }
     }
     if (state == State::Lane) {
         p.state = limited ? "LIMIT_ZONE" : "LANE";
         p.reason = limited ? "LIMIT_SIGN" : "CRUISE";
-        if (geometry.splitRows >= cfg.minBranchRows && now >= cooldownUntil) {
+        // 看到岔路却没有确认方向：不许自己猜，停在岔口前等人。
+        if (scan.splitRows >= cfg.minBranchRows && now >= cooldownUntil) {
             p.stop = true;
             p.state = "FORK_WAIT";
             p.reason = "NO_CONFIRMED_DIRECTION";
         }
     }
-    if (state == State::Fault) {
+    if (state == State::Review) {
         p.stop = true;
         p.state = "REVIEW_STOP";
         p.reason = reviewReason;

@@ -8,8 +8,8 @@
 #include <vector>
 
 namespace cfg {
-constexpr float CRUISE_SPEED = 1.0f; // 默认巡航
-constexpr float MAX_SPEED = 1.50f;   // 上限
+constexpr float CRUISE_SPEED = 1.5f; // 默认巡航
+constexpr float MAX_SPEED = 1.50f;    // 上限
 constexpr float MIN_SPEED = 0.05f;
 } // namespace cfg
 

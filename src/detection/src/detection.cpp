@@ -245,7 +245,7 @@ void Detection::render() {
                            multiplies<int64_t>());
 
     results.clear();
-    PredictResult result;
+    InferenceResult result;
     for (int i = 0; i < prod; i += 6) {
         result.type = data[i];
         result.score = data[i + 1];
@@ -266,9 +266,9 @@ void Detection::render() {
 
 void Detection::drawBox(Mat &img) { drawBox(img, results); }
 
-void Detection::drawBox(Mat &img, const vector<PredictResult> &snapshot) {
+void Detection::drawBox(Mat &img, const vector<InferenceResult> &snapshot) {
     for (const auto &item : snapshot) {
-        PredictResult result = item;
+        InferenceResult result = item;
 
         if (find(drawSkipLabels.begin(), drawSkipLabels.end(), result.type) !=
             drawSkipLabels.end())

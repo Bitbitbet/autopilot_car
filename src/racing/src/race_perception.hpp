@@ -4,7 +4,6 @@
 #include "race_config.hpp"
 #include <chrono>
 #include <condition_variable>
-#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -13,7 +12,7 @@
 struct DetectionSnapshot {
     uint64_t sequence = 0;
     double captured = 0;
-    std::vector<PredictResult> detections;
+    std::vector<InferenceResult> detections;
     bool failed = false;
     std::string error;
     cv::Mat image; // 与结果对应的原始推理图像
@@ -26,7 +25,7 @@ inline double raceTime() {
 
 class RacePerception {
   public:
-    using Infer = std::function<std::vector<PredictResult>(const cv::Mat &)>;
+    using Infer = std::function<std::vector<InferenceResult>(const cv::Mat &)>;
 
   private:
     Infer infer;

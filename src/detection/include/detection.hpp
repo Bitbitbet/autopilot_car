@@ -12,7 +12,7 @@
  * @brief 目标检测结果
  *
  */
-struct PredictResult {
+struct InferenceResult {
     int type;          // ID
     std::string label; // 标签
     float score;       // 置信度
@@ -24,7 +24,7 @@ struct PredictResult {
 
 class Detection {
   public:
-    std::vector<PredictResult> results; // AI推理结果
+    std::vector<InferenceResult> results; // AI推理结果
     std::vector<int>
         drawSkipLabels; // 调试画面需跳过的标签(type)：normal态滤掉fork不画
 
@@ -41,7 +41,7 @@ class Detection {
     void inference(const cv::Mat &img);
 
     void drawBox(cv::Mat &img);
-    void drawBox(cv::Mat &img, const std::vector<PredictResult> &snapshot);
+    void drawBox(cv::Mat &img, const std::vector<InferenceResult> &snapshot);
 
   private:
     std::vector<std::string> labels;
@@ -75,3 +75,24 @@ class Detection {
      */
     cv::Scalar getCvcolor(int index);
 };
+
+// 必须与label_list.txt一致
+enum : int {
+    LABEL_CONE = 0,    // 锥桶
+    LABEL_PERSON = 1,  // 行人
+    LABEL_BUSY = 2,    // 施工区标
+    LABEL_LIMIT = 3,   // 限速
+    LABEL_UNLIMIT = 4, // 解除限速
+    LABEL_STOP = 5,    // 禁止通行
+    LABEL_FLOW = 6,    // 畅通
+    LABEL_PARK = 7,    // 停车场
+    LABEL_GATE = 8,    // 道闸
+    LABEL_CROSS = 9,   // 斑马线
+    LABEL_FORK = 10,   // 岔路标志
+    LABEL_LEFT = 11,   // 左转标志
+    LABEL_CHOICE = 12, // 双向箭头
+    LABEL_YLEFT = 13,  // 左岔路口
+    LABEL_YRIGHT = 14, // 右岔路口
+};
+
+constexpr int LABEL_COUNT = 15;

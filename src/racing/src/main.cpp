@@ -18,11 +18,16 @@
 
 using Clock = std::chrono::steady_clock;
 using cv::Mat;
+using std::atomic_bool;
 using std::cerr;
+using std::clamp;
 using std::cout;
 using std::endl;
+using std::max;
+using std::min;
 using std::string;
 using std::thread;
+using std::unique_ptr;
 
 namespace {
 std::atomic_bool stopping{false};
@@ -32,11 +37,9 @@ double nowSeconds() {
         .count();
 }
 enum class Mode { Manual, Auto };
-} // namespace
 
-static void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
-                    float cruise, float speed, uint16_t servo,
-                    const RacePlan &race) {
+void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
+             float cruise, float speed, uint16_t servo, const RacePlan &race) {
     for (const auto &p : pilot.centerEdge)
         cv::circle(image, cv::Point(p.x, p.y), 2, cv::Scalar(0, 0, 255), -1);
     int y = 22;
@@ -53,12 +56,13 @@ static void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
     snprintf(text, sizeof text, "center=%d err=%.2f quality=%.2f curve=%.2f",
              pilot.center, pilot.error, pilot.confidence, pilot.severity);
     line(text);
-    snprintf(text, sizeof text, "race=%s  ai_age=%.2fs", race.state,
-             race.detectionAge);
+    snprintf(text, sizeof text, "race=%s ai_age=%.2fs split=%d %s", race.state,
+             race.detectionAge, race.path.splitRows, race.path.reason);
     line(text);
     line(race.reason);
     line("a:auto  space:stop  +/-:limit  q:quit");
 }
+} // namespace
 
 int main(int argc, char **argv) {
     bool headless = false;
@@ -75,7 +79,7 @@ int main(int argc, char **argv) {
 
     Camera camera;
 
-    std::unique_ptr<RacePerception> perception;
+    unique_ptr<RacePerception> perception;
     try {
         perception = createRacePerception(RaceConfig{});
     } catch (const std::exception &e) {
@@ -90,7 +94,7 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    std::atomic_bool joyLost{false};
+    atomic_bool joyLost{false};
     auto js = JoyStick::create([&joyLost] { joyLost = true; });
     if (!js)
         cout << "[Warn] 没有手柄。\n";
@@ -132,7 +136,7 @@ int main(int argc, char **argv) {
 
         perception->submit(image, uint64_t(t * 1000), t);
         const DetectionSnapshot observation = perception->snapshot();
-        RacePlan race = race_manager.update(observation, t, dt,
+        RacePlan plan = race_manager.update(observation, t, dt,
                                             mode == Mode::Auto, bin, rows);
 
         auto toggle = [&] {
@@ -173,10 +177,10 @@ int main(int argc, char **argv) {
             pilot.resetControl();
             cout << "[Stop] 键盘停车\n";
         } else if (key == '+' || key == '=') {
-            cruise = std::min(cfg::MAX_SPEED, cruise + 0.05f);
+            cruise = min(cfg::MAX_SPEED, cruise + 0.05f);
             cout << "[Set] limit=" << cruise << " m/s\n";
         } else if (key == '-' || key == '_') {
-            cruise = std::max(cfg::MIN_SPEED, cruise - 0.05f);
+            cruise = max(cfg::MIN_SPEED, cruise - 0.05f);
             cout << "[Set] limit=" << cruise << " m/s\n";
         } else if (key == '[' || key == ']') {
             pilot.setCurveSpeed(pilot.curveSpeed() +
@@ -218,7 +222,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        pilot.update(race.selectedBranch ? race.path.rows : rows, camera, dt,
+        pilot.update(plan.selectedBranch ? plan.path.rows : rows, camera, dt,
                      speed);
         if (mode == Mode::Auto && pilot.lost) {
             mode = Mode::Manual;
@@ -228,50 +232,52 @@ int main(int argc, char **argv) {
             cout << "[Stop] 丢线: " << pilot.pathIssue << " (dt=" << dt
                  << " s)；恢复后按 a\n";
         }
+        if (panic) {
+            car->resetVelocity();
+            continue;
+        }
 
         speed = 0;
         uint16_t servo = PWMSERVOMID;
-        if (!panic && !stopping) {
-            if (mode == Mode::Auto) {
-                if (race.stop) {
-                    pilot.resetControl();
-                } else {
-                    speed = pilot.speedFor(std::min(cruise, race.speedCap), dt);
-                    servo = pilot.servo;
-                }
+        if (mode == Mode::Auto) {
+            if (plan.stop) {
+                pilot.resetControl();
             } else {
-                speed = std::clamp(jsSpeed, -cfg::MAX_SPEED, cfg::MAX_SPEED);
-                servo = jsServo;
+                speed = pilot.speedFor(min(cruise, plan.speedCap), dt);
+                servo = pilot.servo;
             }
+        } else {
+            speed = clamp(jsSpeed, -cfg::MAX_SPEED, cfg::MAX_SPEED);
+            servo = jsServo;
         }
-        // 串口写失败是致命故障，直接停住并发后退出。
+
+        // 最终下发指令
         try {
             car->carControl(speed, servo);
-            if (race.buzzer && !panic && mode == Mode::Auto)
+            if (plan.buzzer && !panic && mode == Mode::Auto)
                 car->buzzerSound(Buzzer::ding);
         } catch (const std::exception &e) {
             cerr << "[Error] 串口: " << e.what() << '\n';
             break;
         }
 
-        if (lastState != race.state) {
-            cout << "[Race] " << race.state << " | " << race.reason << '\n';
-            lastState = race.state;
+        if (lastState != plan.state) {
+            cout << "[Race] " << plan.state << " | " << plan.reason << '\n';
+            lastState = plan.state;
         }
 
         if (!headless) {
             track_draw_result(rows, image);
-            drawHud(image, pilot, mode, panic, cruise, speed, servo, race);
+            drawHud(image, pilot, mode, panic, cruise, speed, servo, plan);
             display.publish(image);
         }
     }
 
-    if (car) {
-        try {
-            car->latch_stop();
-        } catch (...) {
-        }
+    try {
+        car->latch_stop();
+    } catch (...) {
     }
+
     display.stop = true;
     if (displayThread.joinable())
         displayThread.join();

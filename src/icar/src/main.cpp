@@ -72,7 +72,7 @@ class Icar {
     condition_variable cvImg;
     atomic<bool> readyImg{false};
     atomic<bool> shuttingDown{false};
-    LatestResult<vector<PredictResult>> modelResults;
+    LatestResult<vector<InferenceResult>> modelResults;
 
     /**
      * @brief 鼠标的事件回调函数

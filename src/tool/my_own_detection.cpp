@@ -15,7 +15,7 @@ using std::chrono::microseconds;
 
 vector<string> labels;
 
-struct PredictResult {
+struct InferenceResult {
     int type;    // 类别 ID
     float score; // 置信度
     int x;       // 坐标(左下角点)
@@ -65,9 +65,9 @@ cv::Scalar getCvcolor(int index) {
         return cv::Scalar(255, 0, 0);
     }
 }
-void drawBox(cv::Mat &img, const std::vector<PredictResult> &snapshot) {
+void drawBox(cv::Mat &img, const std::vector<InferenceResult> &snapshot) {
     for (const auto &item : snapshot) {
-        PredictResult result = item;
+        InferenceResult result = item;
         auto score = std::to_string(result.score);
         int pointY = result.y - 15;
         if (pointY < 0)
@@ -300,9 +300,9 @@ int main() {
                1000000.0 / microsec);
 
         // ---------- 2.4 转换为 PredictResult 并绘制 ----------
-        std::vector<PredictResult> results;
+        std::vector<InferenceResult> results;
         for (const auto &det : detections) {
-            PredictResult r;
+            InferenceResult r;
             r.type = det.classId;
             r.score = det.score;
             r.x = det.box.x;

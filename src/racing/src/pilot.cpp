@@ -14,7 +14,7 @@ using std::vector;
 namespace {
 // ---- 调参（速度 m/s，加速度 m/s²；地面量是米） ----
 constexpr float CURVE_SPEED = 0.8f;    // 弯道限速初值（运行时可调）
-constexpr float DEGRADED_SPEED = 0.9f; // 单边/低置信度限速初值
+constexpr float DEGRADED_SPEED = 0.8f; // 单边/低置信度限速初值
 constexpr float ACCELERATION = 0.30f;
 constexpr float DECELERATION = 0.60f;
 constexpr float QUALITY_DECELERATION = 1.20f;
@@ -374,7 +374,7 @@ int AutoPilot::weighted_center() const {
 
 float AutoPilot::curve_heading() const {
     // 远端与近端中心线的偏移是弯道/航向的代理量。
-    const size_t n = std::max<size_t>(1, centerEdge.size() / 4);
+    const size_t n = max<size_t>(1, centerEdge.size() / 4);
     float nearMean = 0, farMean = 0;
     for (size_t i = 0; i < n; ++i) {
         nearMean += centerEdge[i].x;
@@ -382,14 +382,14 @@ float AutoPilot::curve_heading() const {
     }
     const float heading = (farMean - nearMean) / n;
     // 速度预判可以只看近处一段；点数不够时退回整条中心线。
-    const auto end = std::find_if(
-        centerEdge.begin(), centerEdge.end(),
-        [](const Point2i &p) { return p.y < CURVE_LOOKAHEAD_ROW; });
-    const size_t count = size_t(std::distance(centerEdge.begin(), end));
+    const auto end =
+        find_if(centerEdge.begin(), centerEdge.end(),
+                [](const Point2i &p) { return p.y < CURVE_LOOKAHEAD_ROW; });
+    const size_t count = size_t(distance(centerEdge.begin(), end));
     if (count < MIN_POINTS ||
         centerEdge.front().y - centerEdge[count - 1].y < MIN_SPAN)
         return heading;
-    const size_t section = std::max<size_t>(1, count / 4);
+    const size_t section = max<size_t>(1, count / 4);
     float near = 0, far = 0;
     for (size_t i = 0; i < section; ++i) {
         near += centerEdge[i].x;

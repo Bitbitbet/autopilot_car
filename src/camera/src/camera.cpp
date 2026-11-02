@@ -15,6 +15,12 @@ using cv::Size;
 using std::cerr;
 using std::cout;
 using std::endl;
+namespace {
+
+// 黑色赛道：路面是否是暗色。
+constexpr bool BLACK_ROAD = true;
+
+} // namespace
 
 Camera::Camera() : use_otsu(true) { initialize("/dev/video0"); }
 Camera::Camera(uint8_t threshold)
