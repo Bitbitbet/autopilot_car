@@ -39,36 +39,7 @@ class RacePerception {
     bool stop = false;
     std::thread worker;
 
-    void worker_run() noexcept {
-        try {
-            while (true) {
-                cv::Mat frame;
-                double captured;
-                uint64_t sequence;
-                {
-                    std::unique_lock lock(mutex);
-                    wake.wait(lock, [&] { return stop || !pending.empty(); });
-                    if (stop)
-                        return;
-                    frame = std::move(pending);
-                    captured = pendingTime;
-                    sequence = pendingSequence;
-                }
-                auto result = infer(frame);
-                std::lock_guard lock(mutex);
-                latest = {sequence, captured, std::move(result),
-                          false,    {},       std::move(frame)};
-            }
-        } catch (const std::exception &e) {
-            std::lock_guard lock(mutex);
-            latest.failed = true;
-            latest.error = e.what();
-        } catch (...) {
-            std::lock_guard lock(mutex);
-            latest.failed = true;
-            latest.error = "AI worker failed";
-        }
-    }
+    void worker_run();
 
   public:
     explicit RacePerception(Infer fn)

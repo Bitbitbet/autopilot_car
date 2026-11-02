@@ -110,7 +110,7 @@ Mat Camera::binarize(const Mat &img) {
     if (!BLACK_ROAD)
         return bin_img;
 
-    // 只修补有界的内部空洞；与下边界连通的背景、与远边界连通的分隔带保留。
+    // 填补有界的内部空洞；与下边界连通的背景、与远边界连通的分隔带保留。
     Mat exterior;
     copyMakeBorder(bin_img, exterior, 1, 1, 1, 1, cv::BORDER_CONSTANT,
                    cv::Scalar(0));

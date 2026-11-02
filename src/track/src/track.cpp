@@ -4,7 +4,6 @@
 #include <utility>
 
 using namespace cv;
-using std::greater;
 using std::map;
 using std::pair;
 using std::vector;
@@ -57,7 +56,7 @@ void find_connected_blocks(const Blocks &blocks, int last_left, int last_right,
 } // namespace
 
 void track_identify_from_bin(const Mat &bin_img, Camera &camera,
-                             map<int, pair<int, int>, greater<int>> &rows) {
+                             TrackRows &rows) {
     rows.clear();
 
     // 行中心处的纵向距离：同一行上各列的距离差可以忽略
@@ -128,8 +127,7 @@ void track_identify_from_bin(const Mat &bin_img, Camera &camera,
     }
 }
 
-void track_draw_result(const map<int, pair<int, int>, greater<int>> &rows,
-                       Mat &result) {
+void track_draw_result(const TrackRows &rows, Mat &result) {
     for (auto [row, col] : rows) {
         auto [left, right] = col;
         circle(result, Point(left, row), 2, Scalar(0, 255, 0), -1);    // 绿色点

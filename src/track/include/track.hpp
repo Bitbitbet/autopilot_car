@@ -3,6 +3,9 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
+// 逐行双边坐标：row（0=远，越大越近，降序）-> {左边缘, 右边缘}
+using TrackRows = std::map<int, std::pair<int, int>, std::greater<int>>;
+
 /**
  * @brief 赛道边缘识别
  *
@@ -12,9 +15,8 @@
  * @param camera   相机
  * @param rows     输出：键为行号（降序），值为 {左边缘列, 右边缘列}，会被清空。
  */
-void track_identify_from_bin(
-    const cv::Mat &bin_img, Camera &camera,
-    std::map<int, std::pair<int, int>, std::greater<int>> &rows);
+void track_identify_from_bin(const cv::Mat &bin_img, Camera &camera,
+                             TrackRows &rows);
 
 /**
  * @brief 把识别结果画到图上（绿=左边缘，黄=右边缘）
@@ -22,8 +24,6 @@ void track_identify_from_bin(
  * @param rows    track_identify_from_bin 的输出
  * @param result  被叠加绘制的图像
  */
-void track_draw_result(
-    const std::map<int, std::pair<int, int>, std::greater<int>> &rows,
-    cv::Mat &result);
+void track_draw_result(const TrackRows &rows, cv::Mat &result);
 
 double stdevEdgeCal(const std::vector<cv::Point2i> &v_edge);

@@ -1,20 +1,13 @@
 #pragma once
 
 #include "detection.hpp"
-#include "race_perception.hpp"
 #include "race_labels.hpp"
+#include "race_perception.hpp"
 #include <algorithm>
 #include <array>
 #include <functional>
 #include <map>
 #include <utility>
-
-// 单帧二值图无法区分画面顶边截断的红色圆弧与黑色道路分隔带。
-// 仅检查同一帧彩色图中明确偏红、扁平、触顶且独立的暗色连通域。
-// 只还原该连通域的像素，不扩张矩形、不沿用旧帧，也不修改巡线二值图。
-// 黑色分隔带、与近处障碍连通的暗区、无颜色证据的情况仍保留原判断。
-cv::Mat raceAppearanceGeometry(const cv::Mat &binary, const cv::Mat &image,
-                               int &removed);
 
 // 巡线边缘行集合：row -> (left_col, right_col)，与 track_identify_from_bin
 // 一致。
@@ -147,12 +140,11 @@ class RaceManager {
     }
 
   public:
-    explicit RaceManager(const RaceConfig &config) : cfg(config) {}
+    RaceManager() {}
     bool aiReady(const DetectionSnapshot &s, double time) const {
         return !s.failed && s.sequence > 0 && std::isfinite(s.captured) &&
                time >= s.captured && time - s.captured <= cfg.maxDetectionAge;
     }
     RacePlan update(const DetectionSnapshot &snap, double time, float dt,
-                    bool active, const cv::Mat &bin, const RaceRows &edges,
-                    const cv::Mat &currentImage = {});
+                    bool active, const cv::Mat &bin, const RaceRows &edges);
 };

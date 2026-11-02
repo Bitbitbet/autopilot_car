@@ -3,16 +3,11 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
-#include <opencv2/highgui.hpp>
 #include <opencv2/core.hpp>
-#include <thread>
+#include <opencv2/highgui.hpp>
 
 /**
- * @brief 把 HighGUI 挪到单独线程
- *
- * 控制回路只往这里丢最新一帧（共享 Mat 头，零拷贝），绝不等 X11：
- * imshow/waitKey 在窗口服务器慢、窗口没被服务时能卡到秒级，
- * 放在主线程里会把 dt 拉长，进而误判 FRAME_GAP/丢线。
+ * @brief HighGUI线程
  */
 class RaceDisplay {
     std::mutex mutex;
@@ -45,7 +40,6 @@ class RaceDisplay {
         try {
             loop();
         } catch (...) {
-            // X11 出问题就只丢显示，别把控制进程带崩
         }
         try {
             cv::destroyAllWindows();

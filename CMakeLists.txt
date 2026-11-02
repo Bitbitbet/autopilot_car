@@ -57,5 +57,5 @@ target_link_libraries(my_own_detection PRIVATE camera PkgConfig::onnx ${OpenCV_L
 add_executable(collection src/tool/collection.cpp)
 target_link_libraries(collection PRIVATE control camera tools joystick ${OpenCV_LIBRARIES})
 
-# # 主程序
+# # 旧主程序，无法编译，仅供参考
 # add_subdirectory(src/icar)

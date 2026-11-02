@@ -2,14 +2,11 @@
 
 #include "camera.hpp"
 #include "control.hpp"
+#include "track.hpp"
 #include <algorithm>
-#include <functional>
-#include <map>
 #include <opencv2/core.hpp>
-#include <utility>
 #include <vector>
 
-// 主循环与 HUD 也用到的三个速度参数；其余调参都在 pilot.cpp 顶部。
 namespace cfg {
 constexpr float CRUISE_SPEED = 1.0f; // 默认巡航
 constexpr float MAX_SPEED = 1.50f;   // 上限
@@ -29,9 +26,6 @@ inline const char *weight_mode_name(WeightMode mode) {
     }
     return "uniform";
 }
-
-// 逐行双边坐标：row（0=远，越大越近，降序）-> {左边缘, 右边缘}
-using TrackRows = std::map<int, std::pair<int, int>, std::greater<int>>;
 
 // 与硬件无关的巡线控制：边缘行 -> 期望中心 -> PD -> 舵机 + 限速。
 class AutoPilot {

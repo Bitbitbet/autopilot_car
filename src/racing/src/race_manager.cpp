@@ -4,57 +4,6 @@ using cv::Rect;
 using std::pair;
 using std::vector;
 
-Mat raceAppearanceGeometry(const Mat &binary, const Mat &image, int &removed) {
-    removed = 0;
-    if (binary.type() != CV_8UC1 || image.type() != CV_8UC3 ||
-        image.size() != binary.size())
-        return binary;
-    const auto red = [](const cv::Vec3b &p) {
-        return p[2] >= 70 && int(p[2]) - p[1] >= 25 && int(p[2]) - p[0] >= 25 &&
-               int(p[2]) * 10 >= int(p[1]) * 14 &&
-               int(p[2]) * 10 >= int(p[0]) * 14;
-    };
-    int redAtTop = 0;
-    for (int col = 0; col < binary.cols; ++col)
-        if (binary.at<uint8_t>(0, col) <= 127 &&
-            red(image.at<cv::Vec3b>(0, col)))
-            ++redAtTop;
-    if (redAtTop < 60)
-        return binary;
-    cv::Mat dark, labels, stats, centroids;
-    cv::compare(binary, 127, dark, cv::CMP_LE);
-    const int components = cv::connectedComponentsWithStats(
-        dark, labels, stats, centroids, 8, CV_32S);
-    cv::Mat geometry;
-    for (int label = 1; label < components; ++label) {
-        const int x = stats.at<int>(label, cv::CC_STAT_LEFT),
-                  y = stats.at<int>(label, cv::CC_STAT_TOP);
-        const int width = stats.at<int>(label, cv::CC_STAT_WIDTH),
-                  height = stats.at<int>(label, cv::CC_STAT_HEIGHT);
-        const int area = stats.at<int>(label, cv::CC_STAT_AREA);
-        if (y != 0 || x < 16 || x + width > binary.cols - 16 || width < 80 ||
-            width > 360 || height < 12 || height > 80 || width < height * 3 ||
-            area < 400)
-            continue;
-        int colored = 0;
-        for (int row = y; row < y + height; ++row)
-            for (int col = x; col < x + width; ++col)
-                if (labels.at<int>(row, col) == label &&
-                    red(image.at<cv::Vec3b>(row, col)))
-                    ++colored;
-        // 少量抗锯齿像素可以没有颜色，主体必须由本帧的红色像素证明。
-        if (colored * 100 < area * 90)
-            continue;
-        if (geometry.empty())
-            geometry = binary.clone();
-        for (int row = y; row < y + height; ++row)
-            for (int col = x; col < x + width; ++col)
-                if (labels.at<int>(row, col) == label)
-                    geometry.at<uint8_t>(row, col) = 255;
-        ++removed;
-    }
-    return geometry.empty() ? binary : geometry;
-}
 vector<pair<int, int>> raceRoadBlocks(const Mat &bin, int row, int low,
                                       int high, const RaceConfig &cfg,
                                       const vector<Rect> &signRegions,
@@ -104,10 +53,10 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
         return out;
     struct Row {
         int number;
-        std::vector<std::pair<int, int>> blocks;
+        vector<std::pair<int, int>> blocks;
     };
-    std::vector<Row> rows;
-    std::vector<std::pair<int, int>> previousGaps;
+    vector<Row> rows;
+    vector<pair<int, int>> previousGaps;
     int missing = 0, continuous = 0, forkStart = -1;
     bool rejected = false, reachedFarEnd = false;
     const char *rejection = "NO_CONTINUOUS_SPLIT";
@@ -125,7 +74,7 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
             continue;
         }
         missing = 0;
-        std::vector<std::pair<int, int>> gaps;
+        vector<pair<int, int>> gaps;
         for (size_t i = 1; i < blocks.size(); ++i) {
             gaps.emplace_back(blocks[i - 1].second + 1, blocks[i].first - 1);
         }
@@ -178,7 +127,7 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
     high = edges.begin()->second.second;
     missing = 0;
     for (const auto &r : rows) {
-        std::vector<std::pair<int, int>> blocks;
+        vector<pair<int, int>> blocks;
         for (const auto &b : r.blocks)
             if (std::min(b.second, high) >= std::max(b.first, low))
                 blocks.push_back(b);
@@ -190,8 +139,8 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
         missing = 0;
         auto best =
             std::min_element(blocks.begin(), blocks.end(), [&](auto a, auto b) {
-                return std::abs(a.first + a.second - low - high) <
-                       std::abs(b.first + b.second - low - high);
+                return abs(a.first + a.second - low - high) <
+                       abs(b.first + b.second - low - high);
             });
         const bool fork =
             out.splitRows >= cfg.minBranchRows && r.number <= forkStart;
@@ -206,8 +155,7 @@ RacePath raceBranchPath(const cv::Mat &bin, const RaceRows &edges,
 
 RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
                              float dt, bool active, const cv::Mat &bin,
-                             const RaceRows &edges,
-                             const cv::Mat &currentImage) {
+                             const RaceRows &edges) {
     now = time;
     RacePlan p;
     p.detectionAge = snap.sequence ? time - snap.captured : -1;
@@ -216,14 +164,8 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
     const auto signRegions =
         p.fresh ? raceSignRegions(snap, cfg) : std::vector<cv::Rect>{};
     auto geometry = raceBranchPath(bin, edges, 0, cfg, signRegions);
-    // 只在原几何规则将要判为分叉时检查颜色，避免正常巡线增加连通域分析。
-    const auto geometryBin =
-        geometry.splitRows >= cfg.minBranchRows
-            ? raceAppearanceGeometry(bin, currentImage,
-                                     p.colorRejectedComponents)
-            : bin;
     if (p.colorRejectedComponents)
-        geometry = raceBranchPath(geometryBin, edges, 0, cfg, signRegions);
+        geometry = raceBranchPath(bin, edges, 0, cfg, signRegions);
     p.geometrySplitRows = geometry.splitRows;
     p.geometryReason = geometry.geometryReason;
     if (active != lastActive) {
@@ -446,8 +388,7 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double time,
         p.speedCap = std::min(p.speedCap, cfg.forkSpeed);
         p.state = direction < 0 ? "FORK_LEFT" : "FORK_RIGHT";
         p.reason = "CONNECTED_BRANCH";
-        p.path =
-            raceBranchPath(geometryBin, edges, direction, cfg, signRegions);
+        p.path = raceBranchPath(bin, edges, direction, cfg, signRegions);
         p.selectedBranch = true;
         if (p.path.rows.size() < 8) {
             enter(State::Fault);

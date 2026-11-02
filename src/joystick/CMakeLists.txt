@@ -1,3 +1,3 @@
-add_library(joystick INTERFACE)
-target_include_directories(joystick INTERFACE include)
-target_link_libraries(joystick INTERFACE control PkgConfig::evdev PkgConfig::udev pthread)
+add_library(joystick STATIC src/joystick.cpp)
+target_include_directories(joystick PUBLIC include)
+target_link_libraries(joystick PRIVATE control PkgConfig::evdev PkgConfig::udev pthread)

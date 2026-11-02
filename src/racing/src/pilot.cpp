@@ -1,12 +1,14 @@
 #include "pilot.hpp"
+#include "track.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <limits>
 
 using cv::Point2d;
 using cv::Point2i;
+using std::clamp;
+using std::max;
 using std::vector;
 
 namespace {
@@ -40,7 +42,7 @@ constexpr float SEVERITY_SCALE = 130.f; // severity 归一化尺度
 
 uint16_t clampServo(float pwm) {
     return static_cast<uint16_t>(
-        std::lround(std::clamp(pwm, float(PWMSERVOMIN), float(PWMSERVOMAX))));
+        std::lround(clamp(pwm, float(PWMSERVOMIN), float(PWMSERVOMAX))));
 }
 // ---- 单边平滑度判定（地面坐标，米） ----
 // 只看这一边是不是一条光滑曲线：直线、圆弧、S 弯都算光滑，
@@ -108,7 +110,7 @@ EdgeQuality assess_edge(const GroundPoints &points, const vector<int> &cols,
         sum += d.x * d.x + d.y * d.y;
         ++measured;
     }
-    quality.residual = std::sqrt(sum / double(std::max<size_t>(measured, 1)));
+    quality.residual = sqrt(sum / double(std::max<size_t>(measured, 1)));
     return quality;
 }
 
@@ -290,9 +292,8 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     } else {
         raw = centerline_from_mid(rows, accepted, rejected);
     }
-    std::sort(raw.begin(), raw.end(),
-              [](const Point2i &a, const Point2i &b) { return a.y > b.y; });
-    std::cerr << raw.size() << " " << dt << std::endl; // DEBUG
+    sort(raw.begin(), raw.end(),
+         [](const Point2i &a, const Point2i &b) { return a.y > b.y; });
 
     // 2) 这一帧的中心线够不够可信
     if (!update_path_state(raw, rows.size(), accepted, rejected, dt))
@@ -368,8 +369,7 @@ int AutoPilot::weighted_center() const {
         numerator += w * p.x;
         denominator += w;
     }
-    return std::clamp(int(std::lround(numerator / denominator)), 0,
-                      imageCols - 1);
+    return clamp(int(std::lround(numerator / denominator)), 0, imageCols - 1);
 }
 
 float AutoPilot::curve_heading() const {
@@ -401,26 +401,25 @@ float AutoPilot::curve_heading() const {
 void AutoPilot::update_steering(float dt, float previousSpeed,
                                 float curveHeading) {
     error = float(center) - imageCols / 2.f;
-    error = std::clamp(error, previousError - MAX_ERROR_RATE * dt,
-                       previousError + MAX_ERROR_RATE * dt);
+    error = clamp(error, previousError - MAX_ERROR_RATE * dt,
+                  previousError + MAX_ERROR_RATE * dt);
     const float derivative =
         hadPath ? (error - previousError) * REFERENCE_DT / dt : 0;
     const float alpha = dt / (DERIVATIVE_FILTER + dt);
     filteredDerivative += alpha * (derivative - filteredDerivative);
     const float speedRatio =
-        std::clamp(std::fabs(previousSpeed) / cfg::MAX_SPEED, 0.f, 1.f);
+        clamp(std::fabs(previousSpeed) / cfg::MAX_SPEED, 0.f, 1.f);
     const float gain = 1 + (HIGH_SPEED_GAIN - 1) * speedRatio;
     const float p = RUN_P1 + std::fabs(error) * RUN_P2;
     servo = clampServo(PWMSERVOMID +
                        gain * (error * p + filteredDerivative * TURN_D));
 
     // 弯道程度取偏差、航向、舵机量三者最大者。
-    const float e = std::fabs(error) / SEVERITY_SCALE;
-    const float h = std::fabs(curveHeading) / SEVERITY_SCALE;
-    const float s = std::fabs(float(servo) - PWMSERVOMID) / 320.f;
-    const float rawSeverity = std::clamp(std::max({e, h, s}), 0.f, 1.f);
-    severity =
-        std::clamp((rawSeverity - CURVE_START) / (1 - CURVE_START), 0.f, 1.f);
+    const float e = fabs(error) / SEVERITY_SCALE;
+    const float h = fabs(curveHeading) / SEVERITY_SCALE;
+    const float s = fabs(float(servo) - PWMSERVOMID) / 320.f;
+    const float rawSeverity = clamp(max({e, h, s}), 0.f, 1.f);
+    severity = clamp((rawSeverity - CURVE_START) / (1 - CURVE_START), 0.f, 1.f);
     previousError = error;
     hadPath = true;
 }
@@ -431,7 +430,7 @@ float AutoPilot::speedFor(float cruise, float dt) {
         commandedSpeed = 0;
         return 0;
     }
-    const float limit = std::clamp(cruise, cfg::MIN_SPEED, cfg::MAX_SPEED);
+    const float limit = clamp(cruise, cfg::MIN_SPEED, cfg::MAX_SPEED);
     const float curve =
         std::min(limit, limit + (curveLimit - limit) * severity);
     const float quality = qualitySpeedLimit();

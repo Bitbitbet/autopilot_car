@@ -2,8 +2,8 @@
 #include "control.hpp"
 #include "joystick.hpp"
 #include "pilot.hpp"
-#include "race_manager.hpp"
 #include "race_display.hpp"
+#include "race_manager.hpp"
 #include "race_perception.hpp"
 #include "terminal_keys.hpp"
 #include "track.hpp"
@@ -20,6 +20,9 @@ using Clock = std::chrono::steady_clock;
 using cv::Mat;
 using std::cerr;
 using std::cout;
+using std::endl;
+using std::string;
+using std::thread;
 
 namespace {
 std::atomic_bool stopping{false};
@@ -67,8 +70,8 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    std::signal(SIGINT, onSignal);
-    std::signal(SIGTERM, onSignal);
+    signal(SIGINT, onSignal);
+    signal(SIGTERM, onSignal);
 
     Camera camera;
 
@@ -93,7 +96,7 @@ int main(int argc, char **argv) {
         cout << "[Warn] 没有手柄。\n";
 
     AutoPilot pilot(camera.cols(), camera.rows());
-    RaceManager raceManager{RaceConfig{}};
+    RaceManager race_manager;
 
     Mode mode = Mode::Manual;
     bool panic = false;
@@ -110,9 +113,9 @@ int main(int argc, char **argv) {
 
     // 窗口单独一个线程：控制回路只丢图，不等 X11
     RaceDisplay display;
-    std::thread displayThread;
+    thread displayThread;
     if (!headless)
-        displayThread = std::thread([&] { display.run(); });
+        displayThread = thread([&] { display.run(); });
 
     while (!stopping) {
         Mat image;
@@ -129,8 +132,8 @@ int main(int argc, char **argv) {
 
         perception->submit(image, uint64_t(t * 1000), t);
         const DetectionSnapshot observation = perception->snapshot();
-        RacePlan race = raceManager.update(
-            observation, t, dt, mode == Mode::Auto, bin, rows, image);
+        RacePlan race = race_manager.update(observation, t, dt,
+                                            mode == Mode::Auto, bin, rows);
 
         auto toggle = [&] {
             if (mode == Mode::Auto) {
@@ -138,7 +141,7 @@ int main(int argc, char **argv) {
                 jsSpeed = 0;
                 pilot.resetControl();
                 cout << "[Mode] MANUAL\n";
-            } else if (pilot.valid && raceManager.aiReady(observation, t) &&
+            } else if (pilot.valid && race_manager.aiReady(observation, t) &&
                        !joyLost && (!js || !js->isStopped()) &&
                        std::fabs(jsSpeed) <= 0.05f) {
                 mode = Mode::Auto;
@@ -146,7 +149,7 @@ int main(int argc, char **argv) {
                 jsSpeed = 0;
                 pilot.resetControl();
                 cout << "[Mode] AUTO\n";
-            } else if (!raceManager.aiReady(observation, t)) {
+            } else if (!race_manager.aiReady(observation, t)) {
                 cout << "[Wait] 还没有可用的检测结果\n";
             } else if (!pilot.valid) {
                 cout << "[Wait] 路径未稳定: " << pilot.pathIssue << '\n';
@@ -158,6 +161,7 @@ int main(int argc, char **argv) {
         int key = terminal.poll();
         if (key < 0)
             key = display.takeKey(); // 窗口线程收上来的键
+
         if (key == 27 || key == 'q' || key == 'Q')
             break;
         if (key == 'a' || key == 'A') {

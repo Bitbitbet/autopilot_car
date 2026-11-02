@@ -1,11 +1,9 @@
 #include "camera.hpp"
 #include "control.hpp"
 #include "joystick.hpp"
-#include "joystick_car_control.hpp"
 #include <fcntl.h>
 #include <filesystem>
 #include <iostream> // 输入输出类
-#include <libevdev/libevdev.h>
 #include <libudev.h>
 #include <linux/input.h>
 #include <linux/joystick.h>
@@ -21,13 +19,43 @@
 using std::cerr;
 using std::cout;
 using std::endl;
+using std::jthread;
 using std::shared_ptr;
+using std::stop_token;
 using std::string;
 using std::to_string;
 
 using namespace cv;
 namespace fs = std::filesystem;
 
+jthread startJoystickControlThread(shared_ptr<CarControl> car,
+                                   shared_ptr<JoyStick> js) {
+    jthread worker(
+        [car = std::move(car), js = std::move(js)](stop_token token) {
+            try {
+                while (!token.stop_requested() && !js->isStopped()) {
+                    if (!js->waitEvent())
+                        continue;
+                    if (token.stop_requested() || js->isStopped())
+                        break;
+                    float speed;
+                    uint16_t servo;
+                    if (js->takeCarControl(speed, servo))
+                        car->carControl(speed, servo);
+                    if (js->takeBuzzer())
+                        car->buzzerSound(Buzzer::ding);
+                }
+            } catch (const std::exception &e) {
+                cerr << "[Error]: Gamepad control failed: " << e.what() << endl;
+            } catch (...) {
+                cerr << "[Error]: Unexpected gamepad control failure." << endl;
+            }
+            car->resetVelocity();
+            js->requestShutdown();
+        });
+
+    return worker;
+}
 int main() {
     try {
         // 通信
@@ -47,7 +75,7 @@ int main() {
         car->buzzerSound(Buzzer::start);
 
         // 摄像头初始化
-        VideoCapture camera("/dev/video0");
+        Camera camera("/dev/video0");
 
         uint32_t index = 0;
         while (true) {
