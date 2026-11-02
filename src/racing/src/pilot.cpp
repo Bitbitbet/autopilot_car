@@ -31,10 +31,15 @@ constexpr float MAX_ERROR_RATE = 1920.f; // 偏差变化率上限 (px/s)
 constexpr float HIGH_SPEED_GAIN = 1.f;
 constexpr float CURVE_START = 0.20f; // severity 超过它开始减速
 // 路径判定（原生像素）
-constexpr size_t MIN_POINTS = 16;       // 至少多少行才算可信路径
-constexpr int MIN_SPAN = 60;            // 中心线最小纵向跨度
-constexpr int MIN_WIDTH = 30;           // 双边路宽的最小范围
-constexpr float ROAD_WIDTH = 0.45f;     // 赛道实际宽度（米），单边推中心线用
+constexpr size_t MIN_POINTS = 16;   // 至少多少行才算可信路径
+constexpr int MIN_SPAN = 60;        // 中心线最小纵向跨度
+constexpr int MIN_WIDTH = 30;       // 双边路宽的最小范围
+constexpr float ROAD_WIDTH = 0.45f; // 赛道实际宽度（米），单边推中心线用
+constexpr float FORCED_WIDTH_RATIO =
+    0.50f; // 当强制边线的时候中心线的位置，越小越偏向赛道
+// ├ 型岔口：指定边会先拐进支路、再拐回来。相邻点横向跳这么多米就算拐角，
+// 只保留近端那个拐角（含拐角点）以下的部分。
+constexpr double FORCED_CORNER_JUMP = 0.08;
 constexpr int CURVE_LOOKAHEAD_ROW = 20; // 速度预判用的近处行
 constexpr float JUMP_LIMIT_BASE = 20.f; // 相邻行中心跳变上限
 constexpr float JUMP_LIMIT_PER_ROW = 6.f;
@@ -74,7 +79,8 @@ struct EdgeQuality {
 };
 
 EdgeQuality assess_edge(const GroundPoints &points, const vector<int> &cols,
-                        const vector<int> &rows, int imageCols) {
+                        const vector<int> &rows, int imageCols,
+                        size_t min_points = EDGE_MIN_POINTS) {
     EdgeQuality quality;
     vector<size_t> idx; // 没贴图像边的点
     int border = 0;
@@ -88,7 +94,7 @@ EdgeQuality assess_edge(const GroundPoints &points, const vector<int> &cols,
         idx.push_back(i);
     }
     quality.border = double(border) > EDGE_BORDER_SHARE * double(points.size());
-    if (idx.size() < EDGE_MIN_POINTS)
+    if (idx.size() < min_points)
         return quality;
     quality.enough = true;
     quality.curve.resize(idx.size());
@@ -168,15 +174,17 @@ Edges gather_edges(const TrackRows &rows, const Camera &camera) {
 }
 
 /**
- * @brief 只有一边可信：沿法向偏半个路宽推中心线
+ * @brief 只有一边可信：沿法向按路宽比例偏出中心线
  *
+ * width_ratio 是“离所用那条边的距离 / 路宽”：0.5 = 正中，岔路强制单边时
+ * 用 0.4，中心线更靠近要走的边。
  * 朝向用所有行累加判定（中心一定夹在好边和另一边之间）。单点判断朝向
  * 在斜视角下会翻，翻一次整条中心线就跑到画面外，只剩几个点。
  */
 vector<Point2i> centerline_from_side(const EdgeQuality &good,
                                      const Edges &edges, bool use_left,
                                      const Camera &camera, int imageCols,
-                                     int imageRows) {
+                                     int imageRows, float width_ratio = 0.5f) {
     const GroundPoints &curve = good.curve;
     const GroundPoints &other = use_left ? edges.right : edges.left;
     double inward = 0;
@@ -190,7 +198,7 @@ vector<Point2i> centerline_from_side(const EdgeQuality &good,
     vector<Point2i> out;
     for (size_t k = 0; k < curve.size(); ++k) {
         const Point2d center = curve[k] + curve_normal(curve, good.rows, k) *
-                                              (sign * ROAD_WIDTH / 2.f);
+                                              (sign * ROAD_WIDTH * width_ratio);
         const Point2d img = camera.ground_to_image(center);
         if (!std::isfinite(img.x) || !std::isfinite(img.y))
             continue;
@@ -230,6 +238,31 @@ vector<Point2i> centerline_from_mid(const TrackRows &rows, int &accepted,
     }
     return out;
 }
+/**
+ * @brief 只保留第一个横向拐角以下的点（含拐角点）
+ *
+ * ├ 型岔口的左边线是“主路边线 → 拐进支路贴左墙 → 再拐回主路”，整条拿
+ * 去推中心线会被墙段和回拐来回拉。截到近端拐角为止，中心线就在支路
+ * 口处收住，车头对着支路拐进去。
+ */
+EdgeQuality cut_at_corner(const EdgeQuality &edge) {
+    // 曲线是三点平滑过的，拐角会被摊到 2~3 个点上，所以隔两个点比较。
+    constexpr size_t STEP = 2;
+    size_t keep = edge.curve.size();
+    for (size_t k = STEP; k < edge.curve.size(); ++k) {
+        if (std::fabs(edge.curve[k].x - edge.curve[k - STEP].x) >
+            FORCED_CORNER_JUMP) {
+            keep = k + 1; // 含拐角点本身
+            break;
+        }
+    }
+    EdgeQuality cut = edge;
+    cut.curve.resize(keep);
+    cut.rows.resize(keep);
+    cut.index.resize(keep);
+    return cut;
+}
+
 } // namespace
 
 AutoPilot::AutoPilot(int frameCols, int frameRows)
@@ -257,7 +290,7 @@ float AutoPilot::qualitySpeedLimit() const {
 }
 
 void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
-                       float previousSpeed) {
+                       float previousSpeed, int branchSide) {
     // 帧间隔异常（真的卡死）：这一帧的积分/微分都没意义，按丢线处理
     if (dt <= 0 || dt > MAX_FRAME_GAP) {
         valid = false;
@@ -278,15 +311,42 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
         assess_edge(edges.left, edges.left_cols, edges.rows, imageCols);
     const EdgeQuality right =
         assess_edge(edges.right, edges.right_cols, edges.rows, imageCols);
-    // 两边都光滑就取中点；只有一边光滑就用它加减半个路宽推中心线
-    const bool is_dual_smooth = left.smooth() && right.smooth();
-    is_singal_smooth = !is_dual_smooth && (left.smooth() || right.smooth());
+    // 岔路指定边优先：先决定用哪一条边，再一次算出中心线。
+    // 只要这条边没被裁掉、点数够，就直接用它，不再先算一遍自动结果。
+    const bool use_left = branchSide < 0;
+    EdgeQuality forced; // 岔路指定边的低门槛评估结果
+    bool has_forced = false;
+    if (branchSide != 0) {
+        forced = assess_edge(use_left ? edges.left : edges.right,
+                             use_left ? edges.left_cols : edges.right_cols,
+                             edges.rows, imageCols, MIN_POINTS);
+
+        has_forced = forced.enough && !forced.rows.empty() &&
+                     forced.rows.front() - forced.rows.back() >= MIN_SPAN;
+        if (has_forced) {
+            // 只跟到近端拐角；截完不够长（正好在拐角口）就保留整条，
+            // 宁可暂时多用一段墙，也不在这里丢线。
+            const EdgeQuality cut = cut_at_corner(forced);
+            if (cut.curve.size() >= MIN_POINTS &&
+                cut.rows.front() - cut.rows.back() >= MIN_SPAN)
+                forced = cut;
+        }
+        std::cerr << "这一帧强制走" << (use_left ? "左边线" : "右边线") << "，"
+                  << (has_forced ? "并且成功了" : "但是没成功") << "。"
+                  << std::endl;
+    }
+    // 只有一边平滑就用那一边推中心线，否则取两边中点。
+    const bool single_side = !has_forced && left.smooth() != right.smooth();
 
     int accepted = 0, rejected = 0;
     vector<Point2i> raw; // 中心线点 (col, row)
-    if (is_singal_smooth) {
-        const bool use_left = left.smooth();
-        raw = centerline_from_side(use_left ? left : right, edges, use_left,
+    if (has_forced) {
+        raw = centerline_from_side(forced, edges, use_left, camera, imageCols,
+                                   imageRows, FORCED_WIDTH_RATIO);
+        accepted = int(raw.size());
+    } else if (single_side) {
+        const bool side_left = left.smooth();
+        raw = centerline_from_side(side_left ? left : right, edges, side_left,
                                    camera, imageCols, imageRows);
         accepted = int(raw.size());
     } else {
@@ -294,6 +354,16 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     }
     sort(raw.begin(), raw.end(),
          [](const Point2i &a, const Point2i &b) { return a.y > b.y; });
+
+    // 岔口处指定边常常只剩几行，或者被图像边裁掉：实在凑不出够长的中心线
+    // 就退回整条路的中心，不在这里丢线。
+    if ((has_forced || single_side) &&
+        (raw.size() < MIN_POINTS || raw.front().y - raw.back().y < MIN_SPAN)) {
+        accepted = rejected = 0;
+        raw = centerline_from_mid(rows, accepted, rejected);
+        sort(raw.begin(), raw.end(),
+             [](const Point2i &a, const Point2i &b) { return a.y > b.y; });
+    }
 
     // 2) 这一帧的中心线够不够可信
     if (!update_path_state(raw, rows.size(), accepted, rejected, dt))

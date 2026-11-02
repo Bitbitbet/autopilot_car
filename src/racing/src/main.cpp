@@ -9,33 +9,48 @@
 #include "track.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <opencv2/opencv.hpp>
+#include <opencv2/videoio.hpp>
+#include <thread>
 
 using Clock = std::chrono::steady_clock;
 using cv::Mat;
+using cv::Size;
+using cv::VideoWriter;
 using std::atomic_bool;
 using std::cerr;
 using std::clamp;
+using std::condition_variable;
 using std::cout;
 using std::endl;
+using std::lock_guard;
 using std::max;
+using std::memory_order_relaxed;
 using std::min;
+using std::mutex;
+using std::shared_ptr;
 using std::string;
 using std::thread;
+using std::unique_lock;
 using std::unique_ptr;
 
 namespace {
-std::atomic_bool stopping{false};
-void onSignal(int) { stopping = true; }
+
+atomic_bool signal_stop{false};
+void onSignal(int) { signal_stop = true; }
+
 double nowSeconds() {
     return std::chrono::duration<double>(Clock::now().time_since_epoch())
         .count();
 }
+
 enum class Mode { Manual, Auto };
 
 void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
@@ -56,24 +71,112 @@ void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
     snprintf(text, sizeof text, "center=%d err=%.2f quality=%.2f curve=%.2f",
              pilot.center, pilot.error, pilot.confidence, pilot.severity);
     line(text);
-    snprintf(text, sizeof text, "race=%s ai_age=%.2fs split=%d %s", race.state,
-             race.detectionAge, race.path.splitRows, race.path.reason);
+    snprintf(text, sizeof text, "race=%s ai_age=%.2fs side=%d", race.state,
+             race.detectionAge, race.branchSide);
     line(text);
     line(race.reason);
     line("a:auto  space:stop  +/-:limit  q:quit");
 }
+struct ParsedArgument {
+    bool headless = false;
+    bool do_exit = false;
+    bool do_produce_debug_video = false;
+};
+ParsedArgument process_arguments(int argc, char **argv) {
+    ParsedArgument arg;
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--headless"))
+            arg.headless = true;
+        else if (!std::strcmp(argv[i], "--debug-video")) {
+            arg.do_produce_debug_video = true;
+
+        } else {
+            cerr << "用法: racing [--headless] [--debug-video]\n";
+            arg.do_exit = true;
+        }
+    }
+
+    return arg;
+}
+
+class DebugVideoManager {
+  private:
+    VideoWriter writer;
+    mutex mtx;
+    condition_variable cond;
+    Mat latest;
+    bool fresh = false;
+    thread writer_thread;
+    atomic_bool thread_stop;
+
+    DebugVideoManager(VideoWriter writer) : writer(writer) {}
+
+    void writer_thread_main() {
+        while (!thread_stop.load(memory_order_relaxed)) {
+            Mat image;
+            {
+                unique_lock lock(mtx);
+                cond.wait(lock, [this]() {
+                    return fresh || thread_stop.load(memory_order_relaxed);
+                });
+                if (!fresh) {
+                    break;
+                }
+                image = latest;
+            }
+            writer.write(image);
+
+            fresh = false;
+        }
+    }
+
+  public:
+    static shared_ptr<DebugVideoManager> create(const Camera &camera) {
+        const char *DEBUG_VIDEO_PATH = "/tmp/output.avi";
+        cout << "Debug视频输出路径：" << DEBUG_VIDEO_PATH << "。" << endl;
+
+        cv::VideoWriter debug_video(
+            DEBUG_VIDEO_PATH, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 30,
+            Size{camera.cols(), camera.rows()}, true);
+        if (!debug_video.isOpened()) {
+            cerr << "无法打开debug视频文件。" << endl;
+            return nullptr;
+        }
+
+        auto dvm =
+            shared_ptr<DebugVideoManager>(new DebugVideoManager(debug_video));
+        dvm->thread_stop.store(false, memory_order_relaxed);
+        auto raw = dvm.get();
+        dvm->writer_thread = thread([raw]() { raw->writer_thread_main(); });
+
+        return dvm;
+    }
+
+    void publish(Mat image) {
+        lock_guard lock(mtx);
+        latest = image.clone();
+        fresh = true;
+
+        cond.notify_one();
+    }
+
+    ~DebugVideoManager() {
+        thread_stop.store(true, memory_order_relaxed);
+        cond.notify_one();
+        writer_thread.join();
+        writer.release();
+    }
+};
+
 } // namespace
 
 int main(int argc, char **argv) {
-    bool headless = false;
-    for (int i = 1; i < argc; ++i) {
-        if (!std::strcmp(argv[i], "--headless"))
-            headless = true;
-        else {
-            cerr << "用法: racing [--headless]\n";
-            return 2;
-        }
+    const auto [headless, do_exit, do_produce_debug_video] =
+        process_arguments(argc, argv);
+    if (do_exit) {
+        return 2;
     }
+
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
 
@@ -121,7 +224,16 @@ int main(int argc, char **argv) {
     if (!headless)
         displayThread = thread([&] { display.run(); });
 
-    while (!stopping) {
+    shared_ptr<DebugVideoManager> dvm;
+    if (do_produce_debug_video) {
+        dvm = DebugVideoManager::create(camera);
+        if (!dvm) {
+            cerr << "启动debug视频失败。" << endl;
+            return 5;
+        }
+    }
+
+    while (!signal_stop) {
         Mat image;
         if (!camera.read(image)) {
             cerr << "[Error] 取不到图像\n";
@@ -136,8 +248,8 @@ int main(int argc, char **argv) {
 
         perception->submit(image, uint64_t(t * 1000), t);
         const DetectionSnapshot observation = perception->snapshot();
-        RacePlan plan = race_manager.update(observation, t, dt,
-                                            mode == Mode::Auto, bin, rows);
+        RacePlan plan =
+            race_manager.update(observation, t, dt, mode == Mode::Auto);
 
         auto toggle = [&] {
             if (mode == Mode::Auto) {
@@ -222,8 +334,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        pilot.update(plan.selectedBranch ? plan.path.rows : rows, camera, dt,
-                     speed);
+        pilot.update(rows, camera, dt, speed, plan.branchSide);
         if (mode == Mode::Auto && pilot.lost) {
             mode = Mode::Manual;
             panic = true;
@@ -232,30 +343,26 @@ int main(int argc, char **argv) {
             cout << "[Stop] 丢线: " << pilot.pathIssue << " (dt=" << dt
                  << " s)；恢复后按 a\n";
         }
-        if (panic) {
-            car->resetVelocity();
-            continue;
-        }
 
         speed = 0;
         uint16_t servo = PWMSERVOMID;
-        if (mode == Mode::Auto) {
-            if (plan.stop) {
-                pilot.resetControl();
+        if (!panic) {
+            if (mode == Mode::Auto) {
+                if (plan.stop) {
+                    pilot.resetControl();
+                } else {
+                    speed = pilot.speedFor(min(cruise, plan.speedCap), dt);
+                    servo = pilot.servo;
+                }
             } else {
-                speed = pilot.speedFor(min(cruise, plan.speedCap), dt);
-                servo = pilot.servo;
+                speed = clamp(jsSpeed, -cfg::MAX_SPEED, cfg::MAX_SPEED);
+                servo = jsServo;
             }
-        } else {
-            speed = clamp(jsSpeed, -cfg::MAX_SPEED, cfg::MAX_SPEED);
-            servo = jsServo;
         }
 
         // 最终下发指令
         try {
             car->carControl(speed, servo);
-            if (plan.buzzer && !panic && mode == Mode::Auto)
-                car->buzzerSound(Buzzer::ding);
         } catch (const std::exception &e) {
             cerr << "[Error] 串口: " << e.what() << '\n';
             break;
@@ -266,10 +373,13 @@ int main(int argc, char **argv) {
             lastState = plan.state;
         }
 
-        if (!headless) {
+        if (!headless || do_produce_debug_video) {
             track_draw_result(rows, image);
             drawHud(image, pilot, mode, panic, cruise, speed, servo, plan);
-            display.publish(image);
+            if (!headless)
+                display.publish(image);
+            if (do_produce_debug_video)
+                dvm->publish(image);
         }
     }
 
@@ -279,8 +389,8 @@ int main(int argc, char **argv) {
     }
 
     display.stop = true;
-    if (displayThread.joinable())
+    if (!headless)
         displayThread.join();
-    cout << "[Stop] 程序退出\n";
+    cout << "racing 正常退出。" << endl;
     return 0;
 }

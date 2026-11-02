@@ -14,20 +14,7 @@ struct RaceConfig {
     float confirmGap = 0.30f;      // 两次确认之间允许的最大间隔
     // 速度上限 (m/s)
     float limitedSpeed = 0.40f;  // 限速区
-    float forkSpeed = 0.15f;     // 岔路
     float approachSpeed = 0.12f; // 斑马线前
-    // 岔路
-    float directionMemory = 4.f;
-    float forkConfirmTime = 0.12f;
-    float forkMinTime = 0.40f;
-    float forkMaxTime = 4.f;
-    float forkExitTime = 0.35f;
-    float cooldown = 2.f;
-    int minBranchWidth = 60; // 单条支路的最小横向宽度（px）
-    int minBranchGap = 24;   // 分隔带的最小宽度（px）
-    int minBranchRows = 3;   // 分叉至少连续多少扫描行
-    int minBranchPathRows = 8; // 选中的支路至少要有这么多行才拿来巡线
-    int nearCutRow = 20;     // 靠车头多少行不参与几何判定
     // 触发行（像素，0 在图像顶部）
     int triggerRow = 290;
     int obstacleRow = 310;

@@ -13,9 +13,6 @@ struct DetectionSnapshot {
     uint64_t sequence = 0;
     double captured = 0;
     std::vector<InferenceResult> detections;
-    bool failed = false;
-    std::string error;
-    cv::Mat image; // 与结果对应的原始推理图像
 };
 inline double raceTime() {
     return std::chrono::duration<double>(

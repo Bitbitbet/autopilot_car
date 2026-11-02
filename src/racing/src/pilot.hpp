@@ -9,7 +9,7 @@
 
 namespace cfg {
 constexpr float CRUISE_SPEED = 1.5f; // 默认巡航
-constexpr float MAX_SPEED = 1.50f;    // 上限
+constexpr float MAX_SPEED = 1.50f;   // 上限
 constexpr float MIN_SPEED = 0.05f;
 } // namespace cfg
 
@@ -53,9 +53,10 @@ class AutoPilot {
     explicit AutoPilot(int frameCols, int frameRows);
 
     // 每帧识别后调用。rows 为空、点数不足或帧间隔异常时判定不可信。
-    // 哪一边更平滑由自己判断：两边都好取中点，只有一边好就用它加减半个路宽。
+    // branchSide=-1/+1 时强制用左/右边缘推中心线（岔路），0 表示自己判断：
+    // 两边都好取中点，只有一边好就用它加减半个路宽。
     void update(const TrackRows &rows, const Camera &camera, float dt,
-                float previousSpeed);
+                float previousSpeed, int branchSide = 0);
 
     // 按 severity / 置信度算出指令速度（含加、减速限幅）。
     float speedFor(float cruise, float dt);
@@ -74,7 +75,6 @@ class AutoPilot {
     float error = 0, confidence = 0, severity = 0;
     uint16_t servo = PWMSERVOMID;
     bool valid = false, lost = false;
-    bool is_singal_smooth = false; // 上一帧是用单边推的中心线
 
     // 运行时可调的限速
     float curveSpeed() const { return curveLimit; }

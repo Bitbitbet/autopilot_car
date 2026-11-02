@@ -1,8 +1,10 @@
 #include "race_perception.hpp"
 #include "detection.hpp"
 #include <filesystem>
+#include <mutex>
 
 using cv::Mat;
+using std::lock_guard;
 using std::make_shared;
 using std::make_unique;
 using std::unique_ptr;
@@ -17,32 +19,21 @@ unique_ptr<RacePerception> createRacePerception(const RaceConfig &config) {
     });
 }
 void RacePerception::worker_run() {
-    try {
-        while (true) {
-            Mat frame;
-            double captured;
-            uint64_t sequence;
-            {
-                std::unique_lock lock(mutex);
-                wake.wait(lock, [&] { return stop || !pending.empty(); });
-                if (stop)
-                    return;
-                frame = std::move(pending);
-                captured = pendingTime;
-                sequence = pendingSequence;
-            }
-            auto result = infer(frame);
-            std::lock_guard lock(mutex);
-            latest = {sequence, captured, std::move(result),
-                      false,    {},       std::move(frame)};
+    while (true) {
+        Mat frame;
+        double captured;
+        uint64_t sequence;
+        {
+            std::unique_lock lock(mutex);
+            wake.wait(lock, [&] { return stop || !pending.empty(); });
+            if (stop)
+                return;
+            frame = std::move(pending);
+            captured = pendingTime;
+            sequence = pendingSequence;
         }
-    } catch (const std::exception &e) {
-        std::lock_guard lock(mutex);
-        latest.failed = true;
-        latest.error = e.what();
-    } catch (...) {
-        std::lock_guard lock(mutex);
-        latest.failed = true;
-        latest.error = "AI worker failed";
+        auto result = infer(frame);
+        lock_guard lock(mutex);
+        latest = {sequence, captured, std::move(result)};
     }
 }

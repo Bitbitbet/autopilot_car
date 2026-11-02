@@ -3,51 +3,35 @@
 #include "detection.hpp"
 #include "race_config.hpp"
 #include "race_perception.hpp"
-#include "track.hpp"
 #include <array>
-#include <cmath>
 #include <cstdint>
 
-// 一次分叉几何扫描的结果。
-// rows 只有 selectedBranch 时才会被主循环使用：direction==0 时是全宽，
-// 否则是按方向裁掉另一侧之后的行集合。
-struct RacePath {
-    TrackRows rows;
-    int splitRows = 0;                         // 连续判定为分叉的扫描行数
-    const char *reason = "INVALID_ROAD_INPUT"; // 判定结论，可直接显示
-};
-
-// 本帧“该不该走 / 走多快 / 走哪条支路”，横向控制不在这里。
+// 本帧“该不该走 / 走多快 / 往哪边打舵”，横向闭环在 AutoPilot。
 struct RacePlan {
     float speedCap = 10.f; // 速度上限，10 等于不限制
-    bool stop = false, buzzer = false;
-    bool selectedBranch = false; // path.rows 是否是可用的一条支路
-    double detectionAge = -1;    // AI 结果的新鲜度（秒）
+    bool stop = false;
+    double detectionAge = -1; // AI 结果的新鲜度（秒）
     const char *state = "AI_WAIT", *reason = "AI_WAIT";
-    RacePath path;
+
+    // 岔路：让 pilot 优先用哪一条边推中心线（-1 左，+1 右，0 自动）。
+    // 地面上看到 fork 默认走左边；前方 yleft / yright 会覆盖它。
+    int branchSide = 0;
 };
 
-// 比赛任务层：AI 标签 + 赛道几何 -> 停车/限速/选路。
+// 比赛任务层：只看 AI 标签和时间，路面几何全部交给 track/AutoPilot。
 class RaceManager {
   public:
     bool aiReady(const DetectionSnapshot &s, double time) const {
-        return !s.failed && s.sequence > 0 && std::isfinite(s.captured) &&
-               time >= s.captured && time - s.captured <= cfg.maxDetectionAge;
+        return s.sequence > 0 && time >= s.captured &&
+               time - s.captured <= cfg.maxDetectionAge;
     }
     RacePlan update(const DetectionSnapshot &snap, double time, float dt,
-                    bool active, const cv::Mat &bin, const TrackRows &edges);
+                    bool active);
 
   private:
     // 只有 Lane 是“正常巡线”，其余都是它前后的局部任务。
-    // Review 是死锁状态：停车并等待人工重启。
-    enum class State {
-        Lane,
-        ForkArmed,
-        ForkSelect,
-        CrossApproach,
-        SignalWait,
-        Review
-    };
+    // FatalStop 是死锁状态，进入后不能改变
+    enum class State { Lane, CrossApproach, SignalWait, FatalStop };
 
     RaceConfig cfg;
     State state = State::Lane;
@@ -61,13 +45,13 @@ class RaceManager {
     double lastCapture = -1;
 
     // 时间
-    double now = 0, stateSince = 0, cooldownUntil = 0;
-    double splitTime = 0, exitTime = 0; // 分叉确认 / 驶离计时
-    double directionUntil = 0;          // 方向牌的记忆期限
-    double lastCrossSeen = 0;           // 最近一次看到斑马线
+    double now = 0, stateSince = 0;
+    double lastCrossSeen = 0; // 最近一次看到斑马线
     double gateClearSince = -1, hazardClearSince = -1;
 
-    int direction = 0; // -1 左，+1 右，0 未知
+    // 岔路偏向：sign 消失后再保持一小段时间，避免单帧漏检来回跳。
+    int side = 0; // -1 左，+1 右，0 自动
+    double sideUntil = 0;
 
     bool lastActive = false;
     bool limited = false;         // 限速区，跨人工接管保持
@@ -80,7 +64,6 @@ class RaceManager {
     void enter(State s) {
         state = s;
         stateSince = now;
-        splitTime = exitTime = 0;
     }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label, int row) const {
