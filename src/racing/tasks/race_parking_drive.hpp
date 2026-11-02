@@ -421,6 +421,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["virtual_correction_pwm"]=virtualFeedback.correction();row["virtual_error_px"]=virtualPilot.error;
                     row["traffic_state"]=traffic.state;row["traffic_reason"]=traffic.reason;row["parking_state"]=command.state;
                     row["guide_direction"]=traffic.guideDirection;row["guide_pwm"]=traffic.guidePwm;row["lane_blend"]=traffic.laneBlend;
+                    row["parking_opening_row"]=traffic.parkingOpeningRow;row["parking_edge_estimated"]=traffic.parkingEdgeEstimated;
                     row["fork_completed_direction"]=traffic.completedDirection;row["fork_command_distance_m"]=traffic.forkCommandDistance;
                     row["fork_tracking_seconds"]=traffic.forkTrackingTime;row["fork_sign_clear_seconds"]=traffic.forkSignClearTime;
                     row["fork_pulse_phase"]=traffic.forkPulsePhase;row["geometry_split_rows"]=traffic.geometrySplitRows;
@@ -530,6 +531,17 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     for(size_t i=1;i<virtualPlan.centers.size();++i)cv::line(shown,
                         {int(virtualPlan.centers[i-1].y),virtualPlan.centers[i-1].x},
                         {int(virtualPlan.centers[i].y),virtualPlan.centers[i].x},{255,255,0},2);
+                    if(traffic.parkingEdgeEstimated&&traffic.selectedBranch){
+                        for(size_t i=1;i<traffic.path.left.size();++i){
+                            const auto a=traffic.path.left[i-1],b=traffic.path.left[i];
+                            cv::line(shown,{a.y,a.x},{b.y,b.x},{255,255,0},2);
+                            cv::line(shown,{(a.y+traffic.path.right[i-1].y)/2,a.x},
+                                {(b.y+traffic.path.right[i].y)/2,b.x},{0,255,0},2);
+                        }
+                    }
+                    if(mission.parkingEntrancePending())cv::putText(shown,
+                        traffic.parkingEdgeEstimated?"ENTRY: EDGE OFFSET":"ENTRY: APPROACH / WAIT LEFT OPENING",
+                        {6,44},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
                 }
                 for(size_t i=0;i<corners.size();++i)if(frozen) {
                     cv::circle(shown,corners[i],6,{0,0,255},-1);

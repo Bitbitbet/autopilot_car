@@ -139,6 +139,55 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
     return out;
 }
 
+// Parking entrances are side openings, not necessarily Y splits. Estimate the
+// unexpanded lane width from the closest visible rows, then offset the connected
+// left edge into the road. These are image-space estimates, not metric clearance.
+struct RaceEntranceEdge {
+    RacePath path;
+    int openingRow=-1;
+    bool opening=false;
+    float nearWidth=0;
+};
+inline RaceEntranceEdge raceParkingEntranceEdge(const RacePath &road) {
+    RaceEntranceEdge out;
+    if(road.left.size()<24||road.right.size()!=road.left.size())return out;
+    const int start=road.left.front().x;
+    float n=0,sy=0,syy=0,sl=0,syl=0,sw=0,syw=0;
+    for(size_t i=0;i<road.left.size();++i){
+        const auto l=road.left[i],r=road.right[i];const float y=start-l.x;
+        if(y>60)break;
+        if(l.y<=2||r.y>=637||r.y-l.y<60)continue;
+        ++n;sy+=y;syy+=y*y;sl+=l.y;syl+=y*l.y;sw+=r.y-l.y;syw+=y*(r.y-l.y);
+    }
+    const float denominator=n*syy-sy*sy;
+    if(n<8||denominator<1)return out;
+    const float leftSlope=(n*syl-sy*sl)/denominator;
+    const float widthSlope=std::clamp((n*syw-sy*sw)/denominator,-2.f,.5f);
+    const float leftBase=(sl-leftSlope*sy)/n,widthBase=(sw-widthSlope*sy)/n;
+    out.nearWidth=widthBase;
+    int count=0,first=-1;
+    for(size_t i=0;i<road.left.size();++i){
+        const auto l=road.left[i],r=road.right[i];const float y=start-l.x;
+        const float width=std::clamp(widthBase+widthSlope*y,60.f,600.f);
+        const float expansion=(r.y-l.y)-width;
+        // A bend of both edges, a distant opening or a one-row paint break is
+        // not permission to steer into the island beside the current lane.
+        const bool opens=y>=64&&y<=180&&l.y>2&&
+            leftBase+leftSlope*y-l.y>std::max(32.f,width*.18f)&&
+            expansion>std::max(40.f,width*.22f);
+        if(opens){if(!count)first=l.x;++count;}
+        else count=0;
+        if(count>=5&&first>=start-144){out.opening=true;out.openingRow=first;}
+        // Keep the real right edge on normal-width rows. At the broad mouth,
+        // synthesize only the inward edge so the old straight road cannot pull
+        // the target to the midpoint of the whole junction.
+        const int inner=expansion>width*.22f?std::min(r.y,int(std::lround(l.y+width))):r.y;
+        out.path.left.push_back(l);out.path.right.emplace_back(l.x,inner);
+    }
+    out.path.geometryReason="LEFT_EDGE_OFFSET_ESTIMATE";
+    return out;
+}
+
 // Previous applied command and current-road pilot feedback. Command distance
 // is an estimate, not odometry or proof of physical clearance of a sign.
 struct RaceForkFeedback {
@@ -173,6 +222,8 @@ struct RacePlan {
     bool selectedBranch=false;
     bool alignRoad=false;
     bool parkingEntryCommit=false;
+    int parkingOpeningRow=-1;
+    bool parkingEdgeEstimated=false;
     bool gateWaiting=false,gateOpened=false;
     int guideDirection=0;
     int completedDirection=0;
@@ -201,6 +252,7 @@ class RaceManager {
     int direction=0;bool routeArmed=false;
     double seekSince=-1;
     RaceYForkProgress yProgress;
+    float entranceOpeningTime=0;
     float targetVisibleTime=0,handoffTime=0,alignedTime=0,handoffPwm=300;
     float targetCenter=std::numeric_limits<float>::quiet_NaN();
     enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
@@ -306,13 +358,13 @@ public:
         if(active!=lastActive) {
             // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
             if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0;routeArmed=false; }
-            counts.fill(0); confirmed.fill(false); lastActive=active;
+            counts.fill(0); confirmed.fill(false); lastActive=active;entranceOpeningTime=0;
         }
         if(!active) { p.state="MANUAL"; p.reason="MANUAL"; return p; }
         if(!p.fresh) {
             yProgress.clearTime=yProgress.trackingTime=0;
             p.stop=true; p.state="AI_WAIT"; p.reason=snap.failed?"AI_FAILED":"AI_STALE";
-            counts.fill(0); confirmed.fill(false); splitTime=exitTime=0;
+            counts.fill(0); confirmed.fill(false); splitTime=exitTime=0;entranceOpeningTime=0;
             // 无新观测时不累计恢复或穿越时间，也不能沿用旧方向继续完成动作。
             if(state==State::ForkSelect) { enter(State::Fault); reviewReason="FORK_AI_STALE"; }
             gateClearSince=hazardClearSince=-1; return p;
@@ -424,11 +476,27 @@ public:
         if(routeArmed&&routeDirection&&routeDirection!=direction&&(state==State::ForkArmed||state==State::ForkSelect)) {
             enter(State::Lane);routeArmed=false;
         }
-        if(parkingEntrance&&!routeArmed&&!parkingEntryNear){
-            p.speedCap=std::min(p.speedCap,forkSpeed);
-            p.state="PARKING_ENTRY_APPROACH";p.reason="PARK_SIGN_DISTANT_FOLLOW_CURRENT_ROAD";
-            return p; // Continue forward; do not steer just because PARK was recognized.
-        }
+        // PARK confirms intent only. Sign box size is diagnostic, never the
+        // turn trigger: use a continuous near left opening in the current road.
+        (void)parkingEntryNear;
+        RaceEntranceEdge entrance;
+        if(parkingEntrance){
+            entrance=raceParkingEntranceEdge(raceBranchPath(geometryBin,track,-1,cfg,signRegions,true));
+            p.parkingOpeningRow=entrance.openingRow;
+            if(!routeArmed){
+                if(newFrame)entranceOpeningTime=entrance.opening?entranceOpeningTime+dt:0;
+                if(entranceOpeningTime<.14f){
+                    p.speedCap=std::min(p.speedCap,forkSpeed);
+                    p.state="PARKING_ENTRY_APPROACH";p.reason="FOLLOW_ROAD_UNTIL_NEAR_LEFT_OPENING";
+                    return p;
+                }
+                direction=-1;routeArmed=true;enter(State::ForkSelect);handoffPwm=0;handoffTime=1;
+            }
+            else if(state==State::ForkArmed||(state==State::Fault&&std::string_view(reviewReason)=="FORK_AI_STALE")){
+                // Fresh data resumes edge tracking, never a new full-lock pulse.
+                enter(State::ForkSelect);handoffPwm=0;handoffTime=1;
+            }
+        } else entranceOpeningTime=0;
         p.parkingEntryCommit=parkingEntrance;
         if(state==State::Lane&&now>=cooldownUntil&&newFrame) {
             if(routeDirection!=0&&(geometry.splitRows>=cfg.minBranchRows||
@@ -518,39 +586,34 @@ public:
             }
         }
         if(state==State::ForkSelect) {
-            p.alignRoad=true;
+            // Follow the forward entry curve first. The near-only alignment
+            // controller sees the still-straight approach and turns too late.
+            p.alignRoad=!parkingEntrance;
             p.guideDirection=direction==2?0:direction;p.guidePwm=0;
             p.speedCap=std::min(p.speedCap,forkSpeed);
             p.state=direction<0?"FORK_LEFT":direction==2?"FORK_STRAIGHT":"FORK_RIGHT"; p.reason=routeArmed?"MISSION_CONNECTED_BRANCH":"CONNECTED_BRANCH";
             p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true); p.selectedBranch=true;
+            if(parkingEntrance){p.path=entrance.path;p.parkingEdgeEstimated=true;}
             if(geometry.splitRows==0&&!parkingEntrance)p.path=raceBranchPath(geometryBin,track,2,cfg,signRegions,false);
             bool aligned=direction==2;
             if(direction!=2) {
                 float nearCenter=0,farCenter=0,heading=0;
                 const bool visible=corridorCenters(p.path,nearCenter,farCenter,heading);
                 const bool continuous=visible&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<96);
-                // During entrance acquisition, a corridor far on the opposite
-                // side is the old road, not permission to snap back to it.
-                const bool oppositeEntry=parkingEntrance&&handoffTime<.65f&&road.available&&road.roadReady&&
-                    direction*road.offset < -130;
-                if(parkingEntrance&&handoffTime<.65f&&(!continuous||oppositeEntry)){
-                    enter(State::ForkArmed);seekSince=now;
-                    p.selectedBranch=false;p.path={};p.guideDirection=direction;p.guidePwm=360;p.laneBlend=0;p.alignRoad=false;
-                    p.state="PARKING_ENTRY_REACQUIRE";p.reason="KEEP_ENTRANCE_SIDE_BEFORE_HANDOFF";return p;
-                }
                 p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/(routeArmed?.65f:.25f),0.f,1.f);
+                if(parkingEntrance){p.guidePwm=0;p.laneBlend=1;}
                 if(continuous){handoffTime+=dt;targetCenter=farCenter;}
                 else {
                     // Target was already acquired. Keep recovering the current
                     // road; do not turn again just because its far end moved.
                     targetCenter=std::numeric_limits<float>::quiet_NaN();alignedTime=0;
-                    p.selectedBranch=false;p.path={};p.laneBlend=1;p.guidePwm=0;p.guideDirection=0;
+                    p.selectedBranch=false;p.path={};p.laneBlend=1;p.guidePwm=0;p.guideDirection=0;p.alignRoad=true;
                     p.reason="TARGET_ROAD_LOST_CURRENT_LANE_RECOVERY";return p;
                 }
                 if(continuous&&p.laneBlend>=1&&std::abs(nearCenter-320)<40&&std::abs(heading)<12)alignedTime+=dt;
                 else alignedTime=0;
                 aligned=alignedTime>=.18f;
-                if(continuous)p.reason=p.laneBlend<1?"TARGET_ROAD_GRADUAL_HANDOFF":"COMMITTED_ROAD_CENTER_TRACKING";
+                if(continuous)p.reason=parkingEntrance?"PARKING_LEFT_EDGE_OFFSET_TRACKING":p.laneBlend<1?"TARGET_ROAD_GRADUAL_HANDOFF":"COMMITTED_ROAD_CENTER_TRACKING";
             }
             if(p.path.left.size()<8) { enter(State::Fault); reviewReason="BRANCH_PATH_LOST"; }
             else if(now-stateSince>cfg.forkMaxTime) {
@@ -583,6 +646,7 @@ public:
             p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
             yProgress.pulsePhase=std::max(yProgress.pulsePhase,1.4f);
             p.guidePwm=p.guideDirection?guidancePwm(routeArmed?now-seekSince:yProgress.pulsePhase):0;p.laneBlend=p.guideDirection?0:1;
+            if(parkingEntrance){p.guidePwm=0;p.guideDirection=0;p.laneBlend=1;p.alignRoad=true;}
             if(p.guidePwm<=0){p.guideDirection=0;p.alignRoad=true;}
             p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
         }

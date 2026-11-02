@@ -368,28 +368,59 @@ int main(int argc,char **argv){try{
         std::cout<<"PASS speed-aware finite Y pulse; fresh curved-road exit from seek/select; fork cap and mission release\n";
     }
     {
-        RaceMission mission;mission.start();RaceSnapshot s;RaceConfig entryConfig=config;entryConfig.minBranchRows=20;
-        RaceManager manager(entryConfig);RacePlan p;int i=0;
-        auto step=[&](int width,int height,const RaceForkFeedback &feedback=RaceForkFeedback{}){
-            s.sequence=++i;s.captured=i*.07;s.detections={box(LABEL_PARK,500,2,width,height)};
-            mission.observeSigns(s,true);
-            return manager.update(s,s.captured,.07,true,split,track,{},false,true,mission.routeDirection(),true,
-                mission.parkingEntrancePending(),.30,feedback,mission.parkingEntrancePending(),mission.parkingEntranceNear());
+        cv::Mat straight=cv::Mat::zeros(480,640,CV_8UC1);
+        cv::rectangle(straight,{220,0,240,480},{255},-1);
+        auto mouth=[&](int row,bool right=false,bool bend=false){
+            auto result=straight.clone();
+            for(int y=0;y<row;++y){
+                int shift=std::min(160,(row-y)*3);
+                result.row(y).setTo(0);
+                int l=right?220:220-shift,r=right?459+shift:459;
+                if(bend)r-=shift;
+                result.row(y).colRange(l,r+1).setTo(255);
+            }
+            return result;
         };
-        for(int j=0;j<12;++j)p=step(66,34);
-        require(mission.parkingEntrancePending()&&!mission.parkingEntranceNear()&&!p.stop&&p.guidePwm==0&&
-            std::string(p.state)=="PARKING_ENTRY_APPROACH"&&p.speedCap<=.301,"Distant PARK does not approach under area cap");
-        p=step(100,70);require(!mission.parkingEntranceNear(),"Single near frame starts turn");
-        for(int j=0;j<6;++j)p=step(100,70);
-        require(mission.parkingEntranceNear()&&p.selectedBranch&&p.parkingEntryCommit,"Near PARK cannot acquire entrance");
-        require(raceDirectionServo(p,1900)<=1500,"Entrance initial handoff snaps from left lock to right lock");
-        p=step(100,70,{true,true,311,-24,.30});
-        require(!p.selectedBranch&&p.guideDirection==-1&&raceDirectionServo(p,1900)<1500&&
-            std::string(p.state)=="PARKING_ENTRY_REACQUIRE","Opposite old road cancels parking entrance commitment");
-        for(int j=0;j<20;++j)p=step(100,70,{true,true,-20,0,.30});
-        require(p.selectedBranch&&p.laneBlend==1&&raceDirectionServo(p,1700)==1700,"Established entrance road cannot countersteer");
-        require(std::abs(mission.speedLimit(.5,.30)-.30)<1e-5&&std::abs(mission.speedLimit(.2,.30)-.2)<1e-5,"Parking cap raises or ignores cruise setting");
-        std::cout<<"PASS parking entrance distant approach; near confirmation; side commitment; delayed countersteer; unchanged area cap\n";
+        auto nearMouth=mouth(340),farMouth=mouth(240),rightMouth=mouth(340,true),curve=mouth(340,false,true);
+        Track entranceTrack;entranceTrack.handle(straight);
+        auto edges=[&](const cv::Mat &im){return raceParkingEntranceEdge(raceBranchPath(im,entranceTrack,-1,config,{},true));};
+        require(!edges(straight).opening&&!edges(farMouth).opening&&!edges(rightMouth).opening&&!edges(curve).opening,
+            "Straight/right opening/distant opening/constant-width curve triggers left entry");
+        const auto estimate=edges(nearMouth);
+        require(estimate.opening&&estimate.openingRow>290,"Near connected left opening not found");
+        bool shifted=false;for(size_t k=0;k<estimate.path.left.size();++k)if(std::abs(estimate.path.left[k].x-300)<=2){
+            const float center=(estimate.path.left[k].y+estimate.path.right[k].y)*.5f;
+            require(center<240&&center>estimate.path.left[k].y+60,"Offset does not follow left boundary into road");shifted=true;
+        }
+        require(shifted,"No middle row in entrance estimate");
+        RaceTaskPilot edgePilot(pilotConfig);
+        for(int j=0;j<5;++j)edgePilot.update(estimate.path.left,estimate.path.right,.07,.30);
+        require(edgePilot.ready&&edgePilot.servo<1450,
+            "Estimated left-edge path never produces left steering through the real pilot");
+        RaceMission mission;mission.start();RaceSnapshot s;RaceManager manager(config);RacePlan p;int sequence=0;
+        auto step=[&](const cv::Mat &im,bool fresh=true){
+            if(fresh){s.sequence=++sequence;s.captured=sequence*.07;}
+            s.detections={box(LABEL_PARK,500,2,110,80)};mission.observeSigns(s,true);
+            return manager.update(s,s.captured,.07,true,im,entranceTrack,{},false,true,mission.routeDirection(),true,
+                mission.parkingEntrancePending(),.30,{},mission.parkingEntrancePending(),mission.parkingEntranceNear());
+        };
+        for(int j=0;j<15;++j)p=step(straight);
+        require(mission.parkingEntranceNear()&&std::string(p.state)=="PARKING_ENTRY_APPROACH"&&!p.stop&&p.guidePwm==0,
+            "Large near PARK triggers turn before road opening");
+        for(int j=0;j<5;++j)p=step(farMouth);
+        require(!p.selectedBranch&&!p.guideDirection,"Far left opening triggers early turn");
+        p=step(nearMouth);for(int j=0;j<5;++j)p=step(nearMouth,false);
+        require(!p.selectedBranch,"Repeated AI frame confirms entry opening");
+        for(int j=0;j<4;++j)p=step(nearMouth);
+        require(p.selectedBranch&&p.parkingEdgeEstimated&&!p.alignRoad&&p.guidePwm==0&&p.guideDirection==-1&&!p.stop,
+            "Visible entrance not handed to edge path controller");
+        require(raceDirectionServo(p,1700)==1700,"Edge controller cannot countersteer");
+        cv::Mat absent=cv::Mat::zeros(480,640,CV_8UC1);p=step(absent);
+        require(!p.stop&&!p.selectedBranch&&p.guidePwm==0&&p.alignRoad,"Lost edge restarts full-lock turn or stops");
+        for(int j=0;j<100;++j){p=step(straight);if(p.completedDirection)break;}
+        require(p.completedDirection==-1&&!p.stop,"Aligned entrance cannot complete");
+        require(std::abs(mission.speedLimit(.5,.30)-.30)<1e-5&&std::abs(mission.speedLimit(.2,.30)-.2)<1e-5,"Parking cap changed");
+        std::cout<<"PASS parking entrance edge offset; large sign alone rejected; distant/right/curve isolation; continuous near opening; countersteer and recovery; unchanged area cap\n";
     }
     {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
      for(int i=0;i<8;++i)settings.adjust('+');
