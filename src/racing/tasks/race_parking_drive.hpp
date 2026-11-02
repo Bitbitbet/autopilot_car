@@ -422,6 +422,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["traffic_state"]=traffic.state;row["traffic_reason"]=traffic.reason;row["parking_state"]=command.state;
                     row["guide_direction"]=traffic.guideDirection;row["guide_pwm"]=traffic.guidePwm;row["lane_blend"]=traffic.laneBlend;
                     row["parking_opening_row"]=traffic.parkingOpeningRow;row["parking_edge_estimated"]=traffic.parkingEdgeEstimated;
+                    row["parking_entry_guided_fallback"]=traffic.parkingEntryFallback;
+                    row["parking_approach_command_m"]=traffic.parkingApproachCommandM;
                     row["fork_completed_direction"]=traffic.completedDirection;row["fork_command_distance_m"]=traffic.forkCommandDistance;
                     row["fork_tracking_seconds"]=traffic.forkTrackingTime;row["fork_sign_clear_seconds"]=traffic.forkSignClearTime;
                     row["fork_pulse_phase"]=traffic.forkPulsePhase;row["geometry_split_rows"]=traffic.geometrySplitRows;
@@ -540,7 +542,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         }
                     }
                     if(mission.parkingEntrancePending())cv::putText(shown,
-                        traffic.parkingEdgeEstimated?"ENTRY: EDGE OFFSET":"ENTRY: APPROACH / WAIT LEFT OPENING",
+                        traffic.parkingEntryFallback?"ENTRY: BOUNDED LEFT GUIDANCE":traffic.parkingEdgeEstimated?"ENTRY: EDGE OFFSET":"ENTRY: APPROACH",
                         {6,44},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
                 }
                 for(size_t i=0;i<corners.size();++i)if(frozen) {

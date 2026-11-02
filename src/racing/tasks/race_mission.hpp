@@ -76,8 +76,8 @@ public:
             (parkCaptured<=0||ai.captured-parkCaptured<=.30);
         parkCount=park?(continuous?std::min(3,parkCount+1):1):0;
         previousParkBox=park?box:cv::Rect{};parkCaptured=ai.captured;
-        // Diagnostic sign-size cue only. RaceManager authorizes entry from
-        // near connected road geometry; this flag must never trigger a turn.
+        // Sign size starts the approach-distance estimate, never an immediate
+        // turn. Near road geometry or bounded approach fallback authorizes entry.
         if(parkStageEligible()&&!parkTurnNear){
             const bool close=park&&((box.width>=96&&box.height>=48)||(box.width>=48&&box.height>=64));
             parkNearCount=close?(continuous?std::min(2,parkNearCount+1):1):0;
@@ -121,7 +121,7 @@ public:
         {"park_model_score",parkModelScore},{"park_evidence",parkEvidence},{"park_evidence_frames",parkCount},
         {"park_evidence_sequence",sequence},
         {"parking_entrance_near",parkTurnNear},{"parking_near_frames",parkNearCount},
-        {"parking_turn_trigger","near_left_road_opening_not_sign_size"},
+        {"parking_turn_trigger","near_left_opening_or_approach_command_distance_fallback"},
         {"park_shape_box",{parkShapeBox.x,parkShapeBox.y,parkShapeBox.width,parkShapeBox.height}},
         {"park_stage_eligible",parkStageEligible()},
         {"route_policy","beijing_lap1_flow_signed_fork_lap2_parking"},

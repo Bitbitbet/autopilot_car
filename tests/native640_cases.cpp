@@ -422,6 +422,25 @@ int main(int argc,char **argv){try{
         require(std::abs(mission.speedLimit(.5,.30)-.30)<1e-5&&std::abs(mission.speedLimit(.2,.30)-.2)<1e-5,"Parking cap changed");
         std::cout<<"PASS parking entrance edge offset; large sign alone rejected; distant/right/curve isolation; continuous near opening; countersteer and recovery; unchanged area cap\n";
     }
+    {
+        RaceEntranceProgress stationary;for(int i=0;i<100;++i)stationary.approachStep(.07,true,true,false,0);
+        require(!stationary.fallbackReady(true),"Stationary PARK wait triggers blind turn");
+        for(bool visible:{false,true}){
+            RaceManager manager(config);RaceSnapshot s;RacePlan p;bool started=false;float firstDistance=0;
+            cv::Mat absent=cv::Mat::zeros(480,640,CV_8UC1);
+            for(int i=1;i<=120;++i){
+                s.sequence=i;s.captured=i*.07;s.detections=visible?std::vector<PredictResult>{box(LABEL_PARK)}:std::vector<PredictResult>{};
+                p=manager.update(s,s.captured,.07,true,absent,track,{},false,true,-1,true,true,.30,
+                    {true,true,0,0,.30},true,true);
+                if(p.parkingEntryFallback&&!started){started=true;firstDistance=p.parkingApproachCommandM;
+                    require(p.guideDirection==-1&&p.guidePwm>=360,"Missing edge fallback does not actively turn left");}
+                require(!p.stop,"Missing entrance edge stops instead of recovery");
+            }
+            require(started&&firstDistance>=(visible?.55f:.35f)&&firstDistance<(visible?.59f:.39f),"Approach delay absent or unbounded");
+            require(p.guidePwm==0&&p.alignRoad,"Parking fallback leaves full lock indefinitely");
+        }
+        std::cout<<"PASS parking entrance bounded fallback; command approach delay; missing edge progresses; visible sign delay; pulse ends; stationary isolation\n";
+    }
     {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
      for(int i=0;i<8;++i)settings.adjust('+');
      for(int i=0;i<4;++i){settings.adjust(']');settings.adjust('.');settings.adjust('k');}
