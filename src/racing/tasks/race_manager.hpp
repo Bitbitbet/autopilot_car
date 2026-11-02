@@ -139,6 +139,34 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
     return out;
 }
 
+// Previous applied command and current-road pilot feedback. Command distance
+// is an estimate, not odometry or proof of physical clearance of a sign.
+struct RaceForkFeedback {
+    bool available=false,roadReady=false;
+    float offset=0,heading=0,speed=0;
+};
+struct RaceYForkProgress {
+    float elapsed=0,pulsePhase=0,commandDistance=0,clearTime=0,trackingTime=0;
+    void update(float dt,bool newObservation,bool signPresent,const RaceForkFeedback &road) {
+        elapsed+=dt;
+        const float speed=road.available&&std::isfinite(road.speed)?std::max(0.f,road.speed):.20f;
+        // Preserve the successful .20 m/s pulse distance at slower speeds,
+        // but always end the pulse within 2.8 s, including a stalled vehicle.
+        pulsePhase=std::max(pulsePhase+dt*std::min(speed/.20f,1.f),elapsed*.5f);
+        if(road.available)commandDistance+=speed*dt;
+        if(signPresent){clearTime=trackingTime=0;return;}
+        if(!newObservation)return;
+        clearTime+=dt;
+        // A curved road need not be parallel to the camera. Require sustained
+        // local tracking, not a perfectly straight far corridor.
+        if(pulsePhase>=1.4f&&road.available&&road.roadReady&&road.speed>0&&
+           std::isfinite(road.offset)&&std::isfinite(road.heading)&&
+           std::abs(road.offset)<64&&std::abs(road.heading)<60)trackingTime+=dt;
+        else trackingTime=0;
+    }
+    bool complete()const{return pulsePhase>=1.4f&&commandDistance>=.30f&&clearTime>=.60f&&trackingTime>=.60f;}
+};
+
 struct RacePlan {
     float speedCap=10.f;
     bool stop=false,buzzer=false,fresh=false;
@@ -146,6 +174,8 @@ struct RacePlan {
     bool alignRoad=false;
     bool gateWaiting=false,gateOpened=false;
     int guideDirection=0;
+    int completedDirection=0;
+    float forkCommandDistance=0,forkTrackingTime=0,forkSignClearTime=0,forkPulsePhase=0;
     float guidePwm=0;
     float laneBlend=1; // 0: sign guidance; 1: selected-road pilot, including countersteer.
     int colorRejectedComponents=0,geometrySplitRows=0;
@@ -169,6 +199,7 @@ class RaceManager {
     bool hazardConeWaiting=false;
     int direction=0;bool routeArmed=false;
     double seekSince=-1;
+    RaceYForkProgress yProgress;
     float targetVisibleTime=0,handoffTime=0,alignedTime=0,handoffPwm=300;
     float targetCenter=std::numeric_limits<float>::quiet_NaN();
     enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
@@ -255,7 +286,7 @@ public:
         return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
     }
     RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track,
-                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false,float parkingAreaSpeed=0) {
+                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false,float parkingAreaSpeed=0,const RaceForkFeedback &road={}) {
         now=time;
         RacePlan p;
         p.gateWaiting=gateWaiting;
@@ -278,6 +309,7 @@ public:
         }
         if(!active) { p.state="MANUAL"; p.reason="MANUAL"; return p; }
         if(!p.fresh) {
+            yProgress.clearTime=yProgress.trackingTime=0;
             p.stop=true; p.state="AI_WAIT"; p.reason=snap.failed?"AI_FAILED":"AI_STALE";
             counts.fill(0); confirmed.fill(false); splitTime=exitTime=0;
             // 无新观测时不累计恢复或穿越时间，也不能沿用旧方向继续完成动作。
@@ -346,6 +378,7 @@ public:
             }
         }
         if(gateWaiting||hazardWaiting) {
+            yProgress.clearTime=yProgress.trackingTime=0;
             if(seekSince>=0)seekSince+=dt;
             if(state==State::ForkArmed||state==State::ForkSelect){stateSince+=dt;directionUntil+=dt;}
             // 高优先级停车叠加在当前任务之上，不丢失信号灯等待等低优先级义务。
@@ -400,10 +433,21 @@ public:
             else if(leftSign&&rightSign) { direction=0; }
             else if(leftSign||rightSign) {
                 direction=leftSign?-1:1;routeArmed=false;
+                yProgress={};
                 directionUntil=now+cfg.directionMemory; enter(State::ForkArmed);
             }
             else if(seen(LABEL_FLOW)&&geometry.splitRows>=cfg.minBranchRows) {
                 direction=2;routeArmed=false;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
+            }
+        }
+        if(!routeArmed&&(direction==-1||direction==1)&&(state==State::ForkArmed||state==State::ForkSelect)) {
+            yProgress.update(dt,newFrame,counts[LABEL_YLEFT]||counts[LABEL_YRIGHT]||counts[LABEL_LEFT],road);
+            p.forkCommandDistance=yProgress.commandDistance;p.forkTrackingTime=yProgress.trackingTime;
+            p.forkSignClearTime=yProgress.clearTime;p.forkPulsePhase=yProgress.pulsePhase;
+            if(yProgress.complete()) {
+                p.completedDirection=direction;enter(State::Lane);cooldownUntil=now+cfg.cooldown;
+                p.state=limited?"LIMIT_ZONE":"LANE";p.reason="SIGNED_FORK_CURRENT_ROAD_REJOINED";
+                p.alignRoad=true;return p; // release only the fork cap; traffic limits remain
             }
         }
         if(state==State::ForkArmed) {
@@ -413,7 +457,7 @@ public:
                 // 31..103, never reaching the old ground-object row145 gate.
                 // Confirmed sign direction itself starts the road search.
                 if(seekSince<0)seekSince=now;
-                p.guidePwm=guidancePwm(now-seekSince);p.laneBlend=0;
+                p.guidePwm=guidancePwm(routeArmed?now-seekSince:yProgress.pulsePhase);p.laneBlend=0;
             }
             p.speedCap=std::min(p.speedCap,forkSpeed);
             p.state="FORK_ARMED"; p.reason=direction<0?"WAIT_LEFT_SPLIT":"WAIT_RIGHT_SPLIT";
@@ -437,7 +481,7 @@ public:
                         const double elapsed=now-seekSince;
                         p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
                         p.reason="STRONG_SIGN_GUIDANCE_FIND_TARGET_ROAD";
-                        p.guidePwm=guidancePwm(elapsed);p.laneBlend=0;
+                        p.guidePwm=guidancePwm(routeArmed?elapsed:yProgress.pulsePhase);p.laneBlend=0;
                         const auto candidate=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true);
                         float nearCenter=0,farCenter=0,heading=0,unionNear=0,unionFar=0,unionHeading=0;
                         const bool visible=corridorCenters(candidate,nearCenter,farCenter,heading);
@@ -448,7 +492,7 @@ public:
                         // After the initial Y turn, a connected single road can
                         // be off-centre/tilted: requiring it to be aligned before
                         // allowing alignment control is a circular dependency.
-                        const bool centeredAfterTurn=!routeArmed&&elapsed>=1.0&&geometry.splitRows==0&&
+                        const bool centeredAfterTurn=!routeArmed&&yProgress.pulsePhase>=1.0&&geometry.splitRows==0&&
                             std::abs(nearCenter-320)<130;
                         const bool target=visible&&(splitTarget||sameTarget||centeredAfterTurn||
                             (direction*(farCenter-nearCenter)>40&&direction*(farCenter-320)>20));
@@ -500,6 +544,7 @@ public:
             else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0&&aligned) {
                 exitTime+=dt;
                 if(exitTime>=cfg.forkExitTime) {
+                    p.completedDirection=direction;
                     enter(State::Lane); cooldownUntil=now+cfg.cooldown;
                     p.selectedBranch=false; p.path={};
                     p.guideDirection=0;
@@ -519,7 +564,8 @@ public:
             // Seek the committed side again, then reacquire current road edges.
             enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.4);
             p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
-            p.guidePwm=p.guideDirection?guidancePwm(now-seekSince):0;p.laneBlend=p.guideDirection?0:1;
+            yProgress.pulsePhase=std::max(yProgress.pulsePhase,1.4f);
+            p.guidePwm=p.guideDirection?guidancePwm(routeArmed?now-seekSince:yProgress.pulsePhase):0;p.laneBlend=p.guideDirection?0:1;
             if(p.guidePwm<=0){p.guideDirection=0;p.alignRoad=true;}
             p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";
         }

@@ -14,6 +14,31 @@ static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--fork-exit-field") {
+        std::ifstream input(fs::path(argv[1])/"parking-control.jsonl");require(bool(input),"Missing fork telemetry");
+        RaceYForkProgress progress;std::string line;bool started=false;uint64_t previousSequence=0,completed=0;
+        RaceForkFeedback previous;double pulseEndDistance=0;
+        while(std::getline(input,line)) {
+            const auto r=nlohmann::json::parse(line);const std::string state=r.at("traffic_state");
+            if(state=="FORK_SEEK_LEFT"||state=="FORK_SEEK_RIGHT")started=true;
+            const auto sequence=r.at("ai_sequence").get<uint64_t>();
+            bool sign=false;for(const auto &d:r.at("ai_detections"))
+                if(d.at("accepted").get<bool>()&&(d.at("type")==LABEL_YLEFT||d.at("type")==LABEL_YRIGHT||d.at("type")==LABEL_LEFT))sign=true;
+            const auto dt=r.at("control_dt_s").get<float>();
+            if(started&&state.find("FORK")!=std::string::npos&&dt>0&&dt<=.25&&r.at("ai_age_s").get<float>()<=.30) {
+                progress.update(dt,sequence!=previousSequence,sign,previous);
+                if(!pulseEndDistance&&progress.pulsePhase>=1.4f)pulseEndDistance=progress.commandDistance;
+                if(progress.complete()){completed=r.at("frame");break;}
+            }
+            previousSequence=sequence;
+            previous={true,r.at("lane_ready").get<bool>()&&r.at("lane_alignment_valid").get<bool>(),
+                r.at("lane_alignment_offset_px"),r.at("lane_alignment_heading_px"),r.at("command_speed")};
+        }
+        require(completed!=0,"Recorded recovered road never releases fork cap");
+        std::cout<<"PASS recorded fork exit policy frame="<<completed<<" pulse_command_m="<<pulseEndDistance
+            <<" tracking_s="<<progress.trackingTime<<" total_command_m="<<progress.commandDistance
+            <<" (telemetry policy replay, not image or vehicle validation)\n";return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--park-switch-field") {
         RaceMission mission;mission.start();std::ifstream input(fs::path(argv[1])/"parking-control.jsonl");
         require(bool(input),"Missing recorded parking-sign telemetry");std::string line;uint64_t triggered=0;
@@ -296,6 +321,36 @@ int main(int argc,char **argv){try{
             "Confirmed parking entrance cannot preempt pending same/opposite Y task");
     }
     std::cout<<"PASS switched PARK preempts unfinished same/opposite Y; finite stronger initial pulse\n";
+    {
+        for(float speed:{.10f,.15f,.20f}) {
+            RaceYForkProgress progress;RaceForkFeedback road{true,true,20,35,speed};
+            while(progress.pulsePhase<1.4f)progress.update(.01,true,true,road);
+            require(progress.commandDistance>=.275&&progress.commandDistance<.285,"Y pulse distance depends on slow fork speed");
+            require(!progress.complete(),"Visible sign releases fork cap");
+        }
+        RaceYForkProgress stationary;for(int i=0;i<300;++i)stationary.update(.01,true,false,{true,true,0,0,0});
+        require(stationary.pulsePhase>=1.4&&!stationary.complete(),"Stationary car completes fork or leaves full lock indefinitely");
+        RaceYForkProgress reused;for(int i=0;i<100;++i)reused.update(.07,false,false,{true,true,0,0,.2});
+        require(!reused.complete(),"Repeated AI frame confirms fork exit");
+        for(int direction:{-1,1})for(bool selected:{false,true}) {
+            RaceManager manager(config);RaceMission mission;mission.start();RaceSnapshot s;RacePlan p;
+            cv::Mat absent=cv::Mat::zeros(480,640,CV_8UC1);int sequence=0;bool completed=false;
+            auto step=[&](bool sign,bool ready,float offset=25,float heading=35) {
+                s.sequence=++sequence;s.captured=sequence*.07;s.detections=sign?std::vector<PredictResult>{box(direction<0?LABEL_YLEFT:LABEL_YRIGHT)}:std::vector<PredictResult>{};
+                p=manager.update(s,s.captured,.07,true,selected?split:absent,track,{},false,true,0,true,false,.20,
+                    {true,ready,offset,heading,.20});mission.observe(s,p,false);
+            };
+            for(int j=0;j<45;++j){step(true,true);if(j>config.confirmFrames)
+                require(!p.completedDirection&&p.speedCap<=.201,"Visible sign prematurely ends task");}
+            for(int j=0;j<15;++j){step(false,false);require(!p.completedDirection,"No road feedback completes fork");}
+            for(int j=0;j<15;++j){step(false,true,100,90);require(!p.completedDirection,"Poor tracking completes fork");}
+            for(int j=0;j<20;++j){step(false,true);if(p.completedDirection){completed=true;break;}}
+            require(completed&&p.completedDirection==direction&&p.speedCap>.20&&!p.stop&&p.guidePwm==0,"Curved recovered road retains fork speed or bias");
+            require(std::string(mission.name())=="LAP1_RETURN_PRESS_N_AT_START","Recovered fork completion never reaches mission state");
+            step(false,true);require(p.speedCap>.20&&p.completedDirection==0,"Fork cap reapplied or completion event repeated");
+        }
+        std::cout<<"PASS speed-aware finite Y pulse; fresh curved-road exit from seek/select; fork cap and mission release\n";
+    }
     {TrackviewConfig c;RaceSpeedSettings settings(c,.15f);RaceTaskPilot p(c);
      for(int i=0;i<8;++i)settings.adjust('+');
      for(int i=0;i<4;++i){settings.adjust(']');settings.adjust('.');settings.adjust('k');}

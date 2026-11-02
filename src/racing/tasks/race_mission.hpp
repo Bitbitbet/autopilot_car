@@ -93,7 +93,9 @@ public:
     void observe(const RaceSnapshot &ai,const RacePlan &traffic,bool fullMouth) {
         if(!running()||!traffic.fresh)return;
         const bool turning=traffic.selectedBranch;
-        const bool finished=branch&&!turning&&(std::string(traffic.state)=="LANE"||std::string(traffic.state)=="LIMIT_ZONE");
+        const bool finished=!traffic.stop&&!turning&&(branch||traffic.completedDirection!=0)&&
+            (std::string(traffic.state)=="LANE"||std::string(traffic.state)=="LIMIT_ZONE");
+        if(traffic.completedDirection)branchDirection=traffic.completedDirection;
         if(finished) {
             if(stage==Stage::FirstFork&&(branchDirection==-1||branchDirection==1)){
                 stage=Stage::FirstReturn;parkCount=0;reason="LAP1_SIGNED_FORK_COMPLETED";

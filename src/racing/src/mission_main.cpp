@@ -542,7 +542,8 @@ int raceVehicleMain(int argc,char **argv) {
             const auto bypass=virtualBypass?virtualBoundary.decision(navigation,mode==Mode::Auto):
                 bypassEnabled?bypassControl.update(navigation,observation,raceConfig,observationTime,mode==Mode::Auto):RaceBypassDecision{};
             if(navigationWorker&&bypassEnabled)navigationWorker->setControlState(mode==Mode::Auto,bypassControl.engaged());
-            auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image,bypass.authorizeCone,false,0,virtualBypass);
+            auto racePlan=raceManager.update(observation,observationTime,dt,mode==Mode::Auto,bin,track,image,bypass.authorizeCone,false,0,virtualBypass,false,0,
+                {true,pilot.ready&&pilot.alignment.valid&&!bypass.involved,pilot.alignment.offset,pilot.alignment.heading,speed});
             const bool laneTask=std::string(racePlan.state)=="LANE"||std::string(racePlan.state)=="LIMIT_ZONE";
             if(bypassEnabled||virtualBypass) {
                 std::vector<PointX> left,right;
@@ -634,6 +635,9 @@ int raceVehicleMain(int argc,char **argv) {
                     {"ai_captured_s",observation.captured},{"control_time_s",observationTime},
                     {"state",racePlan.state},{"reason",racePlan.reason},{"selected_branch",racePlan.selectedBranch},
                     {"guide_direction",racePlan.guideDirection},{"guide_pwm",racePlan.guidePwm},{"lane_blend",racePlan.laneBlend},
+                    {"fork_completed_direction",racePlan.completedDirection},{"fork_command_distance_m",racePlan.forkCommandDistance},
+                    {"fork_tracking_seconds",racePlan.forkTrackingTime},{"fork_sign_clear_seconds",racePlan.forkSignClearTime},
+                    {"fork_pulse_phase",racePlan.forkPulsePhase},{"geometry_split_rows",racePlan.geometrySplitRows},
                     {"geometry_split_rows",racePlan.geometrySplitRows},{"geometry_reason",racePlan.geometryReason},
                     {"road_surface",config.roadSurface},{"speed_command",speed},{"pwm",servo},
                     {"lane_image_binding","current control frame; camera.png is asynchronous AI frame"}};

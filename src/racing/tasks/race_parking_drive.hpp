@@ -136,7 +136,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 auto traffic=manager.update(ai,before,dt,missionEnabled?missionAutomatic:true,bin,track,image,
                     virtualDecision.authorizeCone,true,missionEnabled?mission.routeDirection():0,missionEnabled,
                     missionEnabled&&((mission.parkingApproach()&&mission.routeDirection()==-1)||mission.exitArrowTurnAuthorized()),
-                    missionEnabled&&mission.parkingSpeedLimited()?raceConfig.parkingSpeed:speedSettings.fork);
+                    missionEnabled&&mission.parkingSpeedLimited()?raceConfig.parkingSpeed:speedSettings.fork,
+                    {true,pilot.ready&&pilot.alignment.valid&&!virtualDecision.involved&&!armed,
+                     pilot.alignment.offset,pilot.alignment.heading,previousSpeed});
                 if(missionEnabled)mission.observeGate(traffic);
                 else if(controller.done()) {
                     if(traffic.gateWaiting)standaloneExitGateSeen=true;
@@ -418,6 +420,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["virtual_correction_pwm"]=virtualFeedback.correction();row["virtual_error_px"]=virtualPilot.error;
                     row["traffic_state"]=traffic.state;row["traffic_reason"]=traffic.reason;row["parking_state"]=command.state;
                     row["guide_direction"]=traffic.guideDirection;row["guide_pwm"]=traffic.guidePwm;row["lane_blend"]=traffic.laneBlend;
+                    row["fork_completed_direction"]=traffic.completedDirection;row["fork_command_distance_m"]=traffic.forkCommandDistance;
+                    row["fork_tracking_seconds"]=traffic.forkTrackingTime;row["fork_sign_clear_seconds"]=traffic.forkSignClearTime;
+                    row["fork_pulse_phase"]=traffic.forkPulsePhase;row["geometry_split_rows"]=traffic.geometrySplitRows;
                     row["lane_alignment_valid"]=pilot.alignment.valid;row["lane_alignment_offset_px"]=pilot.alignment.offset;
                     row["lane_alignment_heading_px"]=pilot.alignment.heading;row["lane_alignment_pwm"]=pilot.alignment.servo;
                     row["parking_rejoin_aligning"]=rejoinAligning;
@@ -438,6 +443,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"parking_side",bayFrame.side<0?"left":"right"},{"task_cruise_limit",taskCruise},
                     {"cruise_setting",cruise},{"curve_setting",speedSettings.curve},{"degraded_setting",speedSettings.degraded},
                     {"fork_setting",speedSettings.fork},{"traffic_speed_cap",traffic.speedCap},
+                    {"fork_completed_direction",traffic.completedDirection},{"fork_command_distance_m",traffic.forkCommandDistance},
+                    {"fork_tracking_seconds",traffic.forkTrackingTime},{"fork_sign_clear_seconds",traffic.forkSignClearTime},
+                    {"fork_pulse_phase",traffic.forkPulsePhase},{"geometry_split_rows",traffic.geometrySplitRows},
                     {"lane_alignment_valid",pilot.alignment.valid},{"lane_alignment_offset_px",pilot.alignment.offset},
                     {"lane_alignment_heading_px",pilot.alignment.heading},{"lane_alignment_pwm",pilot.alignment.servo},
                     {"parking_rejoin_aligning",rejoinAligning},
