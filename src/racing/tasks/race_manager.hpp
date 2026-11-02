@@ -273,6 +273,7 @@ class RaceManager {
     float entranceOpeningTime=0;
     RaceEntranceProgress entranceProgress;
     bool entranceGuided=false;
+    bool entranceGatePassed=false;
     float targetVisibleTime=0,handoffTime=0,alignedTime=0,handoffPwm=300;
     float targetCenter=std::numeric_limits<float>::quiet_NaN();
     enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
@@ -381,7 +382,7 @@ public:
         if(active!=lastActive) {
             // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
             if(state!=State::ReviewStop&&state!=State::Fault) { enter(State::Lane); direction=0;routeArmed=false; }
-            counts.fill(0); confirmed.fill(false); lastActive=active;entranceOpeningTime=0;entranceProgress={};entranceGuided=false;
+            counts.fill(0); confirmed.fill(false); lastActive=active;entranceOpeningTime=0;entranceProgress={};entranceGuided=false;entranceGatePassed=false;
         }
         if(!active) { p.state="MANUAL"; p.reason="MANUAL"; return p; }
         if(!p.fresh) {
@@ -444,6 +445,11 @@ public:
                 else gateClearSince=-1;
                 if(gateClearSince>=0&&now-gateClearSince>=std::max(cfg.clearTime,cfg.gateHoldTime)) {
                     gateWaiting=false;gateAtSensor=false;p.gateOpened=true;gatePassCommandRemaining=.40f;
+                    // The entrance road has already been acquired. Its gate
+                    // release is a stronger phase landmark than requiring the
+                    // branched parking aisle to look like a single straight road.
+                    if(parkingEntrance&&routeArmed&&direction==-1&&state==State::ForkSelect)
+                        entranceGatePassed=true;
                     p.speedCap=std::min(p.speedCap,cfg.parkingSpeed);
                 }
             }
@@ -516,6 +522,15 @@ public:
             return p;
         }
         const bool leftSign=seen(LABEL_YLEFT)||seen(LABEL_LEFT),rightSign=seen(LABEL_YRIGHT);
+        if(!parkingEntrance)entranceGatePassed=false;
+        if(parkingEntrance&&entranceGatePassed&&state==State::ForkSelect) {
+            entranceGatePassed=false;routeArmed=false;
+            p.completedDirection=-1;enter(State::Lane);cooldownUntil=now+cfg.cooldown;
+            p.alignRoad=true;p.state=limited?"LIMIT_ZONE":"LANE";
+            p.reason="PARKING_ENTRANCE_GATE_RELEASED_FIND_BAY";
+            p.speedCap=std::min(p.speedCap,forkSpeed);
+            return p;
+        }
         // A confirmed mission entrance is a new maneuver, even if the old Y
         // task never declared completion and happens to have the same direction.
         if(confirmedRouteSign&&routeDirection&&(!routeArmed||routeDirection!=direction)&&

@@ -29,6 +29,11 @@ public:
     bool parkingRun()const{return stage==Stage::ParkingRun;}
     bool parkingEntrancePending()const{return stage==Stage::SecondFork&&parkingSign;}
     bool parkingEntranceNear()const{return parkTurnNear;}
+    bool canScanParkingBays(const RacePlan &traffic)const {
+        return (stage==Stage::ParkingApproach||parkingSearch()||
+            (parkingEntrancePending()&&traffic.completedDirection==-1))&&
+            !traffic.stop&&!traffic.gateWaiting;
+    }
     bool exitArrowTurnAuthorized()const{return stage==Stage::ParkingExit&&exitArrowConfirmed;}
     void observeExitArrow(const RaceGroundArrow &arrow,uint64_t frame,bool fresh){
         if(stage!=Stage::ParkingExit||lab||!fresh||frame<=exitArrowFrame)return;

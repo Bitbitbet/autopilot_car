@@ -156,7 +156,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     // Bay search cannot be consumed until the entrance turn
                     // finishes. Avoid a full 640px mouth scan on every turning
                     // frame, which competes with the 250ms command watchdog.
-                    auto visibleCandidates=missionAutomatic&&mission.parkingZone()&&!mission.parkingEntrancePending()&&!traffic.gateWaiting&&!taught?
+                    auto visibleCandidates=missionAutomatic&&mission.canScanParkingBays(traffic)&&!taught?
                         scanMouths():std::vector<RaceParkingMouthCandidate>{};
                     baySearch.filter(visibleCandidates);
                     const bool visibleMouth=!visibleCandidates.empty();
@@ -445,6 +445,10 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["lane_alignment_valid"]=pilot.alignment.valid;row["lane_alignment_offset_px"]=pilot.alignment.offset;
                     row["lane_alignment_heading_px"]=pilot.alignment.heading;row["lane_alignment_pwm"]=pilot.alignment.servo;
                     row["parking_rejoin_aligning"]=rejoinAligning;
+                    row["parking_bay_scan_allowed"]=mission.canScanParkingBays(traffic);
+                    row["parking_bay_scan_performed"]=mouthsScanned;
+                    row["parking_bay_candidates"]=liveMouths.size();
+                    row["parking_search_feedback"]=teachingFeedback;
                     row["cruise_setting"]=cruise;row["task_cruise_limit"]=taskCruise;
                     row["curve_setting"]=speedSettings.curve;row["degraded_setting"]=speedSettings.degraded;
                     row["fork_setting"]=speedSettings.fork;row["traffic_speed_cap"]=traffic.speedCap;

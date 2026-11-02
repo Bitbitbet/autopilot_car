@@ -425,6 +425,52 @@ int main(int argc,char **argv){try{
         require(p.completedDirection==-1&&!p.stop,"Aligned entrance cannot complete");
         require(std::abs(mission.speedLimit(.5,.30)-.30)<1e-5&&std::abs(mission.speedLimit(.2,.30)-.2)<1e-5,"Parking cap changed");
         std::cout<<"PASS parking entrance edge offset; large sign alone rejected; distant/right/curve isolation; continuous near opening; countersteer and recovery; unchanged area cap\n";
+
+        // Reproduce the field sequence: acquire entrance, wait at its gate,
+        // then see bay-shaped splits forever. Gate release must hand off to
+        // bay search instead of demanding zero split rows / far-road alignment.
+        {
+            RaceMission m;m.start();RaceManager gates(config);RaceSnapshot snap;
+            RacePlan result;int n=0;
+            auto tick=[&](std::vector<PredictResult> detections,bool visibleBay=false){
+                snap.sequence=++n;snap.captured=n*.07;snap.detections=std::move(detections);
+                m.observeSigns(snap,true);
+                result=gates.update(snap,snap.captured,.07,true,nearMouth,entranceTrack,{},true,true,
+                    m.routeDirection(),true,m.parkingEntrancePending(),.30,{},m.parkingEntrancePending(),true);
+                m.observeGate(result);
+                const bool scan=m.canScanParkingBays(result);
+                m.observe(snap,result,scan&&visibleBay);
+                return scan;
+            };
+            for(int j=0;j<8;++j)tick({box(LABEL_PARK,500,2,110,80)});
+            require(result.selectedBranch&&m.parkingEntrancePending(),"Gate search case has not acquired entrance");
+            for(int j=0;j<6;++j){
+                const bool scan=tick({box(LABEL_GATE,100,350,440,70)},true);
+                require(result.gateWaiting&&!scan&&!m.parkingSearch(),"Closed entrance gate starts bay search");
+            }
+            bool finished=false;
+            for(int j=0;j<26&&!finished;++j){
+                const bool scan=tick({box(LABEL_GATE,500,120,40,210)},true);
+                if(result.gateOpened){
+                    require(result.completedDirection==-1&&!result.selectedBranch&&result.guidePwm==0&&result.alignRoad,
+                        "Gate release leaves entrance steering committed");
+                    require(scan&&m.parkingSearch()&&!m.parkingEntrancePending(),"Gate release fails to scan visible bay in same frame");
+                    finished=true;
+                }
+            }
+            require(finished,"Entrance gate never hands off to bay search");
+            m.parkingStarted();
+            require(m.parkingRun(),"Automatic bay plan cannot arm after entrance handoff");
+            for(int j=0;j<10;++j){tick({});require(!result.completedDirection&&!result.selectedBranch,
+                "Entrance turn restarts after gate handoff");}
+            RaceMission approachOnly;approachOnly.start();
+            for(int j=1;j<=3;++j){snap.sequence=j;snap.detections={box(LABEL_PARK)};approachOnly.observeSigns(snap,true);}
+            RacePlan unrelated;unrelated.fresh=true;unrelated.gateOpened=true;unrelated.state="LANE";
+            approachOnly.observeGate(unrelated);approachOnly.observe(snap,unrelated,true);
+            require(approachOnly.parkingEntrancePending()&&!approachOnly.canScanParkingBays(unrelated),
+                "Unrelated gate opening skips unstarted entrance turn");
+            std::cout<<"PASS entrance acquired gate release starts bay scan and maneuver; closed gate and unstarted turn excluded; no repeated left turn\n";
+        }
     }
     {
         RaceEntranceProgress stationary;for(int i=0;i<100;++i)stationary.approachStep(.07,true,true,false,0);
