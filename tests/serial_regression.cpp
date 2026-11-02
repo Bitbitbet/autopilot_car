@@ -47,14 +47,23 @@ int main() {
             check(car->hasFault(),"watchdog did not latch");
             auto s=frames(); check(!s.empty() && s.back()==0,"watchdog omitted stop");
             car->carControl(0.5f,1700); s=frames(); check(s.back()==0,"expired command restarted car");
+            check(!car->hardFault()&&car->commandTimedOut(),"Watchdog confused with serial/exit fault");
+            check(!car->recoverCommandTimeout(car->motionEpoch()+1),"Wrong epoch cleared watchdog");
+            check(car->recoverCommandTimeout(car->motionEpoch()),"Fresh caller cannot acknowledge stopped watchdog");
+            s=frames();check(s.back()==0&&!car->hasFault(),"Watchdog recovery replayed motion");
+            car->carControl(.2f,1500);s=frames();check(s.back()==.2f,"Next decision cannot resume after watchdog");
+            std::this_thread::sleep_for(std::chrono::milliseconds(160));
+            car->pauseMotion();check(!car->recoverCommandTimeout(car->motionEpoch()),"Watchdog recovery bypassed operator pause");
             car.reset(); close(LibSerial::peerFd);
         }
         std::cout<<"PASS stalled main loop watchdog and restart veto\n";
+        std::cout<<"PASS explicit stopped watchdog recovery; fresh decision required; operator epoch preserved\n";
         {
             auto car=CarControl::create(); frames(); car->carControl(0.12f,1500); frames();
             shutdown(LibSerial::deviceFd,SHUT_RD); // 模拟接收失败，同时保持写入可用。
             std::this_thread::sleep_for(std::chrono::milliseconds(60));
             check(car->hasFault(),"receive failure not published");
+            check(car->hardFault()&&!car->recoverCommandTimeout(car->motionEpoch()),"Serial failure auto-recovered");
             auto s=frames(); check(!s.empty() && s.back()==0,"receive failure omitted stop");
             car->carControl(0.25f,1500); s=frames(); check(s.back()==0,"receive fault allowed motion");
             car.reset(); close(LibSerial::peerFd);
@@ -82,6 +91,7 @@ int main() {
             check(car->resumeMotion(car->motionEpoch()),"explicit new rearm rejected");
             car->carControl(0.2f,1600); s=frames(); check(s.back()==0.2f,"rearm did not restore control");
             car->latchStop(); check(!car->resumeMotion(car->motionEpoch()),"exit latch cleared");
+            check(car->hardFault()&&!car->recoverCommandTimeout(car->motionEpoch()),"Exit latch cleared by watchdog recovery");
             car.reset(); close(LibSerial::peerFd);
         }
         std::cout<<"PASS stop/rearm epochs and exit race veto\n";

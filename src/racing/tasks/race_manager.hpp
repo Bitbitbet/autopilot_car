@@ -279,6 +279,8 @@ class RaceManager {
     State state=State::Lane;
     const char *reviewReason="REVIEW_REQUIRED";
     PredictResult gateBox{};
+    bool gateAtSensor=false;
+    float gatePassCommandRemaining=0;
     void enter(State s) { state=s; stateSince=now; splitTime=exitTime=0;seekSince=-1;
         targetVisibleTime=handoffTime=alignedTime=0;targetCenter=std::numeric_limits<float>::quiet_NaN(); }
     // Experimental PWM demand, not a calibrated wheel angle. Use the existing
@@ -387,7 +389,9 @@ public:
             p.stop=true; p.state="AI_WAIT"; p.reason=snap.failed?"AI_FAILED":"AI_STALE";
             counts.fill(0); confirmed.fill(false); splitTime=exitTime=0;entranceOpeningTime=0;
             // 无新观测时不累计恢复或穿越时间，也不能沿用旧方向继续完成动作。
-            if(state==State::ForkSelect) { enter(State::Fault); reviewReason="FORK_AI_STALE"; }
+            // During the parking entrance, a temporary data hold must not
+            // turn the recovered watchdog into a permanent route fault.
+            if(state==State::ForkSelect&&!parkingEntrance) { enter(State::Fault); reviewReason="FORK_AI_STALE"; }
             gateClearSince=hazardClearSince=-1; return p;
         }
         if(!std::isfinite(dt)||dt<=0||dt>0.25f) { p.stop=true; p.state="FRAME_WAIT"; p.reason="FRAME_GAP"; return p; }
@@ -396,6 +400,13 @@ public:
             else if(seen(LABEL_UNLIMIT)) limited=false;
         }
         if(limited) p.speedCap=cfg.limitedSpeed;
+        // Keep area speed through the just-opened gate even when mission
+        // observes exit release. Command distance is not measured clearance.
+        if(gatePassCommandRemaining>0){
+            p.speedCap=std::min(p.speedCap,cfg.parkingSpeed);
+            if(road.available&&std::isfinite(road.speed))
+                gatePassCommandRemaining=std::max(0.f,gatePassCommandRemaining-std::max(0.f,road.speed)*dt);
+        }
 
         // 施工区和泊车不能仅凭标签就宣称已完成；基础版明确停车等待专项规划验证。
         if(state!=State::ReviewStop&&state!=State::Fault&&newFrame&&
@@ -414,10 +425,15 @@ public:
         if(newFrame&&counts[LABEL_GATE]>0&&boxes[LABEL_GATE].y+boxes[LABEL_GATE].height>=cfg.triggerRow&&
            boxes[LABEL_GATE].width>=boxes[LABEL_GATE].height&&!gateWaiting) {
             gateBox=boxes[LABEL_GATE]; gateWaiting=true; gateClearSince=-1;
+            gateAtSensor=gateBox.y+gateBox.height>=cfg.gateStopRow;
         }
         if(gateWaiting) {
             if(newFrame) {
                 const auto &g=boxes[LABEL_GATE];
+                if(counts[LABEL_GATE]>0&&g.width>=g.height){
+                    gateBox=g;
+                    gateAtSensor|=g.y+g.height>=cfg.gateStopRow;
+                }
                 const float center=g.x+g.width*.5f;
                 // A raised bar may be above either end of its former horizontal
                 // footprint, not within 160px of the old box centre.
@@ -426,7 +442,10 @@ public:
                 const bool open=seen(LABEL_GATE)&&sameArea&&g.height>=60&&g.width<float(g.height)*cfg.gateOpenAspect;
                 if(open||gatePassageClear(snap,bin,currentImage)) { if(gateClearSince<0) gateClearSince=now; }
                 else gateClearSince=-1;
-                if(gateClearSince>=0&&now-gateClearSince>=cfg.clearTime) {gateWaiting=false;p.gateOpened=true;}
+                if(gateClearSince>=0&&now-gateClearSince>=std::max(cfg.clearTime,cfg.gateHoldTime)) {
+                    gateWaiting=false;gateAtSensor=false;p.gateOpened=true;gatePassCommandRemaining=.40f;
+                    p.speedCap=std::min(p.speedCap,cfg.parkingSpeed);
+                }
             }
         }
         p.gateWaiting=gateWaiting;
@@ -462,6 +481,15 @@ public:
             p.stop=true;
             p.state=gateWaiting?"GATE_WAIT":"OBSTACLE_WAIT";
             p.reason=gateWaiting?"GATE_NOT_VERIFIED_OPEN":hazardConeWaiting?"CONE_ROUTE_OR_RESTART_REQUIRED":"OBSTACLE_PLANNER_PENDING";
+            if(gateWaiting&&gateClearSince>=0&&!hazardWaiting){p.state="GATE_OPEN_DWELL";p.reason="OPEN_PASSAGE_ONE_SECOND_HOLD";}
+            // Approach the side sensor along the current road, rather than
+            // stopping as soon as the distant bar reaches the generic row.
+            // Missing/raised detections wait for release; never creep blindly.
+            if(gateWaiting&&!gateAtSensor&&!hazardWaiting&&state!=State::CrossApproach&&state!=State::SignalWait&&
+               counts[LABEL_GATE]>0&&boxes[LABEL_GATE].width>=boxes[LABEL_GATE].height){
+                p.stop=false;p.alignRoad=true;p.speedCap=std::min(p.speedCap,cfg.gateApproachSpeed);
+                p.state="GATE_APPROACH";p.reason="APPROACH_SENSOR_BEFORE_GATE_WAIT";
+            }
             return p;
         }
         if(state==State::CrossApproach) {

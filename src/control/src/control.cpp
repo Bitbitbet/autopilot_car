@@ -47,6 +47,7 @@ std::shared_ptr<CarControl> CarControl::create() {
 }
 
 void CarControl::latch_stop() {
+    stopLatched = true;
     commandExpired = true;
     resetVelocity();
 }
@@ -55,6 +56,13 @@ void CarControl::setCommandTimeout(int ms){if(ms<100||ms>1000)throw std::invalid
 void CarControl::pauseMotion(){std::lock_guard lock(writeMutex);++stopEpoch;motionAllowed=false;carControlLocked(0,PWMSERVOMID);}
 bool CarControl::resumeMotion(uint64_t expected){std::lock_guard lock(writeMutex);if(hasFault()||expected!=stopEpoch.load())return false;motionAllowed=true;return true;}
 void CarControl::checkCommandTimeout(){std::lock_guard lock(writeMutex);if(moving&&Clock::now()-lastCommand>=milliseconds(commandTimeoutMs)){commandExpired=true;carControlLocked(0,PWMSERVOMID);}}
+bool CarControl::recoverCommandTimeout(uint64_t expected){
+    std::lock_guard lock(writeMutex);
+    if(hardFault()||!motionAllowed.load()||expected!=stopEpoch.load()||!commandExpired.load())return false;
+    // Recovery only acknowledges a stopped watchdog. A fresh caller decision
+    // must issue the next motion command; never replay the expired command.
+    carControlLocked(0,PWMSERVOMID);commandExpired=false;return true;
+}
 
 void CarControl::recvThreadMain() {
     size_t index = 0;

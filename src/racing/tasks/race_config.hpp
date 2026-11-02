@@ -21,8 +21,11 @@ struct RaceConfig {
     bool stopAfterCross=true;
     int crossPassedRow=410;
     float crossClearTime=0.25f, stopHoldTime=1.f;
-    // 基础版不把“目标消失”当作道闸已经抬起，默认需要同一道闸变为竖直。
+    // 抬杆或持续可见的空通道可放行；仅一次漏检不能放行。
     float gateOpenAspect=0.75f;
+    int gateStopRow=410; // Experimental image row; tune at the physical sensor, not metres.
+    float gateApproachSpeed=.12f;
+    float gateHoldTime=1.f;
     bool verifyForkArrows=true; // 对左右岔路类别增加蓝底白箭头几何复核。
     std::string modelDirectory="../res/models/yolov3_mobilenet_v1";
     bool verifyStopCandidates=true;
@@ -33,7 +36,7 @@ struct RaceConfig {
         confirmFrames,limitedSpeed,forkSpeed,approachSpeed,parkingSpeed,directionMemory,
         forkConfirmTime,forkMinTime,forkMaxTime,forkExitTime,cooldown,minBranchWidth,
         minBranchGap,minBranchRows,triggerRow,obstacleRow,clearTime,stopAfterCross,
-        crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,verifyForkArrows,modelDirectory,
+        crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,gateStopRow,gateApproachSpeed,gateHoldTime,verifyForkArrows,modelDirectory,
         verifyStopCandidates,stopCandidateConfidence,verifyCrosswalkGeometry,crossCandidateConfidence)
     void validate() const {
         auto range=[](float v,float lo,float hi) { return std::isfinite(v)&&v>=lo&&v<=hi; };
@@ -48,7 +51,7 @@ struct RaceConfig {
            triggerRow<100||triggerRow>440||obstacleRow<100||obstacleRow>460||
            !range(clearTime,0.2f,3.f)||crossPassedRow<300||crossPassedRow>470||
            !range(crossClearTime,0.1f,2.f)||!range(stopHoldTime,0.1f,10.f)||
-           !range(gateOpenAspect,0.1f,1.f)||modelDirectory.empty()||
+           !range(gateOpenAspect,0.1f,1.f)||gateStopRow<triggerRow||gateStopRow>460||!range(gateApproachSpeed,.05f,.30f)||!range(gateHoldTime,1.f,5.f)||modelDirectory.empty()||
            !range(stopCandidateConfidence,.30f,.50f)||!range(crossCandidateConfidence,.05f,.35f))
             throw std::invalid_argument("Invalid race configuration");
     }
@@ -61,7 +64,7 @@ struct RaceConfig {
         const int reference=j.value("imageWidth",320);
         if(j.value("imageHeight",reference*3/4)!=reference*3/4)throw std::invalid_argument("Pixel reference must be 4:3");
         if(reference!=320&&reference!=640)throw std::invalid_argument("Unsupported race pixel reference");
-        if(reference==320)for(const char *key:{"minBranchWidth","minBranchGap","triggerRow","obstacleRow","crossPassedRow"})if(j.contains(key))j[key]=j[key].get<int>()*2;
+        if(reference==320)for(const char *key:{"minBranchWidth","minBranchGap","triggerRow","obstacleRow","crossPassedRow","gateStopRow"})if(j.contains(key))j[key]=j[key].get<int>()*2;
         j["imageWidth"]=640;j["imageHeight"]=480;
         nlohmann::json merged=*this;
         for(auto it=j.begin();it!=j.end();++it) {

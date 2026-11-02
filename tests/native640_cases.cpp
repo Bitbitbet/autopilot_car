@@ -415,6 +415,10 @@ int main(int argc,char **argv){try{
         require(p.selectedBranch&&p.parkingEdgeEstimated&&!p.alignRoad&&p.guidePwm==0&&p.guideDirection==-1&&!p.stop,
             "Visible entrance not handed to edge path controller");
         require(raceDirectionServo(p,1700)==1700,"Edge controller cannot countersteer");
+        auto stale=s;stale.failed=true;
+        p=manager.update(stale,s.captured,.07,true,nearMouth,entranceTrack,{},false,true,-1,true,true,.30,{},true,true);
+        require(p.stop,"Entrance AI failure does not hold motion");
+        p=step(nearMouth);require(!p.stop&&p.selectedBranch,"Fresh entrance data remains permanently faulted after hold");
         cv::Mat absent=cv::Mat::zeros(480,640,CV_8UC1);p=step(absent);
         require(!p.stop&&!p.selectedBranch&&p.guidePwm==0&&p.alignRoad,"Lost edge restarts full-lock turn or stops");
         for(int j=0;j<100;++j){p=step(straight);if(p.completedDirection)break;}

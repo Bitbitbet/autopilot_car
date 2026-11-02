@@ -43,6 +43,7 @@ class CarControl {
     std::atomic_bool recvThreadStop{true};
     std::atomic_bool serialFault{false};
     std::atomic_bool commandExpired{false};
+    std::atomic_bool stopLatched{false};
     std::atomic_bool motionAllowed{true};
     std::atomic<uint64_t> stopEpoch{0};
     int commandTimeoutMs=250;
@@ -66,8 +67,11 @@ class CarControl {
   public:
     ~CarControl() noexcept;
     bool hasFault() const {
-        return serialFault.load() || commandExpired.load();
+        return serialFault.load() || stopLatched.load() || commandExpired.load();
     }
+    bool hardFault()const{return serialFault.load()||stopLatched.load();}
+    bool commandTimedOut()const{return commandExpired.load();}
+    bool recoverCommandTimeout(uint64_t expectedEpoch);
 
     /* Exit/UI failure: prevent any racing worker from restarting. */
     void latch_stop();

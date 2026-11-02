@@ -95,7 +95,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
             std::future<void> evidenceWriter;int evidenceCount=0;
             auto world=[&](cv::Point2f p){return bayFrame.world(p,dims.aisle);};
             while(!stop.load()) {
-                if(car->hasFault())throw std::runtime_error("Parking serial watchdog/fault: restart required");
+                if(car->hardFault())throw std::runtime_error("Parking serial/exit fault: restart required");
+                if(car->commandTimedOut())previousSpeed=0;
                 cv::Mat image;if(!video.read(image)||image.empty())throw std::runtime_error("Parking camera unavailable");
                 const double captured=raceTime();
                 if(image.size()!=cameraSize) {
@@ -152,7 +153,10 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 pilot.setDegradedSpeed(speedSettings.degraded);
                 virtualPilot.setCurveSpeed(speedSettings.curve);virtualPilot.setDegradedSpeed(speedSettings.degraded);
                 if(missionEnabled) {
-                    auto visibleCandidates=missionAutomatic&&mission.parkingZone()&&!taught?
+                    // Bay search cannot be consumed until the entrance turn
+                    // finishes. Avoid a full 640px mouth scan on every turning
+                    // frame, which competes with the 250ms command watchdog.
+                    auto visibleCandidates=missionAutomatic&&mission.parkingZone()&&!mission.parkingEntrancePending()&&!traffic.gateWaiting&&!taught?
                         scanMouths():std::vector<RaceParkingMouthCandidate>{};
                     baySearch.filter(visibleCandidates);
                     const bool visibleMouth=!visibleCandidates.empty();
@@ -410,7 +414,17 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 }
                 if(controller.failed()){speed=0;servo=PWMSERVOMID;armed=false;car->pauseMotion();}
                 if(stop.load())speed=0;
-                if(car->hasFault())throw std::runtime_error("Parking control command timed out");
+                if(car->hardFault())throw std::runtime_error("Parking serial/exit fault during control");
+                const bool commandExpired=car->commandTimedOut();
+                if(commandExpired){
+                    speed=0;
+                    command.reason="CONTROL_TIMEOUT_WAIT_FRESH_FRAME";
+                    if(!stop.load()&&finalTime-captured<=.18&&manager.aiReady(ai,finalTime)&&dt>0&&dt<=.25f&&
+                       car->recoverCommandTimeout(commandEpoch))
+                        command.reason="CONTROL_TIMEOUT_RECOVERED_NEXT_FRAME";
+                    std::cerr<<"[Parking timing] "<<command.reason<<" frame="<<frame<<" dt="<<dt
+                             <<" processing="<<finalTime-captured<<'\n';
+                }
                 const float previousCommandSpeed=previousSpeed;
                 if(!virtualDecision.follow||speed==0)virtualFeedback.reset();
                 car->carControl(speed,servo);previousServo=servo;previousSpeed=speed;
@@ -418,6 +432,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(!armed)poseFallback.reset();
                 if(missionLog) {
                     auto row=mission.json();row["frame"]=frame;row["no_control"]=previewOnly;row["speed_command"]=speed;row["pwm"]=servo;
+                    row["control_timeout"]=commandExpired;row["control_dt_s"]=dt;row["processing_s"]=finalTime-captured;
                     row["virtual_correction_pwm"]=virtualFeedback.correction();row["virtual_error_px"]=virtualPilot.error;
                     row["traffic_state"]=traffic.state;row["traffic_reason"]=traffic.reason;row["parking_state"]=command.state;
                     row["guide_direction"]=traffic.guideDirection;row["guide_pwm"]=traffic.guidePwm;row["lane_blend"]=traffic.laneBlend;
@@ -434,6 +449,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["curve_setting"]=speedSettings.curve;row["degraded_setting"]=speedSettings.degraded;
                     row["fork_setting"]=speedSettings.fork;row["traffic_speed_cap"]=traffic.speedCap;
                     row["gate_waiting"]=traffic.gateWaiting;row["gate_opened"]=traffic.gateOpened;
+                    row["gate_stop_row"]=raceConfig.gateStopRow;row["gate_approach_speed"]=raceConfig.gateApproachSpeed;
                     row["decision_reason"]=command.reason;row["arrow_allowed"]=groundArrow.allowed;row["arrow_box"]={groundArrow.box.x,groundArrow.box.y,groundArrow.box.width,groundArrow.box.height};
                     row["bypass"]=raceObstacleJson(virtualPlan,navConfig);missionLog<<row.dump()<<'\n';
                 }

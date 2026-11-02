@@ -114,7 +114,7 @@ public:
             else if(stage==Stage::ParkingExit&&branchDirection==-1){stage=Stage::SecondReturn;reason="LAP2_PARKING_EXIT_TURN_COMPLETED";}
         }
         if(turning){branch=true;branchDirection=traffic.guideDirection;}else if(finished){branch=false;branchDirection=0;}
-        if(stage==Stage::ParkingApproach&&fullMouth&&!turning&&!traffic.stop){stage=Stage::ParkingSearch;reason="VISIBLE_BAY_STOP_AND_PLAN";}
+        if(stage==Stage::ParkingApproach&&fullMouth&&!turning&&!traffic.stop&&!traffic.gateWaiting){stage=Stage::ParkingSearch;reason="VISIBLE_BAY_STOP_AND_PLAN";}
         // A park sign supplies context, but never substitutes for a visible bay or completed turn.
     }
     nlohmann::json json()const{return {{"state",name()},{"reason",reason},{"lab_single_loop",lab},{"parking_completed",completedParking},

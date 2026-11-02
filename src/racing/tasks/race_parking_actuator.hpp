@@ -6,6 +6,9 @@ class RaceParkingActuator {
 public:
     explicit RaceParkingActuator(bool control){if(control){actual=CarControl::create();if(!actual)throw std::runtime_error("Cannot open vehicle serial");}}
     bool hasFault()const{return actual&&actual->hasFault();}
+    bool hardFault()const{return actual&&actual->hardFault();}
+    bool commandTimedOut()const{return actual&&actual->commandTimedOut();}
+    bool recoverCommandTimeout(uint64_t n){return actual&&actual->recoverCommandTimeout(n);}
     void setCommandTimeout(int ms){if(actual)actual->setCommandTimeout(ms);}
     void pauseMotion(){if(actual)actual->pauseMotion();else ++epoch;}
     void latchStop(){if(actual)actual->latchStop();else ++epoch;}

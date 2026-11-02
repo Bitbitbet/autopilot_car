@@ -43,19 +43,40 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     }
     std::cout<<"PASS bilateral mouth detection; off-centre starts; mirrored curvature/heading; nearer-side selection\n";
 
+    {
+        RaceManager approach(config);RaceSnapshot s;RacePlan p;double t=0;uint64_t n=0;
+        auto tick=[&](int row){s.sequence=++n;s.captured=t+=.07;
+            s.detections=row>0?std::vector<PredictResult>{box(LABEL_GATE,100,row-70,440,70)}:std::vector<PredictResult>{};
+            return approach.update(s,t,.07,true,binary,track,{},true,true);};
+        for(int i=0;i<4;++i)p=tick(330);
+        require(!p.stop&&p.gateWaiting&&p.alignRoad&&p.speedCap<=.12f&&std::string(p.state)=="GATE_APPROACH","Distant gate must approach sensor slowly");
+        p=tick(0);require(p.stop&&!p.gateOpened,"Lost bar permits blind sensor approach");
+        p=tick(380);require(!p.stop,"Fresh bar cannot resume sensor approach");
+        p=tick(config.gateStopRow);require(p.stop&&p.gateWaiting,"Sensor row must stop for closed bar");
+        p=tick(380);require(p.stop,"Box jitter restarts stopped gate approach");
+        std::cout<<"PASS sensor gate approach; late stop; missing bar hold; no jitter creep\n";
+    }
+    // Exercise existing release cases at their original synthetic stop row.
+    config.gateStopRow=330;
+
     // Missing detections without a visible passage must still wait. Raised
     // bars and continuously visible empty road are separate release sources.
     RaceManager manager(config);RaceSnapshot ai;RacePlan plan;int sequence=0;double time=0;
     auto step=[&](std::vector<PredictResult> detections) {
         ai.sequence=++sequence;ai.captured=time+=.07;ai.detections=std::move(detections);
-        return manager.update(ai,time,.07,true,binary,track,{},true,true);
+        return manager.update(ai,time,.07,true,binary,track,{},true,true,0,false,false,0,{true,true,0,0,.30f});
     };
     for(int i=0;i<4;++i)plan=step({box(LABEL_GATE,100,260,440,70)});
     require(plan.stop&&plan.gateWaiting,"Closed entrance gate does not stop the vehicle");
     for(int i=0;i<12;++i){plan=step({box(LABEL_FLOW)});require(plan.stop&&plan.gateWaiting&&!plan.gateOpened,"Absent imagery or a FLOW sign alone releases a closed gate");}
     bool opened=false;
-    for(int i=0;i<16&&!opened;++i){plan=step({box(LABEL_GATE,500,120,40,210)});opened=plan.gateOpened;}
+    for(int i=0;i<24&&!opened;++i){plan=step({box(LABEL_GATE,500,120,40,210)});opened=plan.gateOpened;
+        if(i<14)require(plan.stop&&!opened,"Raised gate skips one-second stopped hold");}
     require(opened&&!plan.gateWaiting&&!plan.stop,"Raised gate at the far end never releases");
+    require(plan.speedCap<=config.parkingSpeed,"Gate release skips parking area passage cap");
+    for(int i=0;i<10;++i){plan=step({});require(plan.speedCap<=config.parkingSpeed,"Gate passage cap releases too early");}
+    for(int i=0;i<15;++i)plan=step({});
+    require(plan.speedCap>config.parkingSpeed,"Gate passage cap never releases after command progress");
 
     {
         RaceManager passage(config);RaceSnapshot snapshot;RacePlan result;int frame=0;double clock=0;
@@ -78,7 +99,7 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         for(int i=0;i<12;++i){result=tick({},binary,yellow);require(result.stop&&!result.gateOpened,"Undetected yellow bar is treated as empty white road");}
         for(int i=0;i<12;++i){result=tick({box(LABEL_CONE,290,270,60,50)},binary,scene);require(result.stop&&!result.gateOpened,"Another object in the gate passage does not block release");}
         bool released=false;
-        for(int i=0;i<16&&!released;++i){result=tick({},binary,scene);released=result.gateOpened;}
+        for(int i=0;i<24&&!released;++i){result=tick({},binary,scene);released=result.gateOpened;}
         require(released&&!result.stop&&!result.gateWaiting,"Continuously visible empty road cannot release an undetected/removed gate");
     }
 
@@ -92,7 +113,9 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     traffic.stop=traffic.gateWaiting=false;traffic.gateOpened=true;mission.observeGate(traffic);
     require(mission.speedLimit(.5,.3)==.3f,"Entrance gate opening restores full cruise too early");
     traffic.gateOpened=false;traffic.state="FORK_LEFT";traffic.selectedBranch=true;traffic.guideDirection=-1;mission.observe(signs,traffic,false);
-    traffic.state="LANE";traffic.selectedBranch=false;mission.observe(signs,traffic,true);
+    traffic.state="LANE";traffic.selectedBranch=false;traffic.gateWaiting=true;mission.observe(signs,traffic,true);
+    require(!mission.parkingSearch(),"Sensor approach starts bay parking before gate release");
+    traffic.gateWaiting=false;mission.observe(signs,traffic,true);
     require(mission.parkingSearch(),"Gate test cannot enter parking search");
     mission.parkingStarted();mission.parkingFinished();
     require(mission.speedLimit(.5,.3)==.3f,"Reversing out of a bay removes the area cap before the exit gate");
