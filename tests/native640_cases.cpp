@@ -14,6 +14,29 @@ static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==3&&std::string(argv[2])=="--gate-exit-field") {
+        const fs::path directory=argv[1];RaceConfig cfg;cfg.load((directory/"race-config.json").string());
+        auto image=cv::imread((directory/"parking-result-camera.png").string());
+        require(image.size()==cv::Size(640,480),"Missing recorded near-gate image");
+        // Saved camera image is already lens-corrected; only binarize it.
+        Camera preprocess(cv::Mat::eye(3,3,CV_64F));preprocess.blackRoad=true;
+        const auto binary=preprocess.binarize(image);
+        Track track;track.handle(binary);RaceManager manager(cfg);RaceSnapshot s;RacePlan p;
+        s.image=image;double time=0;auto tick=[&](std::vector<PredictResult> detections){
+            ++s.sequence;s.captured=time+=.07;s.detections=std::move(detections);
+            return manager.update(s,time,.07,true,binary,track,image,true,true);
+        };
+        tick({});p=tick({box(LABEL_GATE,126,62,337,52)});
+        require(!p.stop&&p.speedCap<=cfg.gateApproachSpeed,"Recorded far gate still delays slowdown");
+        p=tick({box(LABEL_GATE,0,345,599,63)});
+        require(p.gateWaiting,"Recorded near-gate box does not latch approach");
+        bool opened=false;
+        for(int i=0;i<24&&!opened;++i){p=tick({});opened=p.gateOpened;
+            if(i<14)require(p.stop&&!opened,"Recorded clear image skips one-second hold");}
+        require(opened&&!p.stop,"Recorded clear exit image remains in GATE_WAIT");
+        std::cout<<"PASS recorded mission-1793616796504 near-gate image: early speed cap; clear passage opens after dwell (static image check, not vehicle validation)\n";
+        return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--park-entry-field") {
         RaceMission mission;mission.start();std::ifstream input(fs::path(argv[1])/"parking-control.jsonl");
         require(bool(input),"Missing entrance telemetry");std::string line;bool checked=false;

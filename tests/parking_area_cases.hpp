@@ -1,4 +1,5 @@
 #pragma once
+#include "race_ground_motion.hpp"
 
 static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &reference,
                               const cv::Mat &binary,const Track &track) {
@@ -44,10 +45,34 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
     std::cout<<"PASS bilateral mouth detection; off-centre starts; mirrored curvature/heading; nearer-side selection\n";
 
     {
+        RaceGroundMotion tracker(calibration);tracker.enableParkingNoiseTolerance();
+        cv::Mat texture(480,640,CV_8UC3);cv::RNG random(7616);random.fill(texture,cv::RNG::UNIFORM,0,255);
+        RaceSnapshot s;s.image=texture;s.sequence=1;s.captured=1;tracker.update(s,true,false);
+        ++s.sequence;s.captured+=.07;require(tracker.update(s,true,false).valid,"Textured parking reference cannot initialize");
+        s.image=cv::Mat(480,640,CV_8UC3,cv::Scalar(60,60,60));
+        for(int i=0;i<4;++i){++s.sequence;s.captured+=.2;require(!tracker.update(s,true,false).valid,"Blank frame invents visual motion");}
+        s.image=texture;++s.sequence;s.captured+=.07;
+        require(!tracker.update(s,true,false).valid,"Old reference unexpectedly bridged a long gap");
+        const RaceGroundPose seed{.12f,.27f,.18f};
+        require(tracker.reanchorParkingEstimate(s,seed),"Parking estimated reference cannot recover frozen tracking");
+        ++s.sequence;s.captured+=.07;auto recovered=tracker.update(s,true,false);
+        require(recovered.valid&&recovered.estimatedOrigin&&recovered.epoch==0&&
+            std::abs(recovered.pose.x-seed.x)<.001&&std::abs(recovered.pose.z-seed.z)<.001&&
+            std::abs(recovered.pose.angle-seed.angle)<.001,"Recovered visual tracking resets coordinates or hides estimated origin");
+        require(!tracker.reanchorParkingEstimate(s,{}),"Valid visual reference was replaced with an estimate");
+        RaceGroundMotion ordinary(calibration);ordinary.update(s,true,false);
+        require(!ordinary.reanchorParkingEstimate(s,seed),"Parking recovery leaked into ordinary ground tracking");
+        std::cout<<"PASS parking relative visual recovery after frozen reference; propagated origin retained and labelled estimated\n";
+    }
+
+    {
         RaceManager approach(config);RaceSnapshot s;RacePlan p;double t=0;uint64_t n=0;
         auto tick=[&](int row){s.sequence=++n;s.captured=t+=.07;
             s.detections=row>0?std::vector<PredictResult>{box(LABEL_GATE,100,row-70,440,70)}:std::vector<PredictResult>{};
             return approach.update(s,t,.07,true,binary,track,{},true,true);};
+        tick(0);p=tick(154);
+        require(!p.stop&&!p.gateWaiting&&p.speedCap<=.12f,"First far horizontal gate fails to slow before sensor approach");
+        p=tick(0);require(!p.stop&&p.speedCap<=.12f,"Brief distant gate miss drops slowdown");
         for(int i=0;i<4;++i)p=tick(330);
         require(!p.stop&&p.gateWaiting&&p.alignRoad&&p.speedCap<=.12f&&std::string(p.state)=="GATE_APPROACH","Distant gate must approach sensor slowly");
         p=tick(0);require(p.stop&&!p.gateOpened,"Lost bar permits blind sensor approach");
@@ -55,6 +80,25 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         p=tick(config.gateStopRow);require(p.stop&&p.gateWaiting,"Sensor row must stop for closed bar");
         p=tick(380);require(p.stop,"Box jitter restarts stopped gate approach");
         std::cout<<"PASS sensor gate approach; late stop; missing bar hold; no jitter creep\n";
+    }
+
+    {
+        RaceManager passage(config);RaceSnapshot s;double t=0;RacePlan p;
+        cv::Mat scene(480,640,CV_8UC3,cv::Scalar(50,50,50));
+        cv::Mat road(480,640,CV_8UC1,cv::Scalar(255));
+        cv::rectangle(scene,{100,390,440,90},{220,130,0},-1);
+        cv::rectangle(road,{100,390,440,90},{0},-1);
+        auto tick=[&](bool closed,const cv::Mat &view){++s.sequence;s.captured=t+=.07;s.image=view;
+            s.detections=closed?std::vector<PredictResult>{box(LABEL_GATE,0,345,599,63)}:std::vector<PredictResult>{};
+            return passage.update(s,t,.07,true,road,track,view,true,true);};
+        for(int i=0;i<4;++i)p=tick(true,scene);
+        cv::Mat bar=scene.clone();cv::rectangle(bar,{220,330,160,25},{0,220,220},-1);
+        for(int i=0;i<20;++i){p=tick(false,bar);require(!p.gateOpened,"Unboxed yellow bar releases the near gate");}
+        bool released=false;
+        for(int i=0;i<24&&!released;++i){p=tick(false,scene);released=p.gateOpened;
+            if(i<14)require(p.stop&&!released,"Near gate skips open dwell");}
+        require(released&&!p.stop&&!p.gateWaiting,"Bonnet in the old gate box permanently blocks clear exit");
+        std::cout<<"PASS far gate early slowdown and short miss hold; near bonnet excluded from clear passage; yellow rejection; exit release\n";
     }
     // Exercise existing release cases at their original synthetic stop row.
     config.gateStopRow=330;
@@ -129,6 +173,8 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
 
     RaceParkingSpace space(dims);auto route=racePlanTrackableParking(space,{0,-.4f,0},.30f);
     require(route.valid,"No model-trackable parking route at the new target speed");
+    for(auto point:space.body(route.entry.back(),.015f))
+        require(space.inBay(point),"Parking goal still accepts a 5mm paint-hugging footprint");
     {RaceParkingDwell timer;
      require(dims.dwellSeconds==1.f,"Runtime dwell still defaults to three seconds");
      require(!timer.ready(1,true,true,true,true)&&!timer.ready(1.99,true,true,true,true)&&

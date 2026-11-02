@@ -21,6 +21,7 @@ struct RaceGroundMotionResult {
     std::string reason="REFERENCE_INITIALIZING";
     float fitScale=0,fitTranslation=0,fitAngle=0,spanX=0,spanZ=0;
     bool coordinatesHeld=false;
+    bool estimatedOrigin=false;
     bool backupReferenceUsed=false;
     int backupAttempts=0;
 };
@@ -76,11 +77,25 @@ public:
     // the reference over that 0.087mm excess. Keep this opt-in for parking;
     // RANSAC, scale, span and motion-step checks are still applied.
     void enableParkingNoiseTolerance(){rigidResidualLimit=.008f;parkingMode=true;}
+    // Recover relative visual tracking after a parking-only command estimate.
+    // The caller supplies the propagated pose at THIS frame, never the old
+    // frozen pose. Absolute coordinates remain explicitly estimated thereafter.
+    bool reanchorParkingEstimate(const RaceSnapshot &s,const RaceGroundPose &pose) {
+        if(!parkingMode||s.failed||s.sequence!=sequence||s.captured<=captured||
+           !std::isfinite(s.captured)||s.image.type()!=CV_8UC3||s.image.size()!=cv::Size(640,480)||
+           !std::isfinite(pose.x)||!std::isfinite(pose.z)||!std::isfinite(pose.angle)||
+           result.valid||misses<3)return false;
+        cv::cvtColor(s.image,previous,cv::COLOR_BGR2GRAY);previousMask=mask(s);
+        captured=s.captured;result.pose=pose;result.estimatedOrigin=true;
+        references.clear();misses=0;result.misses=0;
+        result.reason="PARKING_ESTIMATED_REFERENCE_REANCHORED";
+        return true;
+    }
     // 与绕行规划共用同一米制尺度；里程增量必须与路线在同一个坐标系里。
     void setMetricScale(float s) {
         if(std::abs(s-map.scale())<1e-6f)return;
         map.setMetricScale(s);previous.release();previousMask.release();captured=-1;
-        result.pose={};result.valid=false;++result.epoch;misses=0;discontinuous=true;regions.clear();references.clear();
+        result.pose={};result.valid=false;result.estimatedOrigin=false;++result.epoch;misses=0;discontinuous=true;regions.clear();references.clear();
     }
     // 也供回归测试验证米制刚体拟合，不接受像素/运动指令冒充位移。
     static bool fit(const std::vector<cv::Point2f> &before,const std::vector<cv::Point2f> &after,

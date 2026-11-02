@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Front-bumper pose in the taught bay frame. Runtime command fallback explicitly
-// marks estimated observations; the independent visual tracker is never altered.
+// marks estimated observations, including visual increments after estimated reanchoring.
 struct RaceParkingObservation {
     RaceParkingPose pose;
     double captured=0;
@@ -15,7 +15,7 @@ struct RaceParkingObservation {
 };
 // Parking-only fallback. Integrate APPLIED commands while current camera frames
 // remain fresh. This is an estimate, never measured wheel odometry. Keep the
-// ground tracker unchanged so it can independently recover its original frame.
+// propagated pose available for explicitly labelled relative visual recovery.
 class RaceParkingPoseFallback {
     RaceParkingObservation last;
 public:
@@ -296,7 +296,9 @@ public:
         }
         const auto delta=target-axle;const float lateral=std::cos(o.pose.yaw)*delta.x+std::sin(o.pose.yaw)*delta.y;
         const float limit=std::tan(d.fullLockDegrees*float(CV_PI)/180)/d.wheelbase;
-        const float pursuit=-2*lateral/std::max(.0004f,delta.dot(delta));
+        // At the end of the path the target gets closer than the nominal
+        // 10cm horizon. Do not amplify centimetre errors into full counterlock.
+        const float pursuit=-2*lateral/std::max(.01f,delta.dot(delta));
         const auto segmentRearA=rear(path[segment],d),segmentRearB=rear(path[segment+1],d);
         const float signedLength=(leaving?-1:1)*std::max(.001f,float(cv::norm(segmentRearB-segmentRearA)));
         float feedforward=raceParkingAngle(path[segment+1].yaw-path[segment].yaw)/signedLength;

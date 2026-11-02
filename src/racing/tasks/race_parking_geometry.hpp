@@ -155,7 +155,9 @@ public:
         return freeWithRearTolerance(p,observedRearTolerance,entryMouthAllowance,true);
     }
     bool parked(RaceParkingPose p)const {
-        for(auto q:body(p))if(!inBay(q))return false;
+        // Aim inside the paint rather than accepting the first 5mm-clear pose.
+        // This is a goal margin, not a new execution stop boundary.
+        for(auto q:body(p,std::max(cfg.clearance,.015f)))if(!inBay(q))return false;
         return true;
     }
     bool parkedObserved(RaceParkingPose p)const {

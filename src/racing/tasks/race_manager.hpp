@@ -263,6 +263,7 @@ class RaceManager {
     uint64_t lastSequence=0;
     double lastCapture=-1,now=0,stateSince=0,cooldownUntil=0;
     double gateClearSince=-1,hazardClearSince=-1;
+    double gateSlowUntil=-1;
     double directionUntil=0,splitTime=0,exitTime=0,lastCrossSeen=0;
     bool lastActive=false,limited=false,crossBottomSeen=false,gateWaiting=false,hazardWaiting=false;
     bool hazardPersonWaiting=false;
@@ -316,7 +317,13 @@ class RaceManager {
         if(counts[LABEL_GATE]||bin.type()!=CV_8UC1||bin.size()!=cv::Size(640,480)||
            image.type()!=CV_8UC3||image.size()!=bin.size()||snap.image.type()!=CV_8UC3||snap.image.size()!=bin.size())return false;
         const int width=std::clamp(gateBox.width/2,60,160);
-        const cv::Rect region=cv::Rect(gateBox.x+gateBox.width/2-width/2,gateBox.y,width,gateBox.height)&cv::Rect(0,0,640,480);
+        // Near the sensor the last bar box reaches the bonnet. Once lifted,
+        // that old rectangle contains our own car, not a blocked passage.
+        // Check the adjacent road above the bonnet, retaining object/yellow
+        // rejection and the continuous stopped clearance interval.
+        const int height=std::clamp(gateBox.height,16,64);
+        const int row=std::min(gateBox.y,370-height);
+        const cv::Rect region=cv::Rect(gateBox.x+gateBox.width/2-width/2,row,width,height)&cv::Rect(0,0,640,480);
         if(region.width<40||region.height<8||cv::countNonZero(bin(region))<region.area()*.85)return false;
         for(const auto &d:snap.detections) {
             if(d.type!=LABEL_PERSON&&d.type!=LABEL_CONE&&d.type!=LABEL_BUSY)continue;
@@ -401,6 +408,13 @@ public:
             else if(seen(LABEL_UNLIMIT)) limited=false;
         }
         if(limited) p.speedCap=cfg.limitedSpeed;
+        // Slow at the first accepted horizontal bar, not only after it
+        // reaches the close-range sensor approach row. Keep steering under
+        // the current task so a distant gate cannot interrupt the entry turn.
+        if(newFrame&&counts[LABEL_GATE]>0&&boxes[LABEL_GATE].width>=80&&
+           boxes[LABEL_GATE].width>=boxes[LABEL_GATE].height)
+            gateSlowUntil=now+.40;
+        if(now<gateSlowUntil)p.speedCap=std::min(p.speedCap,cfg.gateApproachSpeed);
         // Keep area speed through the just-opened gate even when mission
         // observes exit release. Command distance is not measured clearance.
         if(gatePassCommandRemaining>0){
@@ -445,6 +459,7 @@ public:
                 else gateClearSince=-1;
                 if(gateClearSince>=0&&now-gateClearSince>=std::max(cfg.clearTime,cfg.gateHoldTime)) {
                     gateWaiting=false;gateAtSensor=false;p.gateOpened=true;gatePassCommandRemaining=.40f;
+                    gateSlowUntil=-1;
                     // The entrance road has already been acquired. Its gate
                     // release is a stronger phase landmark than requiring the
                     // branched parking aisle to look like a single straight road.

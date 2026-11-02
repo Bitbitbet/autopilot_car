@@ -172,7 +172,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     measured=motion->update(current,true,false);}
                 RaceParkingObservation observation;
                 if(taught) {
-                    observation={bayFrame.local({measured.pose.x,measured.pose.z,measured.pose.angle},dims.aisle),captured,frame,measured.epoch,measured.valid};
+                    observation={bayFrame.local({measured.pose.x,measured.pose.z,measured.pose.angle},dims.aisle),captured,frame,measured.epoch,measured.valid,measured.estimatedOrigin};
                 }
                 if(display.failed.load())throw std::runtime_error("Parking display failed");
                 const auto commandEpoch=car->motionEpoch();
@@ -329,6 +329,12 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(armed) {
                     const float appliedAngle=(float(PWMSERVOMID)-previousServo)/400*dims.fullLockDegrees*float(CV_PI)/180;
                     observation=poseFallback.update(observation,raceTime(),previousSpeed,bayFrame.handedness()*std::tan(appliedAngle)/dims.wheelbase,dims);
+                    if(motion&&!measured.valid&&measured.misses>=3&&observation.valid&&observation.estimated) {
+                        RaceSnapshot current;current.image=image;current.sequence=frame;current.captured=captured;
+                        if(traffic.fresh)current.detections=ai.detections;
+                        const auto seed=bayFrame.physical(observation.pose,dims.aisle);
+                        motion->reanchorParkingEstimate(current,{seed.x,seed.z,seed.yaw});
+                    }
                     command=controller.update(observation,raceTime(),dt,!traffic.stop,std::min(taskCruise,traffic.speedCap),previousSpeed);
                 }
                 else if(controller.failed())command=controller.status();
@@ -484,10 +490,11 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"physical_curvature",bayFrame.handedness()*command.curvature},{"pose_frame","canonical_left_bay"},
                     {"pose",{observation.pose.x,observation.pose.z,observation.pose.yaw}},{"motion_valid",measured.valid},
                     {"pose_estimated",observation.estimated},
+                    {"motion_estimated_origin",measured.estimatedOrigin},
                     {"terminal_recovery",controller.terminalRecoveryUsed()},
                     {"exit_distance_recovery",controller.exitRecoveryUsed()},
                     {"reverse_command_distance_m",controller.reverseDistanceEstimate()},{"reverse_distance_budget_m",controller.reverseBudget()},
-                    {"pose_source",observation.estimated?"APPLIED_COMMAND_ESTIMATE":"VISUAL_ODOMETRY"},
+                    {"pose_source",measured.valid&&measured.estimatedOrigin?"VISUAL_RELATIVE_ESTIMATED_ORIGIN":observation.estimated?"APPLIED_COMMAND_ESTIMATE":"VISUAL_ODOMETRY"},
                     {"visual_pose",{visualObservation.pose.x,visualObservation.pose.z,visualObservation.pose.yaw}},
                     {"motion_epoch",measured.epoch},{"motion_reason",measured.reason},{"motion_inliers",measured.inliers},
                     {"motion_residual_m",measured.residual},{"motion_residual_limit_m",.008},{"motion_fit_scale",measured.fitScale},
