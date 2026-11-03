@@ -26,20 +26,20 @@ CarControl::CarControl() = default;
 std::shared_ptr<CarControl> CarControl::create() {
     auto car = std::shared_ptr<CarControl>(new CarControl);
     try {
-        car->serialPort.Open("/dev/ttyUSB0");
-        car->serialPort.SetBaudRate(BaudRate::BAUD_115200);
-        car->serialPort.SetCharacterSize(CharacterSize::CHAR_SIZE_8);
-        car->serialPort.SetFlowControl(FlowControl::FLOW_CONTROL_NONE);
-        car->serialPort.SetParity(Parity::PARITY_NONE);
-        car->serialPort.SetStopBits(StopBits::STOP_BITS_1);
-        auto serialFd = car->serialPort.GetFileDescriptor();
+        car->serial.Open("/dev/ttyUSB0");
+        car->serial.SetBaudRate(BaudRate::BAUD_115200);
+        car->serial.SetCharacterSize(CharacterSize::CHAR_SIZE_8);
+        car->serial.SetFlowControl(FlowControl::FLOW_CONTROL_NONE);
+        car->serial.SetParity(Parity::PARITY_NONE);
+        car->serial.SetStopBits(StopBits::STOP_BITS_1);
+        auto serialFd = car->serial.GetFileDescriptor();
         const int flags = fcntl(serialFd, F_GETFL);
         if (flags < 0 || fcntl(serialFd, F_SETFL, flags | O_NONBLOCK) < 0)
             throw std::runtime_error("Cannot enable nonblocking serial I/O");
         car->resetVelocity();
-        car->recvThreadStop = false;
+        car->recv_thread_stop = false;
         auto raw = car.get();
-        car->recvThread = thread([=] { raw->recvThreadMain(); });
+        car->recv_thread = thread([=] { raw->recvThreadMain(); });
 
         return car;
     } catch (const std::exception &e) {
@@ -49,16 +49,16 @@ std::shared_ptr<CarControl> CarControl::create() {
 }
 
 void CarControl::latch_stop() {
-    commandExpired = true;
+    fatal_stop.store(true, memory_order_relaxed);
     resetVelocity();
 }
 
 void CarControl::recvThreadMain() {
     size_t index = 0;
     array<uint8_t, USB_FRAME_LENMAX> buffer{};
-    auto serialFd = serialPort.GetFileDescriptor();
+    auto serialFd = serial.GetFileDescriptor();
     try {
-        while (!recvThreadStop.load()) {
+        while (!recv_thread_stop.load(memory_order_relaxed)) {
             pollfd fd{serialFd, POLLIN, 0};
             const int status = poll(&fd, 1, 20);
             if (status < 0) {
@@ -95,14 +95,14 @@ void CarControl::recvThreadMain() {
             }
         }
     } catch (const std::exception &e) {
-        serialFault = true; // All later motion is vetoed.
+        fatal_stop = true; // All later motion is vetoed.
         cerr << "[Error] Serial receive: " << e.what() << endl;
         try {
             resetVelocity();
         } catch (...) {
         }
     } catch (...) {
-        serialFault = true;
+        fatal_stop = true;
         try {
             resetVelocity();
         } catch (...) {
@@ -115,11 +115,11 @@ CarControl::~CarControl() noexcept {
         resetVelocity();
     } catch (...) {
     }
-    recvThreadStop.store(true, memory_order_relaxed);
-    recvThread.join();
+    recv_thread_stop.store(true, memory_order_relaxed);
+    recv_thread.join();
     try {
-        if (serialPort.IsOpen())
-            serialPort.Close();
+        if (serial.IsOpen())
+            serial.Close();
     } catch (...) {
     }
 }
@@ -128,14 +128,14 @@ void CarControl::translateBuffer(const array<uint8_t, USB_FRAME_LENMAX> &) {
     // Currently do nothing here
 }
 
-void CarControl::carControl(float speed, uint16_t servo) {
+void CarControl::control(float speed, uint16_t servo) {
     lock_guard lock(writeMutex);
     if (!std::isfinite(speed)) {
-        serialFault = true;
+        fatal_stop = true;
         carControlLocked(0, PWMSERVOMID);
         throw std::invalid_argument("Non-finite vehicle speed");
     }
-    if (hasFault()) {
+    if (has_fault()) {
         speed = 0;
         servo = PWMSERVOMID;
     }
@@ -175,8 +175,8 @@ void CarControl::writeBuffer(void *buffer, size_t len) {
 
 void CarControl::writeBufferLocked(const void *buffer, size_t len) {
     for (size_t i = 0; i < len; ++i)
-        serialPort.WriteByte(((uint8_t *)buffer)[i]);
-    serialPort.DrainWriteBuffer();
+        serial.WriteByte(((uint8_t *)buffer)[i]);
+    serial.DrainWriteBuffer();
 }
 
 void CarControl::sendHeart() {

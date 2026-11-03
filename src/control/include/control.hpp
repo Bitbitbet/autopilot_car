@@ -37,11 +37,10 @@ enum class Buzzer : uint8_t {
 
 class CarControl {
   private:
-    std::thread recvThread; // 串口接收子线程
-    LibSerial::SerialPort serialPort;
-    std::atomic_bool recvThreadStop{true};
-    std::atomic_bool serialFault{false};
-    std::atomic_bool commandExpired{false};
+    std::thread recv_thread; // 串口接收子线程
+    LibSerial::SerialPort serial;
+    std::atomic_bool recv_thread_stop{true};
+    std::atomic_bool fatal_stop{false};
     std::mutex writeMutex;
     bool moving = false;
     void writeBufferLocked(const void *buffer, size_t len);
@@ -58,8 +57,8 @@ class CarControl {
 
   public:
     ~CarControl() noexcept;
-    bool hasFault() const {
-        return serialFault.load() || commandExpired.load();
+    bool has_fault() const {
+        return fatal_stop.load(std::memory_order_relaxed);
     }
 
     /* Exit/UI failure: prevent any racing worker from restarting. */
@@ -73,9 +72,9 @@ class CarControl {
      * @param speed 速度：m/s
      * @param servo 方向：PWM（500~2500）
      */
-    void carControl(float speed, uint16_t servo);
+    void control(float speed, uint16_t servo);
 
-    void resetVelocity() { carControl(0, PWMSERVOMID); }
+    void resetVelocity() { control(0, PWMSERVOMID); }
 
     /**
      * @brief 蜂鸣器音效控制

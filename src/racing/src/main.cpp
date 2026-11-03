@@ -308,7 +308,7 @@ int main(int argc, char **argv) {
 
         // 最终下发指令
         try {
-            car->carControl(speed, servo);
+            car->control(speed, servo);
         } catch (const std::exception &e) {
             cerr << "[Error] 串口: " << e.what() << '\n';
             break;

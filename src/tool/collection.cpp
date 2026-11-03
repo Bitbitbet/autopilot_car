@@ -41,7 +41,7 @@ jthread startJoystickControlThread(shared_ptr<CarControl> car,
                     float speed;
                     uint16_t servo;
                     if (js->takeCarControl(speed, servo))
-                        car->carControl(speed, servo);
+                        car->control(speed, servo);
                     if (js->takeBuzzer())
                         car->buzzerSound(Buzzer::ding);
                 }
