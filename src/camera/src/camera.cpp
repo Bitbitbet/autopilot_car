@@ -2,9 +2,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include <opencv2/core/persistence.hpp>
-#include <opencv2/imgproc.hpp>
-#include <opencv2/videoio.hpp>
+#include <opencv2/opencv.hpp>
 
 using cv::FileStorage;
 using cv::Mat;
@@ -142,7 +140,6 @@ Mat Camera::binarize(const Mat &img) {
     }
     return bin_img;
 }
-
 bool Camera::read(Mat &frame) {
     if (!capture.read(frame) || frame.empty()) {
         return false;

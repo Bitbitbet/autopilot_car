@@ -266,17 +266,17 @@ EdgeQuality cut_at_corner(const EdgeQuality &edge) {
 } // namespace
 
 AutoPilot::AutoPilot(int frameCols, int frameRows)
-    : curveLimit(CURVE_SPEED), qualityLimit(DEGRADED_SPEED),
-      imageCols(frameCols), imageRows(frameRows) {}
+    : curveLimit(CURVE_SPEED), qualityLimit(DEGRADED_SPEED), cols(frameCols),
+      rows(frameRows) {}
 
 float AutoPilot::weightOf(int row) const {
-    switch (weightMode) {
+    switch (weight_mode) {
     case WeightMode::Uniform:
         return 1;
     case WeightMode::NearDominant:
-        return std::min(float(row), imageRows / 2.f);
+        return std::min(float(row), rows / 2.f);
     case WeightMode::FarFull:
-        return row < imageRows / 2 ? imageRows / 2.f : float(imageRows - row);
+        return row < rows / 2 ? rows / 2.f : float(rows - row);
     }
     return 1;
 }
@@ -298,7 +298,7 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
         degraded = false;
         confidence = 0;
         severity = 0;
-        pathIssue = "FRAME_GAP";
+        path_issue = "FRAME_GAP";
         qualityGoodTime = 0;
         centerEdge.clear();
         resetControl();
@@ -308,9 +308,9 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     // 1) 两边换到地面坐标，判断哪一边更可信，构造中心线
     const Edges edges = gather_edges(rows, camera);
     const EdgeQuality left =
-        assess_edge(edges.left, edges.left_cols, edges.rows, imageCols);
+        assess_edge(edges.left, edges.left_cols, edges.rows, cols);
     const EdgeQuality right =
-        assess_edge(edges.right, edges.right_cols, edges.rows, imageCols);
+        assess_edge(edges.right, edges.right_cols, edges.rows, cols);
     // 岔路指定边优先：先决定用哪一条边，再一次算出中心线。
     // 只要这条边没被裁掉、点数够，就直接用它，不再先算一遍自动结果。
     const bool use_left = branchSide < 0;
@@ -319,7 +319,7 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     if (branchSide != 0) {
         forced = assess_edge(use_left ? edges.left : edges.right,
                              use_left ? edges.left_cols : edges.right_cols,
-                             edges.rows, imageCols, MIN_POINTS);
+                             edges.rows, cols, MIN_POINTS);
 
         has_forced = forced.enough && !forced.rows.empty() &&
                      forced.rows.front() - forced.rows.back() >= MIN_SPAN;
@@ -331,9 +331,10 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
                 cut.rows.front() - cut.rows.back() >= MIN_SPAN)
                 forced = cut;
         }
-        std::cerr << "这一帧强制走" << (use_left ? "左边线" : "右边线") << "，"
+        /*std::cerr << "这一帧强制走" << (use_left ? "左边线" : "右边线") <<
+           "，"
                   << (has_forced ? "并且成功了" : "但是没成功") << "。"
-                  << std::endl;
+                  << std::endl; DEBUG */
     }
     // 只有一边平滑就用那一边推中心线，否则取两边中点。
     const bool single_side = !has_forced && left.smooth() != right.smooth();
@@ -341,13 +342,13 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     int accepted = 0, rejected = 0;
     vector<Point2i> raw; // 中心线点 (col, row)
     if (has_forced) {
-        raw = centerline_from_side(forced, edges, use_left, camera, imageCols,
-                                   imageRows, FORCED_WIDTH_RATIO);
+        raw = centerline_from_side(forced, edges, use_left, camera, cols, rows,
+                                   FORCED_WIDTH_RATIO);
         accepted = int(raw.size());
     } else if (single_side) {
         const bool side_left = left.smooth();
         raw = centerline_from_side(side_left ? left : right, edges, side_left,
-                                   camera, imageCols, imageRows);
+                                   camera, cols, rows);
         accepted = int(raw.size());
     } else {
         raw = centerline_from_mid(rows, accepted, rejected);
@@ -380,16 +381,16 @@ bool AutoPilot::update_path_state(const vector<Point2i> &raw, size_t total_rows,
                                   int accepted, int rejected, float dt) {
     valid = false;
     if (raw.empty())
-        pathIssue = "NO_POINTS";
+        path_issue = "NO_POINTS";
     else if (raw.size() < MIN_POINTS)
-        pathIssue = "TOO_FEW_POINTS";
+        path_issue = "TOO_FEW_POINTS";
     else if (raw.front().y - raw.back().y < MIN_SPAN)
-        pathIssue = "SPAN_SHORT";
-    else if (raw.front().y < imageRows * 0.2f)
-        pathIssue = "NEAR_MISSING";
+        path_issue = "SPAN_SHORT";
+    else if (raw.front().y < rows * 0.2f)
+        path_issue = "NEAR_MISSING";
     else {
         valid = true;
-        pathIssue = "NONE";
+        path_issue = "NONE";
     }
     degraded = rejected > int(total_rows / 3);
 
@@ -433,13 +434,13 @@ void AutoPilot::build_center_edge(const vector<Point2i> &raw) {
 
 int AutoPilot::weighted_center() const {
     // 越近的行权重越大（权重模式可切换），再夹到画面内。
-    float numerator = imageCols / 2.f, denominator = 1;
+    float numerator = cols / 2.f, denominator = 1;
     for (const auto &p : centerEdge) {
         const float w = weightOf(p.y);
         numerator += w * p.x;
         denominator += w;
     }
-    return clamp(int(std::lround(numerator / denominator)), 0, imageCols - 1);
+    return clamp(int(std::lround(numerator / denominator)), 0, cols - 1);
 }
 
 float AutoPilot::curve_heading() const {
@@ -470,7 +471,7 @@ float AutoPilot::curve_heading() const {
 
 void AutoPilot::update_steering(float dt, float previousSpeed,
                                 float curveHeading) {
-    error = float(center) - imageCols / 2.f;
+    error = float(center) - cols / 2.f;
     error = clamp(error, previousError - MAX_ERROR_RATE * dt,
                   previousError + MAX_ERROR_RATE * dt);
     const float derivative =

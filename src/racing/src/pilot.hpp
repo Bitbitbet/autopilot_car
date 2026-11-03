@@ -29,13 +29,13 @@ inline const char *weight_mode_name(WeightMode mode) {
 
 // 与硬件无关的巡线控制：边缘行 -> 期望中心 -> PD -> 舵机 + 限速。
 class AutoPilot {
-    float curveLimit; // 运行时可调（[ ] , . 键）
+    float curveLimit;
     float qualityLimit;
-    int imageCols, imageRows;
+    int cols, rows;
     float filteredDerivative = 0, previousError = 0, commandedSpeed = 0;
     double missingTime = 0, qualityGoodTime = 0;
     bool qualityRestricted = false, degraded = false, hadPath = false;
-    WeightMode weightMode = WeightMode::FarFull;
+    WeightMode weight_mode = WeightMode::FarFull;
 
     float weightOf(int row) const;
     float qualitySpeedLimit() const;
@@ -53,8 +53,7 @@ class AutoPilot {
     explicit AutoPilot(int frameCols, int frameRows);
 
     // 每帧识别后调用。rows 为空、点数不足或帧间隔异常时判定不可信。
-    // branchSide=-1/+1 时强制用左/右边缘推中心线（岔路），0 表示自己判断：
-    // 两边都好取中点，只有一边好就用它加减半个路宽。
+    // branchSide=-1/+1 时强制用左/右边缘推中心线（岔路），0 表示自动判断。
     void update(const TrackRows &rows, const Camera &camera, float dt,
                 float previousSpeed, int branchSide = 0);
 
@@ -69,9 +68,9 @@ class AutoPilot {
     }
 
     // 状态（主循环与 HUD 读取）
-    const char *pathIssue = "NO_POINTS";
+    const char *path_issue = "NO_POINTS";
     std::vector<cv::Point2i> centerEdge; // 平滑后的中心线 (col, row)
-    int center = imageCols / 2;
+    int center = cols / 2;
     float error = 0, confidence = 0, severity = 0;
     uint16_t servo = PWMSERVOMID;
     bool valid = false, lost = false;
@@ -86,6 +85,6 @@ class AutoPilot {
         qualityLimit = std::clamp(value, cfg::MIN_SPEED, cfg::MAX_SPEED);
     }
 
-    void cycleWeight() { weightMode = WeightMode((int(weightMode) + 1) % 3); }
-    const char *weightName() const { return weight_mode_name(weightMode); }
+    void cycleWeight() { weight_mode = WeightMode((int(weight_mode) + 1) % 3); }
+    WeightMode get_weight_mode() const { return weight_mode; }
 };

@@ -2,7 +2,7 @@
 
 #include "detection.hpp"
 #include "race_config.hpp"
-#include <chrono>
+#include "timing.hpp"
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -10,15 +10,9 @@
 #include <thread>
 
 struct DetectionSnapshot {
-    uint64_t sequence = 0;
-    double captured = 0;
+    uint64_t captured = 0;
     std::vector<InferenceResult> detections;
 };
-inline double raceTime() {
-    return std::chrono::duration<double>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
 
 class RacePerception {
   public:
@@ -28,11 +22,12 @@ class RacePerception {
     Infer infer;
     std::mutex mutex;
     std::condition_variable wake;
+
     cv::Mat pending;
-    double pendingTime = 0;
-    uint64_t pendingSequence = 0;
+    uint64_t pendingTime = 0;
+
     DetectionSnapshot latest;
-    bool stop = false;
+    bool worker_stop = false;
     std::thread worker;
 
     void worker_run();
@@ -40,24 +35,26 @@ class RacePerception {
   public:
     explicit RacePerception(Infer fn)
         : infer(std::move(fn)), worker([this] { worker_run(); }) {}
+
     ~RacePerception() {
         {
             std::lock_guard lock(mutex);
-            stop = true;
+            worker_stop = true;
         }
         wake.notify_all();
         worker.join();
     }
-    void submit(const cv::Mat &image, uint64_t sequence, double captured) {
+
+    void submit(const cv::Mat &image) {
         auto copy = image.clone();
         {
             std::lock_guard lock(mutex);
             pending = std::move(copy);
-            pendingSequence = sequence;
-            pendingTime = captured;
+            pendingTime = global_microsec();
         }
         wake.notify_one();
     }
+
     DetectionSnapshot snapshot() {
         std::lock_guard lock(mutex);
         return latest;

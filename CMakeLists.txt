@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 add_compile_options(-Wall -Wextra)
 
-find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui calib3d videoio imgcodecs dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui calib3d video videoio imgcodecs dnn)
 find_package(PkgConfig)
 pkg_search_module(evdev REQUIRED IMPORTED_TARGET libevdev)
 pkg_search_module(udev REQUIRED IMPORTED_TARGET libudev)
@@ -14,6 +14,7 @@ pkg_search_module(onnx REQUIRED IMPORTED_TARGET onnx)
 
 add_subdirectory(third_party/nlohmann_json)
 
+add_subdirectory(src/timing)
 add_subdirectory(src/control)
 add_subdirectory(src/joystick)
 add_subdirectory(src/camera)

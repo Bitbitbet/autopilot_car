@@ -11,7 +11,7 @@ struct RacePlan {
     float speedCap = 10.f; // 速度上限，10 等于不限制
     bool stop = false;
     double detectionAge = -1; // AI 结果的新鲜度（秒）
-    const char *state = "AI_WAIT", *reason = "AI_WAIT";
+    const char *state = "AI_WAIT", *reason_for_stage = "AI_WAIT";
 
     // 岔路：让 pilot 优先用哪一条边推中心线（-1 左，+1 右，0 自动）。
     // 地面上看到 fork 默认走左边；前方 yleft / yright 会覆盖它。
@@ -22,11 +22,9 @@ struct RacePlan {
 class RaceManager {
   public:
     bool aiReady(const DetectionSnapshot &s, double time) const {
-        return s.sequence > 0 && time >= s.captured &&
-               time - s.captured <= cfg.maxDetectionAge;
+        return time >= s.captured && time - s.captured <= cfg.maxDetectionAge;
     }
-    RacePlan update(const DetectionSnapshot &snap, double time, float dt,
-                    bool active);
+    RacePlan update(const DetectionSnapshot &snap, float dt, bool active);
 
   private:
     // 只有 Lane 是“正常巡线”，其余都是它前后的局部任务。
@@ -45,7 +43,6 @@ class RaceManager {
     double lastCapture = -1;
 
     // 时间
-    double now = 0, stateSince = 0;
     double lastCrossSeen = 0; // 最近一次看到斑马线
     double gateClearSince = -1, hazardClearSince = -1;
 
@@ -61,10 +58,6 @@ class RaceManager {
     bool coneLatched = false; // 近处锥桶：没有绕行规划，看到就锁死
     InferenceResult gateBox{};
 
-    void enter(State s) {
-        state = s;
-        stateSince = now;
-    }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label, int row) const {
         return seen(label) && boxes[label].y + boxes[label].height >= row;

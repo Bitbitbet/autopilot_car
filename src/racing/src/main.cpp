@@ -1,60 +1,54 @@
 #include "camera.hpp"
 #include "control.hpp"
+#include "debug_video_manager.hpp"
 #include "joystick.hpp"
+#include "odometry.hpp"
 #include "pilot.hpp"
 #include "race_display.hpp"
 #include "race_manager.hpp"
 #include "race_perception.hpp"
 #include "terminal_keys.hpp"
+#include "timing.hpp"
 #include "track.hpp"
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
 #include <thread>
 
 using Clock = std::chrono::steady_clock;
 using cv::Mat;
+using cv::Rect;
 using cv::Size;
-using cv::VideoWriter;
 using std::atomic_bool;
 using std::cerr;
 using std::clamp;
-using std::condition_variable;
 using std::cout;
 using std::endl;
-using std::lock_guard;
 using std::max;
 using std::memory_order_relaxed;
 using std::min;
-using std::mutex;
 using std::shared_ptr;
 using std::string;
 using std::thread;
-using std::unique_lock;
 using std::unique_ptr;
+using std::vector;
 
 namespace {
 
 atomic_bool signal_stop{false};
 void onSignal(int) { signal_stop = true; }
 
-double nowSeconds() {
-    return std::chrono::duration<double>(Clock::now().time_since_epoch())
-        .count();
-}
-
 enum class Mode { Manual, Auto };
 
-void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
-             float cruise, float speed, uint16_t servo, const RacePlan &race) {
+void draw_hud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
+              float cruise, float speed, uint16_t servo, float dt,
+              const RacePlan &plan, const GroundOdometry &odometry) {
     for (const auto &p : pilot.centerEdge)
         cv::circle(image, cv::Point(p.x, p.y), 2, cv::Scalar(0, 0, 255), -1);
     int y = 22;
@@ -68,13 +62,17 @@ void drawHud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
              mode == Mode::Auto ? "AUTO" : "MANUAL", panic ? " STOP" : "",
              pilot.lost ? " LOST" : "", speed, cruise, servo);
     line(text);
-    snprintf(text, sizeof text, "center=%d err=%.2f quality=%.2f curve=%.2f",
-             pilot.center, pilot.error, pilot.confidence, pilot.severity);
+    snprintf(text, sizeof text, "center=%d  quality=%.2f curve=%.2f, dt=%.2f",
+             pilot.center, pilot.confidence, pilot.severity, dt);
     line(text);
-    snprintf(text, sizeof text, "race=%s ai_age=%.2fs side=%d", race.state,
-             race.detectionAge, race.branchSide);
+    snprintf(text, sizeof text, "race=%s ai_age=%.2fs side=%d", plan.state,
+             plan.detectionAge, plan.branchSide);
     line(text);
-    line(race.reason);
+    const auto &pose = odometry.pose();
+    snprintf(text, sizeof text, "odom x=%+.2f y=%+.2f th=%+.2f inl=%d", pose.x,
+             pose.y, pose.theta, odometry.inliers());
+    line(text);
+    line(plan.reason_for_stage);
     line("a:auto  space:stop  +/-:limit  q:quit");
 }
 struct ParsedArgument {
@@ -99,75 +97,6 @@ ParsedArgument process_arguments(int argc, char **argv) {
     return arg;
 }
 
-class DebugVideoManager {
-  private:
-    VideoWriter writer;
-    mutex mtx;
-    condition_variable cond;
-    Mat latest;
-    bool fresh = false;
-    thread writer_thread;
-    atomic_bool thread_stop;
-
-    DebugVideoManager(VideoWriter writer) : writer(writer) {}
-
-    void writer_thread_main() {
-        while (!thread_stop.load(memory_order_relaxed)) {
-            Mat image;
-            {
-                unique_lock lock(mtx);
-                cond.wait(lock, [this]() {
-                    return fresh || thread_stop.load(memory_order_relaxed);
-                });
-                if (!fresh) {
-                    break;
-                }
-                image = latest;
-            }
-            writer.write(image);
-
-            fresh = false;
-        }
-    }
-
-  public:
-    static shared_ptr<DebugVideoManager> create(const Camera &camera) {
-        const char *DEBUG_VIDEO_PATH = "/tmp/output.avi";
-        cout << "Debug视频输出路径：" << DEBUG_VIDEO_PATH << "。" << endl;
-
-        cv::VideoWriter debug_video(
-            DEBUG_VIDEO_PATH, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 30,
-            Size{camera.cols(), camera.rows()}, true);
-        if (!debug_video.isOpened()) {
-            cerr << "无法打开debug视频文件。" << endl;
-            return nullptr;
-        }
-
-        auto dvm =
-            shared_ptr<DebugVideoManager>(new DebugVideoManager(debug_video));
-        dvm->thread_stop.store(false, memory_order_relaxed);
-        auto raw = dvm.get();
-        dvm->writer_thread = thread([raw]() { raw->writer_thread_main(); });
-
-        return dvm;
-    }
-
-    void publish(Mat image) {
-        lock_guard lock(mtx);
-        latest = image.clone();
-        fresh = true;
-
-        cond.notify_one();
-    }
-
-    ~DebugVideoManager() {
-        thread_stop.store(true, memory_order_relaxed);
-        cond.notify_one();
-        writer_thread.join();
-        writer.release();
-    }
-};
-
 } // namespace
 
 int main(int argc, char **argv) {
@@ -180,6 +109,12 @@ int main(int argc, char **argv) {
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
 
+    auto car = CarControl::create();
+    if (!car) {
+        cerr << "[Fatal] 打开串口失败" << endl;
+        return 3;
+    }
+
     Camera camera;
 
     unique_ptr<RacePerception> perception;
@@ -190,13 +125,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // 台架上没有串口时只跑图像和决策，不驱动车轮。
-    auto car = CarControl::create();
-    if (!car) {
-        cerr << "[Fatal] 打开串口失败" << endl;
-        return 3;
-    }
-
     atomic_bool joyLost{false};
     auto js = JoyStick::create([&joyLost] { joyLost = true; });
     if (!js)
@@ -204,25 +132,19 @@ int main(int argc, char **argv) {
 
     AutoPilot pilot(camera.cols(), camera.rows());
     RaceManager race_manager;
+    GroundOdometry odometry;
+    TerminalKeys terminal;
+    RaceDisplay display;
+    thread displayThread;
+    if (!headless)
+        displayThread = thread([&] { display.run(); });
 
     Mode mode = Mode::Manual;
     bool panic = false;
     float cruise = cfg::CRUISE_SPEED, jsSpeed = 0, speed = 0;
     uint16_t jsServo = PWMSERVOMID;
     TrackRows rows;
-    double last = nowSeconds();
     string lastState;
-    cout << "[Start] " << (headless ? "HEADLESS " : "") << camera.cols() << "x"
-         << camera.rows()
-         << " | 默认 MANUAL，按 a 启动（终端或图像窗口都行，q 退出）\n";
-
-    TerminalKeys terminal; // 终端也能按键：headless 下同样可以操作
-
-    // 窗口单独一个线程：控制回路只丢图，不等 X11
-    RaceDisplay display;
-    thread displayThread;
-    if (!headless)
-        displayThread = thread([&] { display.run(); });
 
     shared_ptr<DebugVideoManager> dvm;
     if (do_produce_debug_video) {
@@ -232,48 +154,68 @@ int main(int argc, char **argv) {
             return 5;
         }
     }
+    auto toggle = [&] {
+        if (mode == Mode::Auto) {
+            mode = Mode::Manual;
+            jsSpeed = 0;
+            pilot.resetControl();
+            cout << "[Mode] 切换到 MANUAL" << endl;
+            return;
+        }
+        // 准备切换到 AUTO
+        if (!pilot.valid) {
+            cout << "[Mode] 未检测到稳定的路径：" << pilot.path_issue
+                 << "，无法切换到 AUTO。" << endl;
+        }
+        if (js && !joyLost.load(memory_order_relaxed) && fabs(jsSpeed) > 0.05) {
+            cout << "[Mode] 手柄正在控制油门，无法切换到 AUTO" << endl;
+        }
+        mode = Mode::Auto;
+        panic = false;
+        jsSpeed = 0;
+        pilot.resetControl();
+        cout << "[Mode] 切换到 AUTO\n";
+    };
 
+    cout << "racing 启动，默认处于MANUAL模式，按a进入自动驾驶模式。按q退出。"
+         << endl;
+
+    LoopTiming timing;
     while (!signal_stop) {
+        timing.begin();
+        // ---- READ SECTION
         Mat image;
         if (!camera.read(image)) {
             cerr << "[Error] 取不到图像\n";
             break;
         }
+        timing.lap("read");
+
+        perception->submit(image);
+        const auto observation = perception->snapshot();
+
+        timing.lap(nullptr);
         Mat bin = camera.binarize(image);
+        timing.lap("bin");
+
         track_identify_from_bin(bin, camera, rows);
+        timing.lap("track");
 
-        const double t = nowSeconds();
-        float dt = float(t - last);
-        last = t;
+        double dt = timing.last_loop() * 1000.0;
 
-        perception->submit(image, uint64_t(t * 1000), t);
-        const DetectionSnapshot observation = perception->snapshot();
-        RacePlan plan =
-            race_manager.update(observation, t, dt, mode == Mode::Auto);
+        // ---- ODOMETRY SECTION
+        // 地面视觉里程计：用当前帧的地面纹理估车走了多少，检测框不参与。
+        vector<Rect> blockers;
+        for (const auto &d : observation.detections)
+            blockers.emplace_back(d.x, d.y, d.width, d.height);
+        odometry.update(image, camera, dt, blockers);
+        timing.lap("odom");
 
-        auto toggle = [&] {
-            if (mode == Mode::Auto) {
-                mode = Mode::Manual;
-                jsSpeed = 0;
-                pilot.resetControl();
-                cout << "[Mode] MANUAL\n";
-            } else if (pilot.valid && race_manager.aiReady(observation, t) &&
-                       !joyLost && (!js || !js->isStopped()) &&
-                       std::fabs(jsSpeed) <= 0.05f) {
-                mode = Mode::Auto;
-                panic = false;
-                jsSpeed = 0;
-                pilot.resetControl();
-                cout << "[Mode] AUTO\n";
-            } else if (!race_manager.aiReady(observation, t)) {
-                cout << "[Wait] 还没有可用的检测结果\n";
-            } else if (!pilot.valid) {
-                cout << "[Wait] 路径未稳定: " << pilot.pathIssue << '\n';
-            } else {
-                cout << "[Wait] 先松开油门或重新连接手柄\n";
-            }
-        };
+        // ---- RACE SECTION
+        const auto plan =
+            race_manager.update(observation, dt, mode == Mode::Auto);
 
+        // ---- KEY SECTION
         int key = terminal.poll();
         if (key < 0)
             key = display.takeKey(); // 窗口线程收上来的键
@@ -304,7 +246,8 @@ int main(int argc, char **argv) {
             cout << "[Set] quality=" << pilot.degradedSpeed() << " m/s\n";
         } else if (key == 'w' || key == 'W') {
             pilot.cycleWeight();
-            cout << "[Set] weight=" << pilot.weightName() << '\n';
+            cout << "[Set] weight=" << weight_mode_name(pilot.get_weight_mode())
+                 << '\n';
         }
 
         if (js) {
@@ -334,15 +277,18 @@ int main(int argc, char **argv) {
             }
         }
 
+        // ---- PILOT SECIONT
+        timing.lap(nullptr);
         pilot.update(rows, camera, dt, speed, plan.branchSide);
         if (mode == Mode::Auto && pilot.lost) {
             mode = Mode::Manual;
             panic = true;
             jsSpeed = 0;
             pilot.resetControl();
-            cout << "[Stop] 丢线: " << pilot.pathIssue << " (dt=" << dt
+            cout << "[Stop] 丢线: " << pilot.path_issue << " (dt=" << dt
                  << " s)；恢复后按 a\n";
         }
+        timing.lap("pilot");
 
         speed = 0;
         uint16_t servo = PWMSERVOMID;
@@ -368,19 +314,24 @@ int main(int argc, char **argv) {
             break;
         }
 
+        timing.lap("motor");
         if (lastState != plan.state) {
-            cout << "[Race] " << plan.state << " | " << plan.reason << '\n';
+            cout << "[Race] " << plan.state << " | " << plan.reason_for_stage
+                 << '\n';
             lastState = plan.state;
         }
 
         if (!headless || do_produce_debug_video) {
             track_draw_result(rows, image);
-            drawHud(image, pilot, mode, panic, cruise, speed, servo, plan);
+            draw_hud(image, pilot, mode, panic, cruise, speed, servo, dt, plan,
+                     odometry);
             if (!headless)
                 display.publish(image);
             if (do_produce_debug_video)
                 dvm->publish(image);
         }
+        timing.lap("draw");
+        timing.end();
     }
 
     try {

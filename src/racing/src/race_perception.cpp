@@ -7,6 +7,7 @@ using cv::Mat;
 using std::lock_guard;
 using std::make_shared;
 using std::make_unique;
+using std::unique_lock;
 using std::unique_ptr;
 namespace fs = std::filesystem;
 
@@ -21,19 +22,18 @@ unique_ptr<RacePerception> createRacePerception(const RaceConfig &config) {
 void RacePerception::worker_run() {
     while (true) {
         Mat frame;
-        double captured;
-        uint64_t sequence;
+        uint64_t captured;
         {
-            std::unique_lock lock(mutex);
-            wake.wait(lock, [&] { return stop || !pending.empty(); });
-            if (stop)
+            unique_lock lock(mutex);
+            wake.wait(lock, [&] { return worker_stop || !pending.empty(); });
+            if (worker_stop)
                 return;
             frame = std::move(pending);
             captured = pendingTime;
-            sequence = pendingSequence;
         }
         auto result = infer(frame);
+
         lock_guard lock(mutex);
-        latest = {sequence, captured, std::move(result)};
+        latest = {captured, std::move(result)};
     }
 }
