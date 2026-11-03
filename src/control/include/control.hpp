@@ -2,7 +2,6 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <libserial/SerialPort.h>
 #include <memory>
@@ -38,15 +37,13 @@ enum class Buzzer : uint8_t {
 
 class CarControl {
   private:
-    std::unique_ptr<std::thread> recvThread; // 串口接收子线程
+    std::thread recvThread; // 串口接收子线程
     LibSerial::SerialPort serialPort;
     std::atomic_bool recvThreadStop{true};
     std::atomic_bool serialFault{false};
     std::atomic_bool commandExpired{false};
     std::mutex writeMutex;
-    int serialFd = -1;
     bool moving = false;
-    std::chrono::steady_clock::time_point lastCommand;
     void writeBufferLocked(const void *buffer, size_t len);
     void carControlLocked(float speed, uint16_t servo);
 
@@ -67,9 +64,6 @@ class CarControl {
 
     /* Exit/UI failure: prevent any racing worker from restarting. */
     void latch_stop();
-
-    bool exitBoot = false;
-    bool keypress = false;
 
     static std::shared_ptr<CarControl> create();
 

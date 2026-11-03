@@ -1,5 +1,6 @@
 #include "control.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -14,7 +15,7 @@ using std::cerr;
 using std::clamp;
 using std::endl;
 using std::lock_guard;
-using std::make_unique;
+using std::memory_order_relaxed;
 using std::thread;
 using std::chrono::milliseconds;
 
@@ -31,14 +32,15 @@ std::shared_ptr<CarControl> CarControl::create() {
         car->serialPort.SetFlowControl(FlowControl::FLOW_CONTROL_NONE);
         car->serialPort.SetParity(Parity::PARITY_NONE);
         car->serialPort.SetStopBits(StopBits::STOP_BITS_1);
-        car->serialFd = car->serialPort.GetFileDescriptor();
-        const int flags = fcntl(car->serialFd, F_GETFL);
-        if (flags < 0 || fcntl(car->serialFd, F_SETFL, flags | O_NONBLOCK) < 0)
+        auto serialFd = car->serialPort.GetFileDescriptor();
+        const int flags = fcntl(serialFd, F_GETFL);
+        if (flags < 0 || fcntl(serialFd, F_SETFL, flags | O_NONBLOCK) < 0)
             throw std::runtime_error("Cannot enable nonblocking serial I/O");
         car->resetVelocity();
         car->recvThreadStop = false;
         auto raw = car.get();
-        car->recvThread = make_unique<thread>([=] { raw->recvThreadMain(); });
+        car->recvThread = thread([=] { raw->recvThreadMain(); });
+
         return car;
     } catch (const std::exception &e) {
         cerr << "Serial initialization failed: " << e.what() << endl;
@@ -54,6 +56,7 @@ void CarControl::latch_stop() {
 void CarControl::recvThreadMain() {
     size_t index = 0;
     array<uint8_t, USB_FRAME_LENMAX> buffer{};
+    auto serialFd = serialPort.GetFileDescriptor();
     try {
         while (!recvThreadStop.load()) {
             pollfd fd{serialFd, POLLIN, 0};
@@ -108,13 +111,12 @@ void CarControl::recvThreadMain() {
 }
 
 CarControl::~CarControl() noexcept {
-    recvThreadStop = true;
     try {
         resetVelocity();
     } catch (...) {
     }
-    if (recvThread && recvThread->joinable())
-        recvThread->join();
+    recvThreadStop.store(true, memory_order_relaxed);
+    recvThread.join();
     try {
         if (serialPort.IsOpen())
             serialPort.Close();
@@ -152,7 +154,6 @@ void CarControl::carControlLocked(float speed, uint16_t servo) {
         buff[9] += buff[i];
     writeBufferLocked(buff, sizeof(buff));
     moving = speed != 0;
-    lastCommand = Clock::now();
 }
 
 void CarControl::buzzerSound(Buzzer sound) {
@@ -173,38 +174,9 @@ void CarControl::writeBuffer(void *buffer, size_t len) {
 }
 
 void CarControl::writeBufferLocked(const void *buffer, size_t len) {
-    if (serialFd < 0)
-        return; // Clean destruction after failed open.
-    const auto deadline = Clock::now() + std::chrono::milliseconds(100);
-    size_t sent = 0;
-    try {
-        while (sent < len) {
-            const auto remaining =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    deadline - Clock::now())
-                    .count();
-            if (remaining <= 0)
-                throw std::runtime_error("Serial write timed out");
-            pollfd fd{serialFd, POLLOUT, 0};
-            const int status = poll(&fd, 1, static_cast<int>(remaining));
-            if (status < 0 && errno == EINTR)
-                continue;
-            if (status <= 0 || (fd.revents & (POLLERR | POLLHUP | POLLNVAL)))
-                throw std::runtime_error("Serial write unavailable");
-            const auto n =
-                ::write(serialFd, static_cast<const uint8_t *>(buffer) + sent,
-                        len - sent);
-            if (n < 0 &&
-                (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
-                continue;
-            if (n <= 0)
-                throw std::runtime_error("Serial write failed");
-            sent += static_cast<size_t>(n);
-        }
-    } catch (...) {
-        serialFault = true;
-        throw;
-    }
+    for (size_t i = 0; i < len; ++i)
+        serialPort.WriteByte(((uint8_t *)buffer)[i]);
+    serialPort.DrainWriteBuffer();
 }
 
 void CarControl::sendHeart() {

@@ -342,13 +342,13 @@ void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
     int accepted = 0, rejected = 0;
     vector<Point2i> raw; // 中心线点 (col, row)
     if (has_forced) {
-        raw = centerline_from_side(forced, edges, use_left, camera, cols, rows,
-                                   FORCED_WIDTH_RATIO);
+        raw = centerline_from_side(forced, edges, use_left, camera, cols,
+                                   this->rows, FORCED_WIDTH_RATIO);
         accepted = int(raw.size());
     } else if (single_side) {
         const bool side_left = left.smooth();
         raw = centerline_from_side(side_left ? left : right, edges, side_left,
-                                   camera, cols, rows);
+                                   camera, cols, this->rows);
         accepted = int(raw.size());
     } else {
         raw = centerline_from_mid(rows, accepted, rejected);

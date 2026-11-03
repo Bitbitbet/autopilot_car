@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <libevdev/libevdev.h>
+#include <optional>
 
 using std::cerr;
 using std::cout;
