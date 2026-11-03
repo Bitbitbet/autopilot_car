@@ -87,12 +87,16 @@ enum : int {
     LABEL_FLOW = 6,    // 畅通
     LABEL_PARK = 7,    // 停车场
     LABEL_GATE = 8,    // 道闸
-    LABEL_CROSS = 9,   // 斑马线
-    LABEL_FORK = 10,   // 岔路标志
-    LABEL_LEFT = 11,   // 左转标志
-    LABEL_CHOICE = 12, // 双向箭头
+    LABEL_CROSS = 9,   // 斑马线（地面上）
+    LABEL_FORK = 10,   // 岔路标志（地面上）
+    LABEL_LEFT = 11,   // 左转标志（地面上）
+    LABEL_CHOICE = 12, // 双向箭头（地面上）
     LABEL_YLEFT = 13,  // 左岔路口
     LABEL_YRIGHT = 14, // 右岔路口
 };
+
+inline bool is_ground_label(int label) {
+    return label >= LABEL_CROSS && label <= LABEL_CHOICE;
+}
 
 constexpr int LABEL_COUNT = 15;

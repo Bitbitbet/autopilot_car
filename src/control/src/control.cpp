@@ -20,7 +20,6 @@ using std::thread;
 using std::chrono::milliseconds;
 
 using namespace LibSerial;
-using Clock = std::chrono::steady_clock;
 CarControl::CarControl() = default;
 
 std::shared_ptr<CarControl> CarControl::create() {

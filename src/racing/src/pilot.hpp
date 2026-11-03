@@ -70,7 +70,7 @@ class AutoPilot {
     // 状态（主循环与 HUD 读取）
     const char *path_issue = "NO_POINTS";
     std::vector<cv::Point2i> centerEdge; // 平滑后的中心线 (col, row)
-    int center = cols / 2;
+    int center;
     float error = 0, confidence = 0, severity = 0;
     uint16_t servo = PWMSERVOMID;
     bool valid = false, lost = false;

@@ -1,4 +1,5 @@
 #include "camera.hpp"
+#include "timing.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -216,7 +217,6 @@ std::vector<Detection> decodeYOLOv8(const float *output, int numChannels,
     nms(dets);
     return dets;
 }
-using sclock = std::chrono::steady_clock;
 
 void load_labels(const char *path) {
     ifstream f(path);
@@ -257,11 +257,14 @@ int main() {
     Camera camera;
     cv::Mat img;
 
+    LoopTiming timing;
     while (true) {
+        timing.begin();
         if (!camera.read(img) || img.empty()) {
             std::cerr << "Camera read failed" << std::endl;
             break;
         }
+        timing.lap("read");
 
         // ---------- 2.1 预处理 ----------
         std::vector<float> inputTensorValues;
@@ -275,7 +278,6 @@ int main() {
             inputShape.data(), inputShape.size());
 
         // ---------- 2.2 推理 ----------
-        auto timepoint_bf = sclock::now();
 
         auto outputs = session.Run(Ort::RunOptions{nullptr}, inputNames,
                                    &inputTensor, 1, outputNames, 1);
@@ -293,11 +295,7 @@ int main() {
             decodeYOLOv8(outputData, numChannels, numCandidates, lbInfo,
                          img.cols, img.rows, 0.25f, numClasses);
 
-        auto timepoint_aft = sclock::now();
-        auto microsec =
-            duration_cast<microseconds>(timepoint_aft - timepoint_bf).count();
-        printf("推理用时: %.2lfms，即%.2lf ps\n", microsec / 1000.0,
-               1000000.0 / microsec);
+        timing.lap("infer");
 
         // ---------- 2.4 转换为 PredictResult 并绘制 ----------
         std::vector<InferenceResult> results;
@@ -316,6 +314,8 @@ int main() {
 
         // 显示结果（如果开发板有显示输出；无显示时可注释）
         cv::imshow("YOLOv8s", img);
+
+        timing.end();
         if (cv::waitKey(1) == 27)
             break; // ESC 退出
     }

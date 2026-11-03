@@ -3,7 +3,7 @@
 #include <cstring>
 
 uint64_t global_microsec() {
-    static timepoint start_tp = Clock::now();
+    static Clock::time_point start_tp = Clock::now();
     return microsec(start_tp, Clock::now());
 }
 

@@ -1,6 +1,7 @@
 #include "camera.hpp"
 #include "control.hpp"
 #include "debug_video_manager.hpp"
+#include "detection.hpp"
 #include "joystick.hpp"
 #include "odometry.hpp"
 #include "pilot.hpp"
@@ -11,7 +12,6 @@
 #include "timing.hpp"
 #include "track.hpp"
 #include <atomic>
-#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -21,7 +21,6 @@
 #include <opencv2/videoio.hpp>
 #include <thread>
 
-using Clock = std::chrono::steady_clock;
 using cv::Mat;
 using cv::Rect;
 using cv::Size;
@@ -204,16 +203,24 @@ int main(int argc, char **argv) {
         double dt = timing.last_loop() * 1000.0;
 
         // ---- ODOMETRY SECTION
-        // 地面视觉里程计：用当前帧的地面纹理估车走了多少，检测框不参与。
+        // 地面视觉里程计：用当前帧的地面纹理估车走了多少。
+        // 只有“立在地面上”的物体要挖掉，它们的成像不跟地面一起动；画在
+        // 路面上的标线反而是最可靠的地面特征，不能挖。
         vector<Rect> blockers;
         for (const auto &d : observation.detections)
-            blockers.emplace_back(d.x, d.y, d.width, d.height);
+            if (!is_ground_label(d.type))
+                blockers.emplace_back(d.x, d.y, d.width, d.height);
         odometry.update(image, camera, dt, blockers);
         timing.lap("odom");
 
         // ---- RACE SECTION
         const auto plan =
             race_manager.update(observation, dt, mode == Mode::Auto);
+        if (lastState != plan.state) {
+            cout << "[Race] " << plan.state << " | " << plan.reason_for_stage
+                 << '\n';
+            lastState = plan.state;
+        }
 
         // ---- KEY SECTION
         int key = terminal.poll();
@@ -277,7 +284,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        // ---- PILOT SECIONT
+        // ---- PILOT SECTION
         timing.lap(nullptr);
         pilot.update(rows, camera, dt, speed, plan.branchSide);
         if (mode == Mode::Auto && pilot.lost) {
@@ -290,6 +297,7 @@ int main(int argc, char **argv) {
         }
         timing.lap("pilot");
 
+        // ---- MOTOR SECTION
         speed = 0;
         uint16_t servo = PWMSERVOMID;
         if (!panic) {
@@ -306,7 +314,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        // 最终下发指令
         try {
             car->control(speed, servo);
         } catch (const std::exception &e) {
@@ -314,13 +321,8 @@ int main(int argc, char **argv) {
             break;
         }
 
-        timing.lap("motor");
-        if (lastState != plan.state) {
-            cout << "[Race] " << plan.state << " | " << plan.reason_for_stage
-                 << '\n';
-            lastState = plan.state;
-        }
-
+        // ---- OUTPUT/DEBUG SECTION
+        timing.lap(nullptr);
         if (!headless || do_produce_debug_video) {
             track_draw_result(rows, image);
             draw_hud(image, pilot, mode, panic, cruise, speed, servo, dt, plan,
@@ -339,9 +341,11 @@ int main(int argc, char **argv) {
     } catch (...) {
     }
 
-    display.stop = true;
-    if (!headless)
+    if (!headless) {
+        display.stop = true;
         displayThread.join();
+    }
+
     cout << "racing 正常退出。" << endl;
     return 0;
 }

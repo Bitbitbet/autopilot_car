@@ -3,9 +3,8 @@
 #include <chrono>
 
 using Clock = std::chrono::steady_clock;
-using timepoint = decltype(Clock::now());
 
-inline uint64_t microsec(timepoint begin, timepoint end) {
+inline uint64_t microsec(Clock::time_point begin, Clock::time_point end) {
     return std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
         .count();
 }

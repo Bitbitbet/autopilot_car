@@ -1,28 +1,29 @@
 #include "camera.hpp"
-#include <chrono>
+#include "timing.hpp"
 #include <iostream>           // 输入输出类
 #include <opencv2/opencv.hpp> // OpenCV终端部署
 
+using cv::Mat;
+using cv::Point;
+using cv::Scalar;
+using cv::waitKey;
 using std::cerr;
 using std::endl;
-using std::chrono::steady_clock;
-using namespace cv;
 
 int main() {
     // 打开摄像头
     Camera camera;
 
+    LoopTiming timing;
     while (1) {
-        static auto timeLast = steady_clock::now();
-        auto timeNow = steady_clock::now();
-        timeLast = timeNow;
-
+        timing.begin();
         Mat img;
         if (!camera.read(img)) {
             cerr << "no video frame" << endl;
             continue;
         }
         Mat imgCor = img.clone();
+        timing.lap("read_and_correct");
 
         // 绘制田字格：基准线
         uint16_t row_cnt = camera.rows() / 30;
@@ -43,5 +44,6 @@ int main() {
         imshow("imgCor", imgCor);
 
         waitKey(10);
+        timing.end();
     }
 }
