@@ -45,9 +45,76 @@ void onSignal(int) { signal_stop = true; }
 
 enum class Mode { Manual, Auto };
 
+// ---- 目标点控制 ----
+// 到点判据（米）
+constexpr float ARRIVE_DIST = 0.10f;
+// 往图像上投影时要求的最小前向距离（米）。不能太大：目标偏到侧面时，
+// 画面内那一段可能已经很贴近车头了
+constexpr float AIM_MIN_FORWARD = 0.05f;
+// 认为“在画面内”的边界（像素）
+constexpr int AIM_MARGIN = 8;
+
+/**
+ * @brief 画目标点和期望路径（车体系原点到目标点的直线，地面坐标）
+ */
+void draw_target(Mat &image, const Camera &camera, const cv::Point2f &target,
+                 bool aiming, int aim_col) {
+    const int cols = camera.cols(), rows = camera.rows();
+    const auto project = [&](const cv::Point2f &p) {
+        const cv::Point2d img = camera.ground_to_image(p);
+        if (!std::isfinite(img.x) || !std::isfinite(img.y))
+            return cv::Point(-1, -1);
+        const cv::Point at(int(std::lround(img.x)), int(std::lround(img.y)));
+        if (at.x < 0 || at.x >= cols || at.y < 0 || at.y >= rows)
+            return cv::Point(-1, -1);
+        return at;
+    };
+    cv::Point previous(-1, -1);
+    for (int i = 0; i <= 24; ++i) {
+        const cv::Point now = project(target * (float(i) / 24.f));
+        if (now.x < 0) {
+            previous = now;
+            continue;
+        }
+        if (previous.x >= 0)
+            cv::line(image, previous, now, {255, 200, 0}, 1);
+        previous = now;
+    }
+    const cv::Point at = project(target);
+    if (at.x >= 0)
+        cv::circle(image, at, 6, {255, 0, 255}, 2);
+    if (aiming && aim_col >= 0)
+        cv::line(image, {aim_col, rows - 1}, {aim_col, rows - 50},
+                 {255, 0, 255}, 1);
+}
+
+/**
+ * @brief 把车体系里的目标点投到图像列
+ *
+ * 目标点可能落在画面外（一般不会太远）：沿“车 -> 目标”这条射线往回走，
+ * 取一个仍在画面内的点作为临时中途目标。整条射线都不可见时返回 -1。
+ */
+int aim_column(const cv::Point2f &local, const Camera &camera) {
+    const int cols = camera.cols(), rows = camera.rows();
+    for (float s = 1.0f; s >= 0.15f; s -= 0.05f) {
+        const cv::Point2f p = local * s;
+        if (p.y < AIM_MIN_FORWARD)
+            continue;
+        const cv::Point2d img = camera.ground_to_image(p);
+        if (!std::isfinite(img.x) || !std::isfinite(img.y))
+            continue;
+        const int col = int(std::lround(img.x)), row = int(std::lround(img.y));
+        if (col >= AIM_MARGIN && col < cols - AIM_MARGIN && row >= AIM_MARGIN &&
+            row < rows - AIM_MARGIN)
+            return col;
+    }
+    return -1;
+}
+
 void draw_hud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
               float cruise, float speed, uint16_t servo, float dt,
-              const RacePlan &plan, const GroundOdometry &odometry) {
+              const RacePlan &plan, const GroundOdometry &odometry,
+              const cv::Point2f &target, bool aiming) {
     for (const auto &p : pilot.centerEdge)
         cv::circle(image, cv::Point(p.x, p.y), 2, cv::Scalar(0, 0, 255), -1);
     int y = 22;
@@ -68,11 +135,17 @@ void draw_hud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
              plan.detectionAge, plan.branchSide);
     line(text);
     const auto &pose = odometry.pose();
-    snprintf(text, sizeof text, "odom x=%+.2f y=%+.2f th=%+.2f inl=%d", pose.x,
-             pose.y, pose.theta, odometry.inliers());
+    snprintf(text, sizeof text, "odom x=%+.2f y=%+.2f th=%+.2f inl=%d trk=%d",
+             pose.x, pose.y, pose.theta, odometry.inliers(),
+             odometry.tracked());
+    line(text);
+    if (aiming)
+        snprintf(text, sizeof text, "tgt x=%+.2f y=%+.2f", target.x, target.y);
+    else
+        snprintf(text, sizeof text, "tgt -");
     line(text);
     line(plan.reason_for_stage);
-    line("a:auto  space:stop  +/-:limit  q:quit");
+    line("a:auto  space:stop q:quit");
 }
 struct ParsedArgument {
     bool headless = false;
@@ -86,7 +159,6 @@ ParsedArgument process_arguments(int argc, char **argv) {
             arg.headless = true;
         else if (!std::strcmp(argv[i], "--debug-video")) {
             arg.do_produce_debug_video = true;
-
         } else {
             cerr << "用法: racing [--headless] [--debug-video]\n";
             arg.do_exit = true;
@@ -179,8 +251,15 @@ int main(int argc, char **argv) {
     cout << "racing 启动，默认处于MANUAL模式，按a进入自动驾驶模式。按q退出。"
          << endl;
 
+    vector<cv::Point2d> targets;
+    size_t target_index = 0;
+    int target_seq = 0;
+    bool aiming = false;
+
     LoopTiming timing;
     while (!signal_stop) {
+        double dt = timing.last_loop() / 1000000.0;
+
         timing.begin();
         // ---- READ SECTION
         Mat image;
@@ -194,31 +273,43 @@ int main(int argc, char **argv) {
         const auto observation = perception->snapshot();
 
         timing.lap(nullptr);
-        Mat bin = camera.binarize(image);
+        Mat grey = camera.grey();
+        Mat bin = camera.bin();
         timing.lap("bin");
 
         track_identify_from_bin(bin, camera, rows);
         timing.lap("track");
 
-        double dt = timing.last_loop() * 1000.0;
+        // ---- RACE SECTION
+        const auto plan = race_manager.update(
+            observation, dt, mode == Mode::Auto, camera, aiming);
 
-        // ---- ODOMETRY SECTION
-        // 地面视觉里程计：用当前帧的地面纹理估车走了多少。
-        // 只有“立在地面上”的物体要挖掉，它们的成像不跟地面一起动；画在
-        // 路面上的标线反而是最可靠的地面特征，不能挖。
-        vector<Rect> blockers;
-        for (const auto &d : observation.detections)
-            if (!is_ground_label(d.type))
-                blockers.emplace_back(d.x, d.y, d.width, d.height);
-        odometry.update(image, camera, dt, blockers);
+        // ---- TARGET / ODOMETRY SECTION
+        // 目标点只在需要时才跟踪：锚定那一刻把里程计清零，于是“世界系”就是
+        // 锚定时的车体系，targets 里每个点都是这个系里的坐标，用 pose.local()
+        // 就能得到它们相对小车的当前位置（走过头就是 y 变负）。
+        if (plan.targetSeq != target_seq) {
+            // 新的一串目标：整串抄下来，锚定一次（位姿清零）后按顺序走。
+            odometry.reset();
+            target_seq = plan.targetSeq;
+            targets = plan.targets;
+            target_index = 0;
+            aiming = !targets.empty();
+        }
+        if (aiming) {
+            // 挖掉非地面物品的点
+            vector<Rect> blockers;
+            for (const auto &d : observation.detections)
+                if (!is_ground_label(d.type))
+                    blockers.emplace_back(d.rect.x, d.rect.y, d.rect.width,
+                                          d.rect.height);
+            odometry.update(grey, camera, dt, blockers);
+        }
         timing.lap("odom");
 
-        // ---- RACE SECTION
-        const auto plan =
-            race_manager.update(observation, dt, mode == Mode::Auto);
         if (lastState != plan.state) {
-            cout << "[Race] " << plan.state << " | " << plan.reason_for_stage
-                 << '\n';
+            cout << "[Plan] " << plan.state << " | " << plan.reason_for_stage
+                 << endl;
             lastState = plan.state;
         }
 
@@ -286,7 +377,29 @@ int main(int argc, char **argv) {
 
         // ---- PILOT SECTION
         timing.lap(nullptr);
-        pilot.update(rows, camera, dt, speed, plan.branchSide);
+        cv::Point2f target_local{};
+        if (aiming) {
+            target_local = odometry.pose().local(targets[target_index]);
+            if (hypot(target_local.x, target_local.y) <= ARRIVE_DIST) {
+                if (++target_index < targets.size()) {
+                    cout << "[Target] 第 " << target_index << " 个到点\n";
+                } else {
+                    aiming = false;
+                    cout << "[Target] 全部到点\n";
+                }
+            }
+        }
+        int aim_col = -1;
+        if (aiming) {
+            aim_col = aim_column(target_local, camera);
+            // 目标在画面外时先朝那一侧满舵，等它进画面再按图像列对准。
+            if (aim_col < 0)
+                aim_col = target_local.x >= 0 ? camera.cols() - AIM_MARGIN
+                                              : AIM_MARGIN;
+            pilot.aim_at(aim_col, dt, speed);
+        } else {
+            pilot.update(rows, camera, dt, speed, plan.branchSide);
+        }
         if (mode == Mode::Auto && pilot.lost) {
             mode = Mode::Manual;
             panic = true;
@@ -325,8 +438,10 @@ int main(int argc, char **argv) {
         timing.lap(nullptr);
         if (!headless || do_produce_debug_video) {
             track_draw_result(rows, image);
+            if (aiming)
+                draw_target(image, camera, target_local, aiming, aim_col);
             draw_hud(image, pilot, mode, panic, cruise, speed, servo, dt, plan,
-                     odometry);
+                     odometry, target_local, aiming);
             if (!headless)
                 display.publish(image);
             if (do_produce_debug_video)

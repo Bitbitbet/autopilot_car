@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 
 using cv::FileStorage;
@@ -92,59 +93,65 @@ void Camera::initialize(const char *capture_source) {
 
 Camera::~Camera() { capture.release(); }
 
-/**
- * @brief 图像二值化
- *
- * 统一约定：可行驶路面为白，背景为黑。白路面直接阈值；黑路面取反，
- * 并修补被反相成黑的反光/白漆内部空洞（保留连接图像边界的背景排除区）。
- *
- * @param img  输入图像
- * @return cv::Mat 二值化图像
- */
-Mat Camera::binarize(const Mat &img) {
-    Mat gray_img;
-    cvtColor(img, gray_img, cv::COLOR_BGR2GRAY); // RGB转灰度图
+void Camera::generate_grey() {
+    cv::cvtColor(img, cached_grey, cv::COLOR_BGR2GRAY);
+    grey_updated = true;
+}
+Mat Camera::grey() {
+    if (!grey_updated)
+        generate_grey();
+    return cached_grey;
+}
 
-    const int threshold_value_arg = use_otsu ? -1 : threshold_value;
+void Camera::generate_bin() {
+    Mat grey_img = grey();
+
     const int polarity = BLACK_ROAD ? cv::THRESH_BINARY_INV : cv::THRESH_BINARY;
-    Mat bin_img;
-    threshold(gray_img, bin_img,
-              threshold_value_arg < 0 ? 0 : threshold_value_arg, 255,
-              polarity | (threshold_value_arg < 0 ? cv::THRESH_OTSU : 0));
-    if (!BLACK_ROAD)
-        return bin_img;
+
+    threshold(grey_img, cached_bin, use_otsu ? 0 : threshold_value, 255,
+              polarity | (use_otsu ? cv::THRESH_OTSU : 0));
 
     // 填补有界的内部空洞；与下边界连通的背景、与远边界连通的分隔带保留。
     Mat exterior;
-    copyMakeBorder(bin_img, exterior, 1, 1, 1, 1, cv::BORDER_CONSTANT,
+    copyMakeBorder(cached_bin, exterior, 1, 1, 1, 1, cv::BORDER_CONSTANT,
                    cv::Scalar(0));
     floodFill(exterior, {0, 0}, cv::Scalar(255));
     Mat holes;
-    bitwise_not(exterior(cv::Rect(1, 1, bin_img.cols, bin_img.rows)), holes);
+    bitwise_not(exterior(cv::Rect(1, 1, cached_bin.cols, cached_bin.rows)),
+                holes);
     Mat labels, stats, centers;
     const int count =
         connectedComponentsWithStats(holes, labels, stats, centers, 8, CV_32S);
     for (int component = 1; component < count; ++component) {
         if (stats.at<int>(component, cv::CC_STAT_AREA) >
-                int(bin_img.total() / 10) ||
+                int(cached_bin.total() / 10) ||
             stats.at<int>(component, cv::CC_STAT_WIDTH) >
-                bin_img.cols * 45 / 100 ||
+                cached_bin.cols * 45 / 100 ||
             stats.at<int>(component, cv::CC_STAT_HEIGHT) >
-                bin_img.rows * 60 / 100)
+                cached_bin.rows * 60 / 100)
             continue;
         const cv::Rect box(stats.at<int>(component, cv::CC_STAT_LEFT),
                            stats.at<int>(component, cv::CC_STAT_TOP),
                            stats.at<int>(component, cv::CC_STAT_WIDTH),
                            stats.at<int>(component, cv::CC_STAT_HEIGHT));
-        bin_img(box).setTo(255, labels(box) == component);
+        cached_bin(box).setTo(255, labels(box) == component);
     }
-    return bin_img;
+    bin_updated = true;
+}
+Mat Camera::bin() {
+    if (!bin_updated)
+        generate_bin();
+
+    return cached_bin;
 }
 bool Camera::read(Mat &frame) {
     if (!capture.read(frame) || frame.empty()) {
         return false;
     }
     remap(frame, frame, mapx, mapy, cv::INTER_LINEAR);
+    img = frame;
+    bin_updated = false;
+    grey_updated = false;
     return true;
 }
 

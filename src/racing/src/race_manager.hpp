@@ -1,10 +1,11 @@
 #pragma once
 
+#include "camera.hpp"
 #include "detection.hpp"
 #include "race_config.hpp"
 #include "race_perception.hpp"
 #include <array>
-#include <cstdint>
+#include <vector>
 
 // 本帧“该不该走 / 走多快 / 往哪边打舵”，横向闭环在 AutoPilot。
 struct RacePlan {
@@ -16,15 +17,20 @@ struct RacePlan {
     // 岔路：让 pilot 优先用哪一条边推中心线（-1 左，+1 右，0 自动）。
     // 地面上看到 fork 默认走左边；前方 yleft / yright 会覆盖它。
     int branchSide = 0;
+
+    // 目标点序列：车体系地面坐标（x 右正、y 前正，米），按顺序走。
+    // 一次性给完；全部走完之前 targets 不变，走完后清空。
+    // 换新序列 targetSeq 就 +1。
+    int targetSeq = 0;
+    std::vector<cv::Point2d> targets;
 };
 
 // 比赛任务层：只看 AI 标签和时间，路面几何全部交给 track/AutoPilot。
 class RaceManager {
   public:
-    bool aiReady(const DetectionSnapshot &s, double time) const {
-        return time >= s.captured && time - s.captured <= cfg.maxDetectionAge;
-    }
-    RacePlan update(const DetectionSnapshot &snap, float dt, bool active);
+    // aiming：主循环正在执行这串目标；targets_done：这串目标全部走完了。
+    RacePlan update(const DetectionSnapshot &snap, double dt, bool active,
+                    const Camera &camera, bool aiming);
 
   private:
     // 只有 Lane 是“正常巡线”，其余都是它前后的局部任务。
@@ -35,32 +41,45 @@ class RaceManager {
     State state = State::Lane;
     const char *reviewReason = "REVIEW_REQUIRED";
 
-    // 标签确认：同一类别连续 confirmFrames 帧才算“看见”。
-    std::array<int, LABEL_COUNT> counts{};
-    std::array<bool, LABEL_COUNT> confirmed{};
-    std::array<InferenceResult, LABEL_COUNT> boxes{};
-    uint64_t lastSequence = 0;
-    double lastCapture = -1;
+    // 每个类别一份跟踪状态：最近一帧的框
+    struct LabelTrack {
+        bool confirmed = false;             // 够 confirmFrames 帧
+        std::vector<InferenceResult> boxes; // 最近一帧这个类别的所有框
+    };
+    std::array<LabelTrack, LABEL_COUNT> tracks;
 
     // 时间
     double lastCrossSeen = 0; // 最近一次看到斑马线
     double gateClearSince = -1, hazardClearSince = -1;
 
-    // 岔路偏向：sign 消失后再保持一小段时间，避免单帧漏检来回跳。
-    int side = 0; // -1 左，+1 右，0 自动
-    double sideUntil = 0;
+    // 目标点序列：choice+park 触发生成，整串走完后清空
+    int targetSeq = 0;
+    std::vector<cv::Point2d> points; // 当前这串目标点
 
     bool lastActive = false;
     bool limited = false;         // 限速区，跨人工接管保持
     bool crossBottomSeen = false; // 车身已压过斑马线
     bool gateWaiting = false;
-    bool hazardWaiting = false;
-    bool coneLatched = false; // 近处锥桶：没有绕行规划，看到就锁死
     InferenceResult gateBox{};
 
-    bool seen(int label) const { return confirmed[label]; }
-    bool near(int label, int row) const {
-        return seen(label) && boxes[label].y + boxes[label].height >= row;
+    const std::vector<InferenceResult> &boxes_of(int label) const {
+        return tracks[label].boxes;
     }
-    bool updateObservation(const DetectionSnapshot &snap);
+    // 这一帧看到了这个类别（还没到确认帧数也算）
+    bool present(int label) const { return !tracks[label].boxes.empty(); }
+    bool seen(int label) const { return tracks[label].confirmed; }
+    // 确认过的框里有没有已经开到 row 以下的（row 越小越远）
+    bool near(int label, int row) const {
+        if (!tracks[label].confirmed)
+            return false;
+        for (const auto &d : tracks[label].boxes)
+            if (d.rect.y + d.rect.height >= row)
+                return true;
+        return false;
+    }
+    const InferenceResult &best_box(int label) const; // 分数最高的那个
+    // 目标点用的 choice 框：多个 choice 时取离 park 最近的那个
+    const InferenceResult *nearest_choice() const;
+    void clear_observations();
+    bool update_observation(const DetectionSnapshot &snap);
 };

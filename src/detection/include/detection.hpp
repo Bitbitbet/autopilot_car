@@ -13,20 +13,14 @@
  *
  */
 struct InferenceResult {
-    int type;          // ID
-    std::string label; // 标签
-    float score;       // 置信度
-    int x;             // 坐标(左下角点)
-    int y;             // 坐标
-    int width;         // 尺寸
-    int height;        // 尺寸
+    int type;      // ID
+    float score;   // 置信度
+    cv::Rect rect; // 框的位置，x y(左上角) width height
 };
 
 class Detection {
   public:
     std::vector<InferenceResult> results; // AI推理结果
-    std::vector<int>
-        drawSkipLabels; // 调试画面需跳过的标签(type)：normal态滤掉fork不画
 
     /**
      * @brief Construct a new Detection object
@@ -40,11 +34,10 @@ class Detection {
      */
     void inference(const cv::Mat &img);
 
-    void drawBox(cv::Mat &img);
+    void draw_box(cv::Mat &img);
     void drawBox(cv::Mat &img, const std::vector<InferenceResult> &snapshot);
 
   private:
-    std::vector<std::string> labels;
     // onnx info
     std::vector<std::string> onnx_input_names;
     std::vector<const char *> onnx_input_names_cstr;
@@ -94,6 +87,14 @@ enum : int {
     LABEL_YLEFT = 13,  // 左岔路口
     LABEL_YRIGHT = 14, // 右岔路口
 };
+
+inline const char *get_label_name(int label) {
+    constexpr const char *NAMES[] = {
+        "cone", "person", "busy", "limit", "unlimit", "stop",  "flow",  "park",
+        "gate", "cross",  "fork", "left",  "choice",  "yleft", "yright"};
+
+    return NAMES[label];
+}
 
 inline bool is_ground_label(int label) {
     return label >= LABEL_CROSS && label <= LABEL_CHOICE;

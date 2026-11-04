@@ -24,12 +24,19 @@ using std::accumulate;
 using std::cerr;
 using std::cout;
 using std::endl;
+using std::format;
 using std::ifstream;
 using std::make_unique;
+using std::max;
 using std::multiplies;
 using std::string;
-using std::to_string;
 using std::vector;
+
+namespace {
+
+constexpr int TEXT_HEIGHT = 15;
+
+}
 
 void buildNms(const string &model_dir) {
     string model_file = model_dir + "/nms.tar";
@@ -102,19 +109,6 @@ Detection::Detection(const string pathModel, float minimum_confidence)
 
     this->predictor_nna.load();
     this->predictor_nms.load();
-
-    // 模型标签加载
-    string pathLabels = pathModel + "/label_list.txt";
-
-    ifstream file(pathLabels);
-    if (!file.is_open()) {
-        cerr << "Open Lable File failed: " << pathLabels << endl;
-        exit(20);
-    }
-    string line;
-    while (getline(file, line)) {
-        labels.push_back(line);
-    }
 }
 
 void Detection::preprocess(const Mat &frame) {
@@ -253,42 +247,37 @@ void Detection::render() {
         if (result.score < minimum_confidence) // 阈值
             continue;
 
-        // turnning....
-        if ((size_t)result.type < labels.size())
-            result.label = labels[result.type];
-        result.x = data[i + 2];
-        result.y = data[i + 3];
-        result.width = data[i + 4] - data[i + 2];
-        result.height = data[i + 5] - data[i + 3];
+        result.rect.x = data[i + 2];
+        result.rect.y = data[i + 3];
+        result.rect.width = data[i + 4] - data[i + 2];
+        result.rect.height = data[i + 5] - data[i + 3];
         results.push_back(result);
     }
 }
 
-void Detection::drawBox(Mat &img) { drawBox(img, results); }
+void Detection::draw_box(Mat &img) { drawBox(img, results); }
 
 void Detection::drawBox(Mat &img, const vector<InferenceResult> &snapshot) {
-    for (const auto &item : snapshot) {
-        InferenceResult result = item;
-
-        if (find(drawSkipLabels.begin(), drawSkipLabels.end(), result.type) !=
-            drawSkipLabels.end())
-            continue; // 跳过指定标签（normal态滤掉fork，避免框盖住车道线影响画线）
-
-        auto score = to_string(result.score);
-        int pointY = result.y - 15;
-        if (pointY < 0)
-            pointY = 0;
-        cv::Rect rectText(result.x, pointY, result.width, 20);
+    for (const auto &result : snapshot) {
+        // 绘制标签文本的框
+        cv::Rect rectText(result.rect.x, max(result.rect.y - TEXT_HEIGHT, 0),
+                          result.rect.width, TEXT_HEIGHT);
         cv::rectangle(img, rectText, getCvcolor(result.type), -1);
-        string label_name =
-            result.label + " [" + score.substr(0, score.find(".") + 3) + "]";
-        cv::Rect rect(result.x, result.y, result.width, result.height);
-        cv::rectangle(img, rect, getCvcolor(result.type), 1);
 
-        if (result.y < 15)
-            result.y = 15;
-        cv::putText(img, label_name, cv::Point(result.x, result.y),
-                    cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 0, 0), 1);
+        // 绘制标签文本
+        cv::putText(
+            img,
+            format("{} [{:.3f}]", get_label_name(result.type), result.score),
+            cv::Point(result.rect.x, max(result.rect.y, TEXT_HEIGHT)),
+            cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 0, 0), 1);
+
+        // 绘制检测框
+        cv::Rect rect(result.rect.x, result.rect.y, result.rect.width,
+                      result.rect.height);
+        cv::rectangle(img, rect, getCvcolor(result.type), 1);
+        circle(img, cv::Point(result.rect.x, result.rect.y), 2,
+               Scalar(0, 255, 255),
+               -1); // 黄色点
     }
 }
 

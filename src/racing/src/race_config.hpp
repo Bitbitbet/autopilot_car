@@ -10,7 +10,6 @@ struct RaceConfig {
     // 检测
     float confidence = 0.65f;
     float maxDetectionAge = 0.40f; // 超过就当作没有 AI 结果
-    int confirmFrames = 3;         // 同一类别连续多少帧才算确认
     float confirmGap = 0.30f;      // 两次确认之间允许的最大间隔
     // 速度上限 (m/s)
     float limitedSpeed = 0.40f;  // 限速区

@@ -9,8 +9,9 @@ class Camera {
     Camera(const char *capture_source);
     Camera(const char *capture_source, uint8_t threshold_value);
     ~Camera();
-    cv::Mat binarize(const cv::Mat &img);
-    bool read(cv::Mat &frame_out);
+    bool read(cv::Mat &img);
+    cv::Mat grey();
+    cv::Mat bin();
 
     /**
      * @brief 图像坐标 -> 地面坐标（米）
@@ -48,6 +49,11 @@ class Camera {
 
     cv::VideoCapture capture;
     int capture_width, capture_height;
+
+    bool bin_updated = false, grey_updated = false;
+    cv::Mat img, cached_bin, cached_grey;
+    void generate_bin();
+    void generate_grey();
 
     void initialize(const char *capture_source);
 };

@@ -57,6 +57,10 @@ class AutoPilot {
     void update(const TrackRows &rows, const Camera &camera, float dt,
                 float previousSpeed, int branchSide = 0);
 
+    // 目标点模式：外部直接给定期望的图像列，用同一套 PD 出舵机。
+    // 不依赖中心线，所以看不见路面时也不会被判丢线。
+    void aim_at(int target_col, float dt, float previous_speed);
+
     // 按 severity / 置信度算出指令速度（含加、减速限幅）。
     float speedFor(float cruise, float dt);
 

@@ -9,6 +9,8 @@
 #include <opencv2/opencv.hpp>
 #include <utility>
 
+using cv::Mat;
+using std::cout;
 using std::greater;
 using std::map;
 using std::pair;
@@ -16,15 +18,15 @@ using std::pair;
 int main() {
     Camera camera;
     map<int, pair<int, int>, greater<int>> rows;
-    std::cout << "trackview | " << camera.cols() << "x" << camera.rows()
-              << " | ESC 退出\n";
+    cout << "trackview | " << camera.cols() << "x" << camera.rows()
+         << " | ESC 退出\n";
     while (true) {
-        cv::Mat image;
+        Mat image;
         if (!camera.read(image)) {
             std::cerr << "[Error] 取不到图像\n";
             break;
         }
-        const cv::Mat bin = camera.binarize(image);
+        const Mat bin = camera.bin();
         track_identify_from_bin(bin, camera, rows);
         track_draw_result(rows, image);
         cv::imshow("track_view", image);

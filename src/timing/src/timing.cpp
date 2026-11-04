@@ -35,11 +35,11 @@ void LoopTiming::reset() {
 }
 
 LoopTiming::Stage *LoopTiming::slot(const char *stage) {
+    if (!stage || _size >= MAX_STAGES)
+        return nullptr;
     for (size_t i = 0; i < _size; ++i)
         if (strcmp(_stages[i].name, stage) == 0)
             return &_stages[i];
-    if (!stage || _size >= MAX_STAGES)
-        return nullptr;
     _stages[_size] = {stage, 0};
     return &_stages[_size++];
 }
@@ -52,6 +52,6 @@ void LoopTiming::report() {
                _stages[i].sum / 1000.0 / _loop_count);
         sum += _stages[i].sum;
     }
-    printf(" other=%.1f\n", (_total - sum) / 1000.0 / _loop_count);
+    printf(" others=%.1f\n", (_total - sum) / 1000.0 / _loop_count);
     fflush(stdout);
 }

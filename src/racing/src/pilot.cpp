@@ -289,6 +289,30 @@ float AutoPilot::qualitySpeedLimit() const {
     return cfg::MAX_SPEED; // 健康的混合路径不额外限速
 }
 
+void AutoPilot::aim_at(int target_col, float dt, float previousSpeed) {
+    if (!std::isfinite(dt) || dt <= 0 || dt > MAX_FRAME_GAP) {
+        valid = false;
+        lost = true;
+        degraded = false;
+        confidence = 0;
+        severity = 0;
+        path_issue = "FRAME_GAP";
+        qualityGoodTime = 0;
+        centerEdge.clear();
+        resetControl();
+        return;
+    }
+    // 目标由里程计给出，不依赖中心线，所以这里永远算“可信”。
+    valid = true;
+    lost = false;
+    degraded = false;
+    confidence = 1.f;
+    path_issue = "TARGET_AIM";
+    centerEdge.clear();
+    center = std::clamp(target_col, 0, cols - 1);
+    update_steering(dt, previousSpeed, 0.f);
+}
+
 void AutoPilot::update(const TrackRows &rows, const Camera &camera, float dt,
                        float previousSpeed, int branchSide) {
     // 帧间隔异常（真的卡死）：这一帧的积分/微分都没意义，按丢线处理
