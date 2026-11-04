@@ -53,6 +53,9 @@ constexpr float ARRIVE_DIST = 0.10f;
 constexpr float AIM_MIN_FORWARD = 0.05f;
 // 认为“在画面内”的边界（像素）
 constexpr int AIM_MARGIN = 8;
+// 目标点带期望方向时，按“过目标点、在该点切向为期望方向”的圆弧行驶
+constexpr float PARK_RADIUS = 0.20f;   // 圆弧半径（米）
+constexpr float AIM_LOOKAHEAD = 0.10f; // 在圆弧上往前看多远（米）
 
 /**
  * @brief 画目标点和期望路径（车体系原点到目标点的直线，地面坐标）
@@ -86,6 +89,39 @@ void draw_target(Mat &image, const Camera &camera, const cv::Point2f &target,
     if (aiming && aim_col >= 0)
         cv::line(image, {aim_col, rows - 1}, {aim_col, rows - 50},
                  {255, 0, 255}, 1);
+}
+
+/**
+ * @brief 沿“过目标点、在该点切向为期望方向”的圆弧取一个前视点
+ *
+ * 目标点带期望方向时，直接朝点开会把最后一段变成急转（比如 0.2m 外偏 45°
+ * 的点会原地拧 45°）。这里改成沿目标圆走圆弧：车先在圆上最近点处并入，
+ * 再沿切线方向前进 lookahead，于是到达目标点时朝向已经是期望方向。
+ *
+ * @param pose     车在锚定系里的位姿（里程计）
+ * @param target   目标点 + 期望方向（都在锚定系里）
+ * @param radius   圆弧半径（米），圆心取期望方向的左法线侧
+ * @param lookahead 在圆弧上往前看多远（米）
+ * @return 车体系里的瞄准点
+ */
+cv::Point2f arc_aim(const GroundPose &pose, const RaceTarget &target,
+                    float radius, float lookahead) {
+    const double len = std::hypot(target.heading.x, target.heading.y);
+    if (len < 1e-6)
+        return pose.local(cv::Point2f(target.point));
+    const cv::Point2f d{float(target.heading.x / len),
+                        float(target.heading.y / len)};
+    const cv::Point2f n{-d.y, d.x}; // 期望方向的左法线
+    const cv::Point2f c = cv::Point2f(target.point) + n * radius; // 圆心
+    const double a_now = std::atan2(pose.y - c.y, pose.x - c.x);
+    const double a_goal =
+        std::atan2(target.point.y - c.y, target.point.x - c.x);
+    // 往目标点那一侧转（取最短角差的方向）
+    const double diff = std::remainder(a_goal - a_now, 2 * CV_PI);
+    const double a = a_now + (diff >= 0 ? 1.0 : -1.0) * lookahead / radius;
+    const cv::Point2f aim(float(c.x + radius * std::cos(a)),
+                          float(c.y + radius * std::sin(a)));
+    return pose.local(aim);
 }
 
 /**
@@ -251,7 +287,7 @@ int main(int argc, char **argv) {
     cout << "racing 启动，默认处于MANUAL模式，按a进入自动驾驶模式。按q退出。"
          << endl;
 
-    vector<cv::Point2d> targets;
+    vector<RaceTarget> targets;
     size_t target_index = 0;
     int target_seq = 0;
     bool aiming = false;
@@ -288,10 +324,10 @@ int main(int argc, char **argv) {
         // 目标点只在需要时才跟踪：锚定那一刻把里程计清零，于是“世界系”就是
         // 锚定时的车体系，targets 里每个点都是这个系里的坐标，用 pose.local()
         // 就能得到它们相对小车的当前位置（走过头就是 y 变负）。
-        if (plan.targetSeq != target_seq) {
+        if (plan.target_seq != target_seq) {
             // 新的一串目标：整串抄下来，锚定一次（位姿清零）后按顺序走。
             odometry.reset();
-            target_seq = plan.targetSeq;
+            target_seq = plan.target_seq;
             targets = plan.targets;
             target_index = 0;
             aiming = !targets.empty();
@@ -379,7 +415,7 @@ int main(int argc, char **argv) {
         timing.lap(nullptr);
         cv::Point2f target_local{};
         if (aiming) {
-            target_local = odometry.pose().local(targets[target_index]);
+            target_local = odometry.pose().local(targets[target_index].point);
             // 到点，或者已经被车开过去了（y < 0）：这个点结束，换下一个
             if (target_local.y < 0 ||
                 hypot(target_local.x, target_local.y) <= ARRIVE_DIST) {
@@ -393,7 +429,11 @@ int main(int argc, char **argv) {
         }
         int aim_col = -1;
         if (aiming) {
-            aim_col = aim_column(target_local, camera);
+            // 有期望方向就沿圆弧取前视点，否则直接朝点开
+            const cv::Point2f aim =
+                arc_aim(odometry.pose(), targets[target_index], PARK_RADIUS,
+                        AIM_LOOKAHEAD);
+            aim_col = aim_column(aim, camera);
             // 目标在画面外时先朝那一侧满舵，等它进画面再按图像列对准。
             if (aim_col < 0)
                 aim_col = target_local.x >= 0 ? camera.cols() - AIM_MARGIN

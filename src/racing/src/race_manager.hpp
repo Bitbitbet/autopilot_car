@@ -8,6 +8,13 @@
 #include <vector>
 
 // 本帧“该不该走 / 走多快 / 往哪边打舵”，横向闭环在 AutoPilot。
+// 一个目标点：位置 + 期望到达方向（车体系，米）。
+// 方向用来规划圆弧（沿圆弧切线到达），{0,0} 表示不约束、直接朝点开。
+struct RaceTarget {
+    cv::Point2d point{};
+    cv::Point2d heading{};
+};
+
 struct RacePlan {
     float speedCap = 10.f; // 速度上限，10 等于不限制
     bool stop = false;
@@ -21,8 +28,8 @@ struct RacePlan {
     // 目标点序列：车体系地面坐标（x 右正、y 前正，米），按顺序走。
     // 一次性给完；全部走完之前 targets 不变，走完后清空。
     // 换新序列 targetSeq 就 +1。
-    int targetSeq = 0;
-    std::vector<cv::Point2d> targets;
+    int target_seq = 0;
+    std::vector<RaceTarget> targets;
 };
 
 // 比赛任务层：只看 AI 标签和时间，路面几何全部交给 track/AutoPilot。
@@ -53,13 +60,12 @@ class RaceManager {
     double gateClearSince = -1, hazardClearSince = -1;
 
     // 目标点序列号
-    int targetSeq = 0;
+    int target_seq = 0;
 
     bool lastActive = false;
     bool driving_on_park_lane = false;
-    bool crossBottomSeen = false; // 车身已压过斑马线
-    bool gateWaiting = false;
-    InferenceResult gateBox{};
+    bool yfork_target_ready = false;
+    RaceTarget yfork_left_target, yfork_right_target;
 
     const std::vector<InferenceResult> &boxes_of(int label) const {
         return tracks[label].boxes;

@@ -88,19 +88,21 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
         return p;
     }
 
-    const bool is_new_observation = update_observation(snap);
+    update_observation(snap);
 
     p.branchSide = 0;
 
     // -------- TARGET POINT SECTION
+    // 走目标点期间限速
+    if (aiming)
+        p.speedCap = std::min(p.speedCap, cfg.targetSpeed);
 
     // 停车场左转：choice（地面标线）和
     // park（立牌）同时看到时生成一串目标点。
     if (!aiming) {
-        vector<Point2d> targets;
+        vector<RaceTarget> targets;
         if (seen(LABEL_CHOICE) && seen(LABEL_PARK)) {
             driving_on_park_lane = true;
-            cout << "[Target] 看到停车场，准备左转" << endl;
             const auto &choice_boxes = boxes_of(LABEL_CHOICE);
             auto park_coord = center_coord(boxes_of(LABEL_PARK).front().rect);
 
@@ -116,25 +118,60 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
             const cv::Point2d ground =
                 camera.image_to_ground(center_coord(choice.rect));
             if (isfinite(ground.x) && isfinite(ground.y)) {
-                targets = {{ground.x, ground.y - 0.3},
-                           {ground.x - 0.4, ground.y}};
-                ++targetSeq;
+                cout << "[Target] 看到停车场，准备左转" << endl;
+                // 第 1 个点直着走到库口；第 2 个点沿左侧圆弧进库（到达时朝左）
+                targets = {{{ground.x, ground.y - 0.2}, {0, 1}},
+                           {{ground.x - 0.5, ground.y}, {-1, 0}}};
+                ++target_seq;
             }
-        } else if (seen(LABEL_LEFT) && driving_on_park_lane) {
+        } else if (seen(LABEL_LEFT)) {
             auto ground = camera.image_to_ground(
                 center_coord(boxes_of(LABEL_LEFT).front().rect));
-            if (ground.y < 0.4) {
-                driving_on_park_lane = false;
-                cout << "[Target] 看到左转标识，准备左转" << endl;
-                if (isfinite(ground.x) && isfinite(ground.y)) {
-                    targets = {{ground.x - 0.2, ground.y}};
-                    ++targetSeq;
+            if (isfinite(ground.x) && isfinite(ground.y)) {
+                if (ground.y < 0.4) {
+                    driving_on_park_lane = false;
+                    cout << "[Target] 看到左转标识，准备左转离开停车场道"
+                         << endl;
+                    targets = {{{ground.x - 0.5, ground.y}, {-1, 0}}};
+                    ++target_seq;
                 }
             }
         }
+        if (seen(LABEL_FORK) && !driving_on_park_lane) {
+            auto ground = camera.image_to_ground(
+                center_coord(boxes_of(LABEL_FORK).front().rect));
+            if (isfinite(ground.x) && isfinite(ground.y)) {
+                cout << "[Target] 看到岔路标识，准备对齐" << endl;
+                targets = {{
+                               {ground.x + 0.5, ground.y - 0.3},
+                               {0, 1},
+                           },
+                           {
+                               {ground.x, ground.y},
+                               {-1, 0},
+                           }};
+                yfork_left_target = {{ground.x - 0.45, ground.y - 0.4},
+                                     {-1, 0}};
+                yfork_left_target = {{ground.x - 0.45, ground.y + 0.4},
+                                     {-1, 0}};
+                yfork_target_ready = true;
+                ++target_seq;
+            }
+        }
+        if ((seen(LABEL_YLEFT) || seen(LABEL_YRIGHT)) && yfork_target_ready) {
+            if (seen(LABEL_YLEFT)) {
+                cout << "[Target] 看到岔路方向，准备走左边" << endl;
+                targets = {{yfork_left_target}};
+            } else {
+                cout << "[Target] 看到岔路方向，准备走右边" << endl;
+                targets = {{yfork_right_target}};
+            }
+            ++target_seq;
+            yfork_target_ready = false;
+        }
         p.targets = targets;
     }
-    p.targetSeq = targetSeq;
+    p.target_seq = target_seq;
 
     if (state == State::FatalStop) {
         p.stop = true;

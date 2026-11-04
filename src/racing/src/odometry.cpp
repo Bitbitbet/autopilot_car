@@ -91,7 +91,8 @@ void GroundOdometry::update(const Mat &grey, const Camera &camera, double dt,
                              last_motion_.at<double>(1, 2);
             const Point2d img = camera.ground_to_image({x, y});
             if (isfinite(img.x) && isfinite(img.y)) {
-                const Point2f q(float(img.x) - origin.x, float(img.y) - origin.y);
+                const Point2f q(float(img.x) - origin.x,
+                                float(img.y) - origin.y);
                 // 预测跑到画面外太远就不用了
                 if (q.x > -WIN.width && q.x < ROI_W + WIN.width &&
                     q.y > -WIN.height && q.y < ROI_H + WIN.height)
@@ -104,12 +105,11 @@ void GroundOdometry::update(const Mat &grey, const Camera &camera, double dt,
     vector<Point2f> tracked = guess;
     vector<uchar> status;
     vector<float> error;
-    cv::calcOpticalFlowPyrLK(prev_pyr_, pyramid, prev_pts_, tracked, status,
-                             error, WIN, MAX_LEVEL,
-                             cv::TermCriteria(cv::TermCriteria::COUNT |
-                                                  cv::TermCriteria::EPS,
-                                              30, 0.01),
-                             cv::OPTFLOW_USE_INITIAL_FLOW);
+    cv::calcOpticalFlowPyrLK(
+        prev_pyr_, pyramid, prev_pts_, tracked, status, error, WIN, MAX_LEVEL,
+        cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30,
+                         0.01),
+        cv::OPTFLOW_USE_INITIAL_FLOW);
     // 反向再跟一次，来回对不上的是跟丢了。
     // 这里不能给初值：如果从原位置起步，来回一致性就被“人为对齐”了。
     vector<Point2f> back;

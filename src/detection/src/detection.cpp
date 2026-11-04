@@ -255,10 +255,8 @@ void Detection::render() {
     }
 }
 
-void Detection::draw_box(Mat &img) { drawBox(img, results); }
-
-void Detection::drawBox(Mat &img, const vector<InferenceResult> &snapshot) {
-    for (const auto &result : snapshot) {
+void Detection::draw_box(Mat &img) {
+    for (const auto &result : results) {
         // 绘制标签文本的框
         cv::Rect rectText(result.rect.x, max(result.rect.y - TEXT_HEIGHT, 0),
                           result.rect.width, TEXT_HEIGHT);
@@ -275,9 +273,6 @@ void Detection::drawBox(Mat &img, const vector<InferenceResult> &snapshot) {
         cv::Rect rect(result.rect.x, result.rect.y, result.rect.width,
                       result.rect.height);
         cv::rectangle(img, rect, getCvcolor(result.type), 1);
-        circle(img, cv::Point(result.rect.x, result.rect.y), 2,
-               Scalar(0, 255, 255),
-               -1); // 黄色点
     }
 }
 

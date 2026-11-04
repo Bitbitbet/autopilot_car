@@ -14,6 +14,7 @@ struct RaceConfig {
     // 速度上限 (m/s)
     float limitedSpeed = 0.40f;  // 限速区
     float approachSpeed = 0.12f; // 斑马线前
+    float targetSpeed = 0.20f;   // 走目标点（停车场）时
     // 触发行（像素，0 在图像顶部）
     int triggerRow = 290;
     int obstacleRow = 310;

@@ -62,7 +62,7 @@ class GroundOdometry {
     static constexpr int WANT_POINTS = 80;  // 想维持的角点数
     static constexpr int MIN_TRACKED = 12;  // 低于它重新提点
     static constexpr int MIN_INLIERS = 6;   // RANSAC 内点下限
-    static constexpr int MAX_LEVEL = 4;     // 光流金字塔层数
+    static constexpr int MAX_LEVEL = 3;     // 光流金字塔层数
     static constexpr float FB_ERROR = 0.5f; // 双向光流一致性（像素）
     static constexpr float RANSAC_TOLERANCE = 0.006f; // 内点阈值（米）
     static constexpr float SCALE_LIMIT = 0.02f;       // 刚体尺度允许偏差

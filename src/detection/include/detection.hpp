@@ -35,7 +35,6 @@ class Detection {
     void inference(const cv::Mat &img);
 
     void draw_box(cv::Mat &img);
-    void drawBox(cv::Mat &img, const std::vector<InferenceResult> &snapshot);
 
   private:
     // onnx info
