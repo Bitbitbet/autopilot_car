@@ -10,8 +10,9 @@
 
 struct RacePath {
     std::vector<PointX> left,right;
-    int splitRows=0;
+    int splitRows=0,choiceRows=0;
     const char *geometryReason="INVALID_ROAD_INPUT";
+    bool singleRoadAhead=false;
 };
 
 // 交通牌属于场景中的物体，牌面上的深色图案不能充当道路分隔带。
@@ -110,13 +111,36 @@ inline RacePath raceBranchPath(const cv::Mat &bin,const Track &track,int directi
         }
         // 几何检查保留所有连通支路，避免先选了牌面内部的白色而丢失两侧路面。
         low=blocks.front().first; high=blocks.back().second;
-        if(row>track.rowCutUp) rows.push_back({row,std::move(blocks)});
+        if(row>track.rowCutUp) {
+            if(blocks.size()>1)++out.choiceRows;
+            rows.push_back({row,std::move(blocks)});
+        }
         reachedFarEnd=row==0;
     }
     if(reachedFarEnd&&!rejected) out.splitRows=continuous;
     out.geometryReason=!reachedFarEnd?"FAR_END_NOT_VISIBLE":rejected?rejection:
         out.splitRows>=cfg.minBranchRows?"CONNECTED_SPLIT":"NO_CONTINUOUS_SPLIT";
 
+    // The bonnet may divide the bottom of a black road into two strips that
+    // immediately join ahead. A true fork opens ahead of the vehicle.
+    // Require a connected centre lane with a visible edge in the lookahead.
+    if(direction==0&&out.splitRows==0) {
+        bool bottomSplit=true;
+        int forwardChoices=0,edgeRun=0,previousRow=start;
+        for(const auto &r:rows) {
+            const int ahead=start-r.number;
+            if(r.blocks.size()==1||ahead>=64)bottomSplit=false;
+            if(!bottomSplit&&r.blocks.size()>1)++forwardChoices;
+            const auto [left,right]=r.blocks.front();
+            if(r.number!=previousRow-4)edgeRun=0;
+            previousRow=r.number;
+            if(ahead>=64&&ahead<=192&&r.blocks.size()==1&&left<320&&right>320&&
+               (left>2||right<637)) {
+                if(++edgeRun>=6)out.singleRoadAhead=true;
+            } else edgeRun=0;
+        }
+        if(forwardChoices>=cfg.minBranchRows)out.singleRoadAhead=false;
+    }
     low=track.pointsEdgeLeft.front().y; high=track.pointsEdgeRight.front().y;
     missing=0;
     for(const auto &r:rows) {
@@ -193,11 +217,12 @@ inline RaceEntranceEdge raceParkingEntranceEdge(const RacePath &road) {
 struct RaceForkFeedback {
     bool available=false,roadReady=false;
     float offset=0,heading=0,speed=0;
+    uint16_t appliedPwm=1500;
 };
 // Applied-command progress is only a field-tunable approach estimate, not
 // odometry. PARK size alone must neither start full lock nor wait for edges forever.
 struct RaceEntranceProgress {
-    float approach=0,signClear=0,pulseDistance=0,pulseElapsed=0;
+    float approach=0,signClear=0,pulseDistance=0,pulseElapsed=0,trackingTime=0;
     void approachStep(float dt,bool near,bool newFrame,bool parkVisible,float speed){
         if(near)approach+=std::max(0.f,speed)*dt;
         if(newFrame)signClear=parkVisible?0:signClear+dt;
@@ -210,8 +235,90 @@ struct RaceEntranceProgress {
             400*(1-std::clamp((phase-.5f)/1.25f,0.f,1.f));
     }
 };
+// During a left turn a stationary left sign moves across the camera to the
+// right edge (mirrored for right). A lone box at the edge is not a pass.
+struct RaceForkSignPass {
+    cv::Rect box;
+    double lastSeen=-1;
+    int label=-1,initialHeight=0,centeredFrames=0;
+    float steeredDistance=0;
+    bool crossedCenter=false,sawLocalSide=false;
+
+    bool update(int direction,const PredictResult *sign,double captured,bool newFrame,float dt,
+                const RaceForkFeedback &road,bool singleRoad,float maxGap) {
+        if(newFrame&&sign) {
+            const cv::Rect next{sign->x,sign->y,sign->width,sign->height};
+            const float center=next.x+next.width*.5f;
+            if(label!=sign->type||captured-lastSeen>maxGap||
+               (box&next).area()<.10f*std::min(box.area(),next.area())||
+               direction*(center-(box.x+box.width*.5f))>box.width*.50f) {
+                *this={};
+                if(direction*(center-320)<96)return false;
+                label=sign->type;initialHeight=next.height;
+            }
+            box=next;lastSeen=captured;
+            crossedCenter|=std::abs(center-320)<=64;
+        }
+        if(label<0||captured-lastSeen>1.4) {*this={};return false;}
+        const bool atExitEdge=crossedCenter&&direction*(box.x+box.width*.5f-320)<=-160&&
+            (direction<0?box.br().x>=576:box.x<=64)&&box.height>=initialHeight*1.15f;
+        if(sign&&!atExitEdge&&road.speed>0&&direction*(int(road.appliedPwm)-1500)>=100)
+            steeredDistance+=road.speed*dt;
+        const float lateral=direction*road.offset;
+        if(!atExitEdge||!road.roadReady||!std::isfinite(lateral)||!std::isfinite(road.heading)||
+           lateral<=-64||std::abs(road.heading)>=60) {
+            sawLocalSide=false;centeredFrames=0;return false;
+        }
+        if(newFrame&&road.speed>0&&lateral>=64&&lateral<160)sawLocalSide=true;
+        if(sign||!sawLocalSide||!singleRoad||std::abs(lateral)>=64||steeredDistance<.08f) {
+            centeredFrames=0;return false;
+        }
+        if(newFrame)centeredFrames=std::min(3,centeredFrames+1);
+        return centeredFrames>=3;
+    }
+};
 struct RaceYForkProgress {
+    RaceForkSignPass passingSign;
     float elapsed=0,pulsePhase=0,commandDistance=0,clearTime=0,trackingTime=0;
+    float lostDistance=0,lostMovingTime=0,confirmedTime=0;
+    float exitTurnTravel=0,exitRoadTime=0;
+    int exitRoadFrames=0;double exitLastCapture=-1;
+    int confirmedFrames=0;
+    float confirmedCenter=std::numeric_limits<float>::quiet_NaN();
+    float lastUsableCenter=std::numeric_limits<float>::quiet_NaN();
+    bool waitingForRoad=false;
+    int approachSideFrames=0;
+    bool sawApproachSide=false;
+    void resetApproachSide(){approachSideFrames=0;sawApproachSide=false;}
+    // Observe the local lane moving from the signed side towards the car.
+    // A steering command or a centred image alone cannot establish the turn.
+    void observeApproachSide(int direction,const RaceForkFeedback &road,bool newFrame) {
+        const float lateral=direction*road.offset;
+        if(!road.roadReady||!std::isfinite(lateral)||!std::isfinite(road.heading)||
+           lateral<=-64||std::abs(road.heading)>=60) {resetApproachSide();return;}
+        if(!newFrame||sawApproachSide)return;
+        if(pulsePhase>=.4f&&road.speed>0&&lateral>=64&&lateral<160) {
+            if(++approachSideFrames>=2)sawApproachSide=true;
+        } else approachSideFrames=0;
+    }
+    void clearConfirmation() { confirmedFrames=0;confirmedTime=0;confirmedCenter=std::numeric_limits<float>::quiet_NaN(); }
+    // Near-road feedback describes the previous command interval. Once the sign
+    // pulse ends, only sustained usable geometry may replenish this allowance.
+    void observeTarget(bool usable,float center,bool newFrame,float dt,float appliedSpeed,bool signedReference) {
+        if(!usable) {
+            clearConfirmation();
+            if(appliedSpeed>0) {lostDistance+=appliedSpeed*dt;lostMovingTime+=dt;}
+            if(lostDistance>=.12f||lostMovingTime>=.90f)waitingForRoad=true;
+        } else if(newFrame) {
+            if(std::isfinite(confirmedCenter)&&std::abs(center-confirmedCenter)>=80)clearConfirmation();
+            confirmedCenter=center;++confirmedFrames;confirmedTime+=dt;
+            if(confirmedFrames>=3&&confirmedTime>=.18f) {
+                // Only a measured far end can identify this arm after a later loss.
+                if(signedReference)lastUsableCenter=center;
+                waitingForRoad=false;lostDistance=lostMovingTime=0;
+            }
+        }
+    }
     void update(float dt,bool newObservation,bool signPresent,const RaceForkFeedback &road) {
         elapsed+=dt;
         const float speed=road.available&&std::isfinite(road.speed)?std::max(0.f,road.speed):.20f;
@@ -230,25 +337,50 @@ struct RaceYForkProgress {
         else trackingTime=0;
     }
     bool complete()const{return pulsePhase>=1.4f&&commandDistance>=.30f&&clearTime>=.60f&&trackingTime>=.60f;}
+    bool observeExitRoad(const RaceForkFeedback &road,bool newObservation,float dt,bool selectedRoad,bool singleRoad,int direction,double captured) {
+        // A view of a straight aisle before the car actually steers left cannot
+        // complete the exit. Distance here is applied-command evidence only.
+        if(!(dt>0&&dt<=.25f)||!std::isfinite(captured)){exitRoadFrames=0;exitRoadTime=0;return false;}
+        if(road.available&&road.speed>0&&direction*(int(road.appliedPwm)-1500)>=80)
+            exitTurnTravel+=road.speed*dt;
+        const bool tracking=selectedRoad&&singleRoad&&road.available&&road.roadReady&&
+            std::abs(road.offset)<64&&std::abs(road.heading)<60&&exitTurnTravel>=.08f;
+        if(!tracking){exitRoadFrames=0;exitRoadTime=0;return false;}
+        if(!newObservation)return false;
+        if(captured<=exitLastCapture||captured-exitLastCapture>.30){exitRoadFrames=0;exitRoadTime=0;}
+        exitRoadTime+=exitRoadFrames?float(captured-exitLastCapture):0;
+        exitLastCapture=captured;++exitRoadFrames;
+        // At the travel bound the vehicle may stand still and verify the
+        // acquired road. Forward speed cannot be a prerequisite to release it.
+        return commandDistance>=.30f&&pulsePhase>=1.4f&&exitRoadFrames>=3&&exitRoadTime>=.24f&&
+            std::abs(road.offset)<48&&std::abs(road.heading)<45;
+    }
 };
 
 struct RacePlan {
     float speedCap=10.f;
     bool stop=false,buzzer=false,fresh=false;
+    cv::Rect acceptedStopBox{}; // Same-frame reviewed detection, independent of approach distance.
+    cv::Rect acceptedCrossBox{};
+    bool acceptedCrossAtPassRow=false;
     bool selectedBranch=false;
     bool alignRoad=false;
-    bool parkingEntryCommit=false;
+    bool parkingTurnCommit=false;
     int parkingOpeningRow=-1;
     bool parkingEdgeEstimated=false;
     bool parkingEntryFallback=false;
     float parkingApproachCommandM=0;
     bool gateWaiting=false,gateOpened=false;
+    cv::Rect gateClearRegion{};
+    float gateRoadFraction=-1,gateYellowFraction=-1;
     int guideDirection=0;
     int completedDirection=0;
     float forkCommandDistance=0,forkTrackingTime=0,forkSignClearTime=0,forkPulsePhase=0;
+    float forkLostDistance=0,forkLostMovingTime=0;
     float guidePwm=0;
     float laneBlend=1; // 0: sign guidance; 1: selected-road pilot, including countersteer.
-    int colorRejectedComponents=0,geometrySplitRows=0;
+    int colorRejectedComponents=0,geometrySplitRows=0,geometryChoiceRows=0;
+    bool singleRoadAhead=false;
     const char *geometryReason="INVALID_ROAD_INPUT";
     double detectionAge=-1;
     const char *state="AI_WAIT",*reason="AI_WAIT";
@@ -275,6 +407,7 @@ class RaceManager {
     RaceEntranceProgress entranceProgress;
     bool entranceGuided=false;
     bool entranceGatePassed=false;
+    bool exitRoute=false;
     float targetVisibleTime=0,handoffTime=0,alignedTime=0,handoffPwm=300;
     float targetCenter=std::numeric_limits<float>::quiet_NaN();
     enum class State { Lane,ForkArmed,ForkSelect,CrossApproach,SignalWait,ReviewStop,Fault };
@@ -289,7 +422,7 @@ class RaceManager {
     // actuator range; target-road visibility still governs the handoff.
     float guidancePwm(double elapsed)const {
         if(entranceGuided)return entranceProgress.pwm();
-        if(routeArmed)return 360+40*std::clamp(float(elapsed/.20),0.f,1.f);
+        if(routeArmed&&!exitRoute)return 360+40*std::clamp(float(elapsed/.20),0.f,1.f);
         // A Y fork is shallower than the parking entrance. Use an initial
         // directional pulse, then ease off instead of holding full lock until
         // a restrictive far-road test eventually succeeds.
@@ -313,9 +446,7 @@ class RaceManager {
     }
     bool seen(int label) const { return confirmed[label]; }
     bool near(int label,int row) const { return seen(label)&&boxes[label].y+boxes[label].height>=row; }
-    bool gatePassageClear(const RaceSnapshot &snap,const cv::Mat &bin,const cv::Mat &image)const {
-        if(counts[LABEL_GATE]||bin.type()!=CV_8UC1||bin.size()!=cv::Size(640,480)||
-           image.type()!=CV_8UC3||image.size()!=bin.size()||snap.image.type()!=CV_8UC3||snap.image.size()!=bin.size())return false;
+    cv::Rect gatePassageRegion()const {
         const int width=std::clamp(gateBox.width/2,60,160);
         // Near the sensor the last bar box reaches the bonnet. Once lifted,
         // that old rectangle contains our own car, not a blocked passage.
@@ -323,8 +454,15 @@ class RaceManager {
         // rejection and the continuous stopped clearance interval.
         const int height=std::clamp(gateBox.height,16,64);
         const int row=std::min(gateBox.y,370-height);
-        const cv::Rect region=cv::Rect(gateBox.x+gateBox.width/2-width/2,row,width,height)&cv::Rect(0,0,640,480);
-        if(region.width<40||region.height<8||cv::countNonZero(bin(region))<region.area()*.85)return false;
+        return cv::Rect(gateBox.x+gateBox.width/2-width/2,row,width,height)&cv::Rect(0,0,640,480);
+    }
+    bool gatePassageClear(const RaceSnapshot &snap,const cv::Mat &bin,const cv::Mat &image,RacePlan &p)const {
+        const auto &region=p.gateClearRegion;
+        if(counts[LABEL_GATE]||bin.type()!=CV_8UC1||bin.size()!=cv::Size(640,480)||
+           image.type()!=CV_8UC3||image.size()!=bin.size()||snap.image.type()!=CV_8UC3||snap.image.size()!=bin.size()||
+           region.width<40||region.height<8)return false;
+        p.gateRoadFraction=float(cv::countNonZero(bin(region)))/region.area();
+        if(p.gateRoadFraction<.85f)return false;
         for(const auto &d:snap.detections) {
             if(d.type!=LABEL_PERSON&&d.type!=LABEL_CONE&&d.type!=LABEL_BUSY)continue;
             if(reviewRaceDetection(d,snap.image,cfg,&snap.crosswalk).accepted&&
@@ -334,11 +472,12 @@ class RaceManager {
         // binarize as road. Do not call a still-yellow passage unobstructed.
         cv::Mat hsv,yellow;cv::cvtColor(image(region),hsv,cv::COLOR_BGR2HSV);
         cv::inRange(hsv,cv::Scalar(15,100,90),cv::Scalar(40,255,255),yellow);
-        return cv::countNonZero(yellow)<region.area()*.08;
+        p.gateYellowFraction=float(cv::countNonZero(yellow))/region.area();
+        return p.gateYellowFraction<.08f;
     }
     bool updateObservation(const RaceSnapshot &snap,bool fresh) {
         if(!fresh||snap.sequence<=lastSequence||snap.captured<=lastCapture) return false;
-        if(lastCapture<0||snap.captured-lastCapture>cfg.confirmGap) counts.fill(0);
+        if(lastCapture<0||snap.captured-lastCapture>cfg.confirmGap){counts.fill(0);gateClearSince=-1;}
         lastSequence=snap.sequence; lastCapture=snap.captured;
         std::array<bool,15> present{};
         for(const auto &d:snap.detections) {
@@ -370,8 +509,10 @@ public:
         return !s.failed&&s.sequence>0&&std::isfinite(s.captured)&&time>=s.captured&&time-s.captured<=cfg.maxDetectionAge;
     }
     RacePlan update(const RaceSnapshot &snap,double time,float dt,bool active,const cv::Mat &bin,const Track &track,
-                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false,float parkingAreaSpeed=0,const RaceForkFeedback &road={},bool parkingEntrance=false,bool parkingEntryNear=false) {
+                    const cv::Mat &currentImage={},bool calibratedConeBypass=false,bool taughtParkingManeuver=false,int routeDirection=0,bool continueGeometry=false,bool confirmedRouteSign=false,float parkingAreaSpeed=0,const RaceForkFeedback &road={},bool parkingEntrance=false,bool parkingEntryNear=false,bool parkingAisle=false,bool parkingExit=false,bool finalReturn=false) {
         now=time;
+        if(parkingExit&&!exitRoute)yProgress={};
+        exitRoute=parkingExit;
         RacePlan p;
         p.gateWaiting=gateWaiting;
         const float forkSpeed=parkingAreaSpeed>0?parkingAreaSpeed:cfg.forkSpeed;
@@ -385,6 +526,7 @@ public:
             raceAppearanceGeometry(bin,currentImage,p.colorRejectedComponents):bin;
         if(p.colorRejectedComponents) geometry=raceBranchPath(geometryBin,track,0,cfg,signRegions);
         p.geometrySplitRows=geometry.splitRows;
+        p.geometryChoiceRows=geometry.choiceRows;p.singleRoadAhead=geometry.singleRoadAhead;
         p.geometryReason=geometry.geometryReason;
         if(active!=lastActive) {
             // 人工介入后不继续先前的定时动作；限速区域标志仍保留，不能靠按 a 取消限速。
@@ -393,17 +535,29 @@ public:
         }
         if(!active) { p.state="MANUAL"; p.reason="MANUAL"; return p; }
         if(!p.fresh) {
+            yProgress.passingSign={};
             yProgress.clearTime=yProgress.trackingTime=0;
+            yProgress.clearConfirmation();
+            yProgress.resetApproachSide();
             p.stop=true; p.state="AI_WAIT"; p.reason=snap.failed?"AI_FAILED":"AI_STALE";
             counts.fill(0); confirmed.fill(false); splitTime=exitTime=0;entranceOpeningTime=0;
             // 无新观测时不累计恢复或穿越时间，也不能沿用旧方向继续完成动作。
             // During the parking entrance, a temporary data hold must not
             // turn the recovered watchdog into a permanent route fault.
-            if(state==State::ForkSelect&&!parkingEntrance) { enter(State::Fault); reviewReason="FORK_AI_STALE"; }
+            if(state==State::ForkSelect&&!parkingEntrance&&!parkingAisle&&!parkingExit) { enter(State::Fault); reviewReason="FORK_AI_STALE"; }
             gateClearSince=hazardClearSince=-1; return p;
         }
-        if(!std::isfinite(dt)||dt<=0||dt>0.25f) { p.stop=true; p.state="FRAME_WAIT"; p.reason="FRAME_GAP"; return p; }
+        if(!std::isfinite(dt)||dt<=0||dt>0.25f) { yProgress.passingSign={};yProgress.clearConfirmation();yProgress.resetApproachSide();p.stop=true; p.state="FRAME_WAIT"; p.reason="FRAME_GAP"; return p; }
         if(newFrame) {
+            if(counts[LABEL_CROSS]>0) {
+                const auto &d=boxes[LABEL_CROSS];
+                p.acceptedCrossBox={d.x,d.y,d.width,d.height};
+                p.acceptedCrossAtPassRow=d.y+d.height>=cfg.crossPassedRow;
+            }
+            if(counts[LABEL_STOP]>0) {
+                const auto &d=boxes[LABEL_STOP];
+                p.acceptedStopBox={d.x,d.y,d.width,d.height};
+            }
             if(seen(LABEL_LIMIT)) limited=true;
             else if(seen(LABEL_UNLIMIT)) limited=false;
         }
@@ -432,12 +586,15 @@ public:
         if(state==State::ReviewStop||state==State::Fault) {
             p.stop=true; p.state="REVIEW_STOP"; p.reason=reviewReason; return p;
         }
-        if(state!=State::CrossApproach&&state!=State::SignalWait&&newFrame&&near(LABEL_STOP,cfg.triggerRow)) {
+        if(!finalReturn&&state!=State::CrossApproach&&state!=State::SignalWait&&newFrame&&near(LABEL_STOP,cfg.triggerRow)) {
             crossBottomSeen=false; lastCrossSeen=now;
             enter(cfg.stopAfterCross?State::CrossApproach:State::SignalWait);
         }
         // 道闸优先于路线选择；抬杆或连续看清原横杆处的空路面才能放行。
-        if(newFrame&&counts[LABEL_GATE]>0&&boxes[LABEL_GATE].y+boxes[LABEL_GATE].height>=cfg.triggerRow&&
+        // Gate proximity has its own sensor reference; the generic sign row
+        // must not postpone a gate stop which is now earlier than that row.
+        const int gateApproachRow=std::min(cfg.triggerRow,cfg.gateStopRow-50);
+        if(newFrame&&counts[LABEL_GATE]>0&&boxes[LABEL_GATE].y+boxes[LABEL_GATE].height>=gateApproachRow&&
            boxes[LABEL_GATE].width>=boxes[LABEL_GATE].height&&!gateWaiting) {
             gateBox=boxes[LABEL_GATE]; gateWaiting=true; gateClearSince=-1;
             gateAtSensor=gateBox.y+gateBox.height>=cfg.gateStopRow;
@@ -446,16 +603,19 @@ public:
             if(newFrame) {
                 const auto &g=boxes[LABEL_GATE];
                 if(counts[LABEL_GATE]>0&&g.width>=g.height){
-                    gateBox=g;
+                    // The stopped horizontal bar marks the road to inspect after lifting.
+                    // A rising arm can still have a wide box. Following it would inspect the wall.
+                    if(!gateAtSensor&&g.y+g.height>=gateBox.y+gateBox.height)gateBox=g;
                     gateAtSensor|=g.y+g.height>=cfg.gateStopRow;
                 }
+                p.gateClearRegion=gatePassageRegion();
                 const float center=g.x+g.width*.5f;
                 // A raised bar may be above either end of its former horizontal
                 // footprint, not within 160px of the old box centre.
                 const bool sameArea=center>=gateBox.x-48&&center<=gateBox.x+gateBox.width+48&&
                     std::abs(g.y+g.height-gateBox.y-gateBox.height)<120;
                 const bool open=seen(LABEL_GATE)&&sameArea&&g.height>=60&&g.width<float(g.height)*cfg.gateOpenAspect;
-                if(open||gatePassageClear(snap,bin,currentImage)) { if(gateClearSince<0) gateClearSince=now; }
+                if(open||gatePassageClear(snap,bin,currentImage,p)) { if(gateClearSince<0) gateClearSince=now; }
                 else gateClearSince=-1;
                 if(gateClearSince>=0&&now-gateClearSince>=std::max(cfg.clearTime,cfg.gateHoldTime)) {
                     gateWaiting=false;gateAtSensor=false;p.gateOpened=true;gatePassCommandRemaining=.40f;
@@ -463,7 +623,11 @@ public:
                     // The entrance road has already been acquired. Its gate
                     // release is a stronger phase landmark than requiring the
                     // branched parking aisle to look like a single straight road.
-                    if(parkingEntrance&&routeArmed&&direction==-1&&state==State::ForkSelect)
+                    const bool guidedAisle=state==State::ForkArmed&&entranceGuided&&
+                        entranceProgress.pwm()<=0&&entranceProgress.pulseDistance>=.30f&&
+                        road.available&&road.roadReady&&std::isfinite(road.offset)&&std::isfinite(road.heading)&&
+                        std::abs(road.offset)<64&&std::abs(road.heading)<60;
+                    if(parkingEntrance&&routeArmed&&direction==-1&&(state==State::ForkSelect||guidedAisle))
                         entranceGatePassed=true;
                     p.speedCap=std::min(p.speedCap,cfg.parkingSpeed);
                 }
@@ -492,6 +656,9 @@ public:
             }
         }
         if(gateWaiting||hazardWaiting) {
+            yProgress.passingSign={};
+            yProgress.clearConfirmation();
+            yProgress.resetApproachSide();
             yProgress.clearTime=yProgress.trackingTime=0;
             if(seekSince>=0)seekSince+=dt;
             if(state==State::ForkArmed||state==State::ForkSelect){stateSince+=dt;directionUntil+=dt;}
@@ -502,6 +669,9 @@ public:
             p.stop=true;
             p.state=gateWaiting?"GATE_WAIT":"OBSTACLE_WAIT";
             p.reason=gateWaiting?"GATE_NOT_VERIFIED_OPEN":hazardConeWaiting?"CONE_ROUTE_OR_RESTART_REQUIRED":"OBSTACLE_PLANNER_PENDING";
+            if(gateWaiting&&!gateAtSensor&&!hazardWaiting&&counts[LABEL_GATE]==0){
+                p.state="GATE_APPROACH_HOLD";p.reason="WAIT_FOR_GATE_VIEW";
+            }
             if(gateWaiting&&gateClearSince>=0&&!hazardWaiting){p.state="GATE_OPEN_DWELL";p.reason="OPEN_PASSAGE_ONE_SECOND_HOLD";}
             // Approach the side sensor along the current road, rather than
             // stopping as soon as the distant bar reaches the generic row.
@@ -536,9 +706,18 @@ public:
             }
             return p;
         }
+        // Once the mission owns the parking aisle, old entrance selection and
+        // repeated bay/arrow splits must not keep pulling into the left edge.
+        // All traffic stops above still take priority.
+        if(parkingAisle) {
+            if(state==State::ForkArmed||state==State::ForkSelect)enter(State::Lane);
+            routeArmed=false;direction=0;entranceGatePassed=false;
+            p.alignRoad=true;p.state=limited?"LIMIT_ZONE":"LANE";p.reason="PARKING_AISLE_CURRENT_ROAD";
+            return p;
+        }
         const bool leftSign=seen(LABEL_YLEFT)||seen(LABEL_LEFT),rightSign=seen(LABEL_YRIGHT);
         if(!parkingEntrance)entranceGatePassed=false;
-        if(parkingEntrance&&entranceGatePassed&&state==State::ForkSelect) {
+        if(parkingEntrance&&entranceGatePassed&&(state==State::ForkSelect||state==State::ForkArmed)) {
             entranceGatePassed=false;routeArmed=false;
             p.completedDirection=-1;enter(State::Lane);cooldownUntil=now+cfg.cooldown;
             p.alignRoad=true;p.state=limited?"LIMIT_ZONE":"LANE";
@@ -580,10 +759,26 @@ public:
                 // Fresh data resumes edge tracking, never a new full-lock pulse.
                 enter(State::ForkSelect);handoffPwm=0;handoffTime=1;
             }
-            if(entranceGuided)entranceProgress.pulseStep(dt,road.available&&std::isfinite(road.speed)?road.speed:0);
+            entranceProgress.pulseStep(dt,road.available&&std::isfinite(road.speed)?road.speed:0);
             p.parkingEntryFallback=entranceGuided;p.parkingApproachCommandM=entranceProgress.approach;
+            // A raised/missed entrance gate is not a reason to stay in the
+            // entrance forever. Confirm sustained local aisle tracking after
+            // acquiring the road and finishing the bounded entry pulse.
+            if(newFrame) {
+                const bool acquired=(state==State::ForkSelect&&handoffTime>=.65f)||
+                    (state==State::ForkArmed&&entranceGuided&&entranceProgress.pwm()<=0);
+                const bool tracking=acquired&&
+                    (!entranceGuided||entranceProgress.pwm()<=0)&&road.available&&road.roadReady&&road.speed>0&&
+                    std::isfinite(road.offset)&&std::isfinite(road.heading)&&std::abs(road.offset)<64&&std::abs(road.heading)<60;
+                entranceProgress.trackingTime=tracking?entranceProgress.trackingTime+dt:0;
+            }
+            if(entranceProgress.pulseDistance>=.30f&&entranceProgress.trackingTime>=.60f) {
+                routeArmed=false;enter(State::Lane);cooldownUntil=now+cfg.cooldown;
+                p.completedDirection=-1;p.alignRoad=true;p.state=limited?"LIMIT_ZONE":"LANE";
+                p.reason="PARKING_ENTRANCE_AISLE_TRACKED_FIND_BAY";return p;
+            }
         } else {entranceOpeningTime=0;entranceProgress={};entranceGuided=false;}
-        p.parkingEntryCommit=parkingEntrance;
+        p.parkingTurnCommit=parkingEntrance||parkingExit;
         if(state==State::Lane&&now>=cooldownUntil&&newFrame) {
             if(routeDirection!=0&&(geometry.splitRows>=cfg.minBranchRows||
                 (confirmedRouteSign&&routeDirection==-1)||
@@ -601,14 +796,81 @@ public:
                 direction=2;routeArmed=false;directionUntil=now+cfg.directionMemory;enter(State::ForkArmed);
             }
         }
-        if(!routeArmed&&(direction==-1||direction==1)&&(state==State::ForkArmed||state==State::ForkSelect)) {
-            yProgress.update(dt,newFrame,counts[LABEL_YLEFT]||counts[LABEL_YRIGHT]||counts[LABEL_LEFT],road);
-            p.forkCommandDistance=yProgress.commandDistance;p.forkTrackingTime=yProgress.trackingTime;
-            p.forkSignClearTime=yProgress.clearTime;p.forkPulsePhase=yProgress.pulsePhase;
-            if(yProgress.complete()) {
+        const bool ordinaryFork=!routeArmed&&!parkingExit&&(direction==-1||direction==1)&&
+            (state==State::ForkArmed||state==State::ForkSelect);
+        RacePath signedPath;
+        bool usableTarget=false,oppositeRoad=false,nearHandoff=false,passedSignHandoff=false,selectedRoadMerged=false;
+        if((!routeArmed||parkingExit)&&(direction==-1||direction==1)&&(state==State::ForkArmed||state==State::ForkSelect)) {
+            yProgress.update(dt,newFrame,!parkingExit&&(counts[LABEL_YLEFT]||counts[LABEL_YRIGHT]||counts[LABEL_LEFT]),road);
+            p.forkCommandDistance=yProgress.commandDistance;p.forkSignClearTime=yProgress.clearTime;p.forkPulsePhase=yProgress.pulsePhase;
+            if(ordinaryFork) {
+                if(state==State::ForkArmed&&road.available) {
+                    yProgress.observeApproachSide(direction,road,newFrame);
+                    const int label=direction>0?LABEL_YRIGHT:counts[LABEL_YLEFT]?LABEL_YLEFT:LABEL_LEFT;
+                    const bool conflicting=direction<0?counts[LABEL_YRIGHT]:(counts[LABEL_YLEFT]||counts[LABEL_LEFT]);
+                    if(conflicting||snap.sequence!=lastSequence||snap.captured!=lastCapture)yProgress.passingSign={};
+                    else passedSignHandoff=yProgress.passingSign.update(direction,counts[label]?&boxes[label]:nullptr,
+                        snap.captured,newFrame,dt,road,geometry.singleRoadAhead,cfg.confirmGap);
+                    nearHandoff=(yProgress.sawApproachSide||passedSignHandoff)&&geometry.singleRoadAhead&&yProgress.pulsePhase>=1.4f&&
+                        yProgress.commandDistance>=.25f&&yProgress.clearTime>0&&std::abs(road.offset)<64;
+                }
+                signedPath=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true);
+                float near=0,far=0,heading=0;
+                const bool visible=corridorCenters(signedPath,near,far,heading);
+                const bool sameTrack=state==State::ForkSelect&&!yProgress.waitingForRoad&&std::isfinite(targetCenter)&&
+                    std::abs(far-targetCenter)<80;
+                oppositeRoad=!sameTrack&&direction*(far-near)<-40&&direction*(far-320)<-20;
+                const bool sideVisible=geometry.choiceRows>=cfg.minBranchRows||
+                    (direction*(far-near)>40&&direction*(far-320)>20);
+                const bool matchesPrior=std::isfinite(yProgress.lastUsableCenter)&&std::abs(far-yProgress.lastUsableCenter)<64;
+                usableTarget=nearHandoff||(visible&&!oppositeRoad&&road.roadReady&&(sideVisible||matchesPrior||
+                    (!yProgress.waitingForRoad&&(sameTrack||std::abs(near-320)<64))));
+                // Once the chosen arm has actually been followed, a split only
+                // beside the bonnet must not keep the fork speed cap for a lap.
+                // Keep loss/reacquisition independent: the selected arm must
+                // still be visible and continuous with its confirmed far end.
+                selectedRoadMerged=visible&&sameTrack&&matchesPrior&&handoffTime>=.25f&&
+                    geometry.singleRoadAhead;
+                if(!usableTarget||(!nearHandoff&&!selectedRoadMerged&&geometry.choiceRows>=cfg.minBranchRows))yProgress.trackingTime=0;
+                if(road.available&&(state==State::ForkSelect||yProgress.pulsePhase>=1.4f)) {
+                    const bool wasWaiting=yProgress.waitingForRoad;
+                    yProgress.observeTarget(usableTarget,nearHandoff?320+road.offset:far,newFrame,dt,road.speed,!nearHandoff);
+                    p.forkLostDistance=yProgress.lostDistance;p.forkLostMovingTime=yProgress.lostMovingTime;
+                    if(yProgress.waitingForRoad) {
+                        // Keep evaluating the indicated branch with the pilot
+                        // while stopped, even if an unrelated lane is visible.
+                        p.path=std::move(signedPath);p.selectedBranch=!nearHandoff&&visible&&!oppositeRoad;
+                        p.alignRoad=true;p.guideDirection=direction;p.guidePwm=0;
+                        p.speedCap=std::min(p.speedCap,forkSpeed);
+                        p.stop=true;p.state="FORK_HOLD";p.reason="SIGNED_FORK_WAIT_TARGET_ROAD";
+                        return p;
+                    }
+                    if(wasWaiting&&!nearHandoff) {
+                        enter(State::ForkSelect);targetCenter=far;handoffPwm=0;handoffTime=1;
+                    }
+                }
+            }
+            p.forkTrackingTime=yProgress.trackingTime;
+            float exitNear=0,exitFar=0,exitHeading=0;
+            const bool exitRoadContinuous=parkingExit&&state==State::ForkSelect&&handoffTime>=.65f&&
+                corridorCenters(geometry,exitNear,exitFar,exitHeading)&&std::abs(exitFar-targetCenter)<96;
+            const bool rejoined=parkingExit?yProgress.observeExitRoad(road,newFrame,dt,exitRoadContinuous,
+                geometry.singleRoadAhead&&geometry.splitRows==0,direction,snap.captured):
+                yProgress.complete()&&(!ordinaryFork||(usableTarget&&newFrame&&road.speed>0&&
+                    (nearHandoff||selectedRoadMerged||geometry.choiceRows<cfg.minBranchRows)));
+            if(rejoined) {
                 p.completedDirection=direction;enter(State::Lane);cooldownUntil=now+cfg.cooldown;
-                p.state=limited?"LIMIT_ZONE":"LANE";p.reason="SIGNED_FORK_CURRENT_ROAD_REJOINED";
+                p.state=limited?"LIMIT_ZONE":"LANE";p.reason=parkingExit?"PARK_EXIT_CONFIRMED_ROAD_REJOINED":"SIGNED_FORK_CURRENT_ROAD_REJOINED";
                 p.alignRoad=true;return p; // release only the fork cap; traffic limits remain
+            }
+            if(nearHandoff) {
+                p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
+                p.reason=passedSignHandoff&&!yProgress.sawApproachSide?"SIGNED_FORK_PASSED_SIGN_ROAD_HANDOFF":"SIGNED_FORK_NEAR_ROAD_HANDOFF";
+                p.alignRoad=true;p.speedCap=std::min(p.speedCap,forkSpeed);return p;
+            }
+            if(parkingExit&&yProgress.commandDistance>=.80f) {
+                p.stop=true;p.state="PARK_EXIT_REJOIN_HOLD";p.reason="EXIT_ROAD_NOT_REACQUIRED_WITHIN_TRAVEL";
+                return p;
             }
         }
         if(state==State::ForkArmed) {
@@ -618,7 +880,7 @@ public:
                 // 31..103, never reaching the old ground-object row145 gate.
                 // Confirmed sign direction itself starts the road search.
                 if(seekSince<0)seekSince=now;
-                p.guidePwm=guidancePwm(routeArmed?now-seekSince:yProgress.pulsePhase);p.laneBlend=0;
+                p.guidePwm=guidancePwm(routeArmed&&!parkingExit?now-seekSince:yProgress.pulsePhase);p.laneBlend=0;
             }
             p.speedCap=std::min(p.speedCap,forkSpeed);
             p.state="FORK_ARMED"; p.reason=direction<0?"WAIT_LEFT_SPLIT":"WAIT_RIGHT_SPLIT";
@@ -643,8 +905,10 @@ public:
                         p.state=direction<0?"FORK_SEEK_LEFT":"FORK_SEEK_RIGHT";
                         p.reason="STRONG_SIGN_GUIDANCE_FIND_TARGET_ROAD";
                         if(entranceGuided)p.reason="PARK_APPROACH_DONE_BOUNDED_LEFT_GUIDANCE";
-                        p.guidePwm=guidancePwm(routeArmed?elapsed:yProgress.pulsePhase);p.laneBlend=0;
-                        const auto candidate=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true);
+                        p.guidePwm=guidancePwm(routeArmed&&!parkingExit?elapsed:yProgress.pulsePhase);p.laneBlend=0;
+                        RacePath routeCandidate;
+                        if(!ordinaryFork)routeCandidate=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true);
+                        const auto &candidate=ordinaryFork?signedPath:routeCandidate;
                         float nearCenter=0,farCenter=0,heading=0,unionNear=0,unionFar=0,unionHeading=0;
                         const bool visible=corridorCenters(candidate,nearCenter,farCenter,heading);
                         const bool splitTarget=geometry.splitRows>=cfg.minBranchRows&&
@@ -654,7 +918,7 @@ public:
                         // After the initial Y turn, a connected single road can
                         // be off-centre/tilted: requiring it to be aligned before
                         // allowing alignment control is a circular dependency.
-                        const bool centeredAfterTurn=!routeArmed&&yProgress.pulsePhase>=1.0&&geometry.splitRows==0&&
+                        const bool centeredAfterTurn=(!routeArmed||parkingExit)&&!oppositeRoad&&yProgress.pulsePhase>=1.0&&geometry.splitRows==0&&
                             std::abs(nearCenter-320)<130;
                         const bool entrySide=!parkingEntrance||(direction*(nearCenter-320)>-64&&direction*(farCenter-320)>20);
                         const bool target=visible&&entrySide&&(splitTarget||sameTarget||centeredAfterTurn||
@@ -666,6 +930,7 @@ public:
                         targetCenter=target?farCenter:std::numeric_limits<float>::quiet_NaN();
                         if(targetVisibleTime>=std::max(.18f,cfg.forkConfirmTime)) {
                             const float guide=p.guidePwm;enter(State::ForkSelect);handoffPwm=guide;p.buzzer=true;
+                            if(ordinaryFork||parkingExit)targetCenter=farCenter;
                         } else if(elapsed>=cfg.forkMaxTime) {enter(State::Fault);reviewReason="SIGNED_ROAD_REACQUIRE_TIMEOUT";}
                         if(p.guidePwm<=0){p.guideDirection=0;p.alignRoad=true;p.reason="SIGN_PULSE_COMPLETE_ROAD_RECOVERY";}
                     }
@@ -679,14 +944,15 @@ public:
             p.guideDirection=direction==2?0:direction;p.guidePwm=0;
             p.speedCap=std::min(p.speedCap,forkSpeed);
             p.state=direction<0?"FORK_LEFT":direction==2?"FORK_STRAIGHT":"FORK_RIGHT"; p.reason=routeArmed?"MISSION_CONNECTED_BRANCH":"CONNECTED_BRANCH";
-            p.path=raceBranchPath(geometryBin,track,direction,cfg,signRegions,true); p.selectedBranch=true;
+            p.path=ordinaryFork?std::move(signedPath):raceBranchPath(geometryBin,track,direction,cfg,signRegions,true); p.selectedBranch=true;
             if(parkingEntrance&&!entranceGuided){p.path=entrance.path;p.parkingEdgeEstimated=true;}
-            if(geometry.splitRows==0&&!parkingEntrance)p.path=raceBranchPath(geometryBin,track,2,cfg,signRegions,false);
+            if(!ordinaryFork&&(!parkingExit||handoffTime>=.65f)&&geometry.splitRows==0&&(!parkingEntrance||(entranceGuided&&entranceProgress.pwm()<=0)))
+                p.path=raceBranchPath(geometryBin,track,2,cfg,signRegions,false);
             bool aligned=direction==2;
             if(direction!=2) {
                 float nearCenter=0,farCenter=0,heading=0;
                 const bool visible=corridorCenters(p.path,nearCenter,farCenter,heading);
-                const bool continuous=visible&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<96);
+                const bool continuous=visible&&!oppositeRoad&&(!std::isfinite(targetCenter)||std::abs(farCenter-targetCenter)<96);
                 p.guidePwm=handoffPwm;p.laneBlend=std::clamp(handoffTime/(routeArmed?.65f:.25f),0.f,1.f);
                 if(parkingEntrance&&!entranceGuided){p.guidePwm=0;p.laneBlend=1;}
                 if(entranceGuided)p.guidePwm=std::min(p.guidePwm,entranceProgress.pwm());
@@ -698,7 +964,7 @@ public:
                     p.selectedBranch=false;p.path={};p.laneBlend=1;p.guidePwm=0;p.guideDirection=0;p.alignRoad=true;
                     p.reason="TARGET_ROAD_LOST_CURRENT_LANE_RECOVERY";return p;
                 }
-                if(continuous&&p.laneBlend>=1&&std::abs(nearCenter-320)<40&&std::abs(heading)<12)alignedTime+=dt;
+                if(continuous&&(!ordinaryFork||!road.available||usableTarget)&&p.laneBlend>=1&&std::abs(nearCenter-320)<40&&std::abs(heading)<12)alignedTime+=dt;
                 else alignedTime=0;
                 aligned=alignedTime>=.18f;
                 if(continuous)p.reason=parkingEntrance&&!entranceGuided?"PARKING_LEFT_EDGE_OFFSET_TRACKING":p.laneBlend<1?"TARGET_ROAD_GRADUAL_HANDOFF":"COMMITTED_ROAD_CENTER_TRACKING";
@@ -709,7 +975,10 @@ public:
                     p.reason="ACQUIRED_ROAD_ALIGNMENT_CONTINUE";}
                 else {enter(State::Fault);reviewReason="FORK_TIMEOUT";}
             }
-            else if(now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0&&aligned) {
+            // A signed fork with applied feedback completes only in yProgress,
+            // after the car actually receives forward commands on the recovered road.
+            else if(!parkingExit&&now-stateSince>=cfg.forkMinTime&&geometry.splitRows==0&&aligned&&
+                    (!ordinaryFork||(!road.available&&geometry.choiceRows<cfg.minBranchRows))) {
                 exitTime+=dt;
                 if(exitTime>=cfg.forkExitTime) {
                     p.completedDirection=direction;
@@ -733,7 +1002,7 @@ public:
             enter(State::ForkArmed);seekSince=now-(routeArmed?0:1.4);
             p.stop=false;p.selectedBranch=false;p.path={};p.guideDirection=direction==2?0:direction;
             yProgress.pulsePhase=std::max(yProgress.pulsePhase,1.4f);
-            p.guidePwm=p.guideDirection?guidancePwm(routeArmed?now-seekSince:yProgress.pulsePhase):0;p.laneBlend=p.guideDirection?0:1;
+            p.guidePwm=p.guideDirection?guidancePwm(routeArmed&&!parkingExit?now-seekSince:yProgress.pulsePhase):0;p.laneBlend=p.guideDirection?0:1;
             if(parkingEntrance){p.guidePwm=0;p.guideDirection=0;p.laneBlend=1;p.alignRoad=true;}
             if(p.guidePwm<=0){p.guideDirection=0;p.alignRoad=true;}
             p.state="FORK_RECOVER";p.reason="GEOMETRY_WARNING_CONTINUE";

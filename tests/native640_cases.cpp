@@ -13,7 +13,110 @@ namespace fs=std::filesystem;
 static void require(bool b,const char *why){if(!b)throw std::runtime_error(why);}
 static PredictResult box(int type,int x=270,int y=250,int w=60,int h=70){PredictResult d{};d.type=type;d.score=.95;d.x=x;d.y=y;d.width=w;d.height=h;return d;}
 #include "parking_area_cases.hpp"
+#include "parking_mission_cases.hpp"
+#include "parking_entry_field_cases.hpp"
+#include "race_parking_drive.hpp"
+#include "parking_return_field_cases.hpp"
+#include "parking_fallback_bounds_cases.hpp"
+#include "parking_visual_recovery_cases.hpp"
+#include "signed_fork_recovery_cases.hpp"
+#include "signed_fork_lap_field_cases.hpp"
+#include "signed_fork_passage_field_cases.hpp"
+#include "parking_bay_acquisition_field_cases.hpp"
+#include "parking_line_field_cases.hpp"
+#include "parking_exit_gate_arrow_field_cases.hpp"
+#include "parking_final_entry_field_cases.hpp"
+#include "parking_arm_field_cases.hpp"
+#include "parking_pose_field_cases.hpp"
+#include "parking_gate_turn_field_cases.hpp"
+#include "parking_reverse_field_cases.hpp"
+#include "parking_clearance_field_cases.hpp"
+#include "mission_finish_stop_field_cases.hpp"
+#include "parking_entrance_gate_field_cases.hpp"
 int main(int argc,char **argv){try{
+    if(argc==4&&std::string(argv[2])=="--mission-finish-stop") {
+        missionFinishStopFieldChecks(fs::path(argv[1]),fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-clearance") {
+        parkingClearanceFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-reverse") {
+        parkingReverseFieldChecks(fs::path(argv[1]),fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-entrance-gate") {
+        parkingEntranceGateFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-gate-turn") {
+        parkingGateTurnFieldChecks(fs::path(argv[1]),fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-pose") {
+        parkingPoseFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-arm") {
+        parkingArmFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--fork-passage") {
+        signedForkPassageFieldChecks(fs::path(argv[1]),fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-final-entry") {
+        parkingFinalEntryFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--manual-gate") {
+        manualGateStopChecks();
+        const fs::path dir=argv[3];
+        RaceConfig config;config.load((dir/"race.json").string());
+        RaceGroundCalibration calibration;calibration.load((dir/"ground-calibration.json").string(),false);
+        RaceGroundMap map(calibration);
+        const auto p=map.toImage({0,.45f});
+        require(config.gateStopRow==245&&std::isfinite(p.x)&&std::isfinite(p.y)&&
+            p.x>0&&p.x<640&&p.y>0&&p.y<480,"Vehicle gate configuration or ground map is invalid");
+        std::cout<<"PASS vehicle calibration loaded "<<dir.filename().string()<<" gate_stop_row="<<config.gateStopRow
+                 <<" projected_center_45cm_px="<<p.x<<","<<p.y<<" (projection only)\n";return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-line-exit") {
+        parkingLineFieldChecks(fs::path(argv[1]),fs::path(argv[3]));
+        parkingReturnFieldCheck(fs::path(argv[1])/"vehicle_evidence/mission-1793775093534");
+        parkingExitGateArrowFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-lap") {
+        parkingBayAcquisitionFieldChecks(fs::path(argv[3]));
+        signedForkLapFieldChecks(fs::path(argv[3]));return 0;
+    }
+    if(argc==4&&std::string(argv[2])=="--parking-return") {
+        parkingMissionRejoinChecks();
+        parkingReturnFieldCheck(fs::path(argv[3]));return 0;
+    }
+    if(argc==3&&std::string(argv[2])=="--signed-fork-recovery") {
+        signedForkRecoveryChecks(fs::path(argv[1]));return 0;
+    }
+    if(argc==3&&std::string(argv[2])=="--parking-visual-recovery") {
+        parkingVisualRecoveryChecks(fs::path(argv[1]));parkingFallbackBoundsChecks();return 0;
+    }
+    if(argc==3&&std::string(argv[2])=="--preview-motion-evidence") {
+        const auto file=fs::path(argv[1])/"vehicle_evidence/mission-1793696072617/parking-control.jsonl";
+        std::ifstream input(file);require(bool(input),"Missing measured push log");
+        RaceParkingMotionLossWindow marked,unmarked,driving;int misses=0,triggers=0;
+        std::string line;
+        while(std::getline(input,line)) {
+            const auto row=nlohmann::json::parse(line);const uint64_t frame=row.at("frame");
+            const bool valid=row.at("motion_valid").get<bool>()&&!row.at("motion_estimated_origin").get<bool>();
+            misses=valid?0:misses+1;const bool sample=frame==1387||frame==2056;
+            if(marked.update(frame,true,sample,valid,misses)) {
+                require(frame==1725&&marked.startFrame==1387,"Wrong loss event captured");++triggers;
+            }
+            require(!unmarked.update(frame,true,false,valid,misses),"Unmarked run captured a push");
+            require(!driving.update(frame,false,sample,valid,misses),"Driving run triggered preview capture");
+        }
+        require(triggers==1&&marked.triggerFrame==1725,"Missing or repeated first-loss capture");
+        std::cout<<"PASS preview motion loss evidence: field start 1387, trigger 1725, one event, no unmarked/driving trigger\n";
+        return 0;
+    }
+    if(argc==3&&std::string(argv[2])=="--parking-entry-field-fix") {
+        parkingEntryFieldChecks(fs::path(argv[1]));return 0;
+    }
+    if(argc==3&&std::string(argv[2])=="--parking-mission-fix") {
+        parkingMissionChecks(fs::path(argv[1]));return 0;
+    }
     if(argc==3&&std::string(argv[2])=="--gate-exit-field") {
         const fs::path directory=argv[1];RaceConfig cfg;cfg.load((directory/"race-config.json").string());
         auto image=cv::imread((directory/"parking-result-camera.png").string());
@@ -136,10 +239,11 @@ int main(int argc,char **argv){try{
         std::cout<<"PASS recorded 204-246ms parking delay: stale frames hold; fresh frame resumes entry without reteach; estimate labelled\n";
         return 0;
     }
-    if(argc==3&&std::string(argv[2])=="--reject-old-backend") {
+    if(argc==3&&(std::string_view(argv[2])=="--reject-old-backend"||std::string_view(argv[2])=="--reject-abi5-backend")) {
         try {auto perception=createRacePerception(RaceConfig{});require(false,"Old configuration ABI was accepted");}
         catch(const std::exception &error){require(std::string(error.what()).find("backend version mismatch")!=std::string::npos,"Old backend was not rejected at the ABI boundary");}
-        std::cout<<"PASS ABI4 backend rejected before creation by the ABI5 loader\n";return 0;
+        const int probeAbi=std::string_view(argv[2])=="--reject-old-backend"?4:5;
+        std::cout<<"PASS ABI"<<probeAbi<<" backend rejected before creation by the ABI6 loader\n";return 0;
     }
     require(argc==2,"Pass workspace root");const fs::path root=argv[1];
     const auto temp=fs::temp_directory_path()/"race-native640-regression";fs::create_directories(temp);
@@ -226,8 +330,8 @@ int main(int argc,char **argv){try{
      require(raceParkingPShape(plate).empty(),"Blue direction arrow accepted as parking");
      require(raceParkingPShape({}).empty(),"Missing frame fabricates P sign");}
     std::cout<<"PASS blue P shape; non-P rejection; unarmed isolation; switched sign entry without Y completion\n";
-    RaceGroundArrow arrow;arrow.allowed=RoadLeft;
-    for(int i=1;i<5;++i)mission.observeExitArrow(arrow,i,true);
+    RaceGroundArrow arrow;arrow.allowed=RoadLeft;arrow.box={240,160,100,100};
+    for(int i=1;i<5;++i)mission.observeExitArrow(arrow,i,true,i*.07);
     require(!mission.exitArrowTurnAuthorized(),"Ground arrow triggers before parking");
     ai.detections={box(LABEL_FLOW)};
     for(int i=1;i<=8;++i){ai.sequence=i;mission.observeSigns(ai,true);}
@@ -269,15 +373,16 @@ int main(int argc,char **argv){try{
     traffic.selectedBranch=true;traffic.guideDirection=-1;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);
     traffic.selectedBranch=false;traffic.state="LANE";mission.observe(ai,traffic,true);require(mission.parkingSearch(),"Mission cannot reach visible bay");
     mission.parkingStarted();mission.parkingFinished();
-    mission.observeExitArrow(arrow,10,true);mission.observeExitArrow(arrow,10,true);mission.observeExitArrow(arrow,11,false);
+    mission.observeExitArrow(arrow,10,true,.70);mission.observeExitArrow(arrow,10,true,.70);mission.observeExitArrow(arrow,11,false,.77);
     require(!mission.exitArrowTurnAuthorized(),"Duplicate/stale arrow triggers turn");
-    mission.observeExitArrow(arrow,12,true);mission.observeExitArrow(arrow,13,true);mission.observeExitArrow(arrow,14,true);
+    for(int i=12;i<=14;++i)mission.observeExitArrow(arrow,i,true,i*.07);
     require(mission.exitArrowTurnAuthorized(),"Parking exit cannot authorize proactive left search");
     {RaceManager manager(config);RaceSnapshot snapshot;RacePlan p;
      for(int i=1;i<=5;++i){snapshot.sequence=i;snapshot.captured=i*.07;p=manager.update(snapshot,snapshot.captured,.07,true,binary,track,{},false,true,-1,true,mission.exitArrowTurnAuthorized());}
      require(raceDirectionSeeking(p)&&p.guideDirection==-1&&raceDirectionServo(p,1500)<1500,"Exit arrow waits for a visible split");}
-    traffic.selectedBranch=true;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);traffic.selectedBranch=false;traffic.state="LANE";mission.observe(ai,traffic,false);
-    for(int i=20;i<25;++i)mission.observeExitArrow(arrow,i,true);
+    traffic.selectedBranch=true;traffic.state="FORK_LEFT";mission.observe(ai,traffic,false);
+    traffic.selectedBranch=false;traffic.completedDirection=-1;traffic.state="LANE";mission.observe(ai,traffic,false);
+    for(int i=20;i<25;++i)mission.observeExitArrow(arrow,i,true,i*.07);
     require(std::string(mission.name())=="LAP2_RETURN_PRESS_N_TO_FINISH"&&mission.routeDirection()==0&&!mission.exitArrowTurnAuthorized(),
         "Parking exit starts an extra outer lap or reuses the exit arrow");
     ai.detections={box(LABEL_PARK),box(LABEL_FLOW)};
@@ -373,17 +478,20 @@ int main(int argc,char **argv){try{
         require(!reused.complete(),"Repeated AI frame confirms fork exit");
         for(int direction:{-1,1})for(bool selected:{false,true}) {
             RaceManager manager(config);RaceMission mission;mission.start();RaceSnapshot s;RacePlan p;
-            cv::Mat absent=cv::Mat::zeros(480,640,CV_8UC1);int sequence=0;bool completed=false;
+            cv::Mat absent=cv::Mat::zeros(480,640,CV_8UC1);
+            const auto target=signedForkSingleRoad(direction);
+            int sequence=0;bool completed=false,reveal=false;
             auto step=[&](bool sign,bool ready,float offset=25,float heading=35) {
                 s.sequence=++sequence;s.captured=sequence*.07;s.detections=sign?std::vector<PredictResult>{box(direction<0?LABEL_YLEFT:LABEL_YRIGHT)}:std::vector<PredictResult>{};
-                p=manager.update(s,s.captured,.07,true,selected?split:absent,track,{},false,true,0,true,false,.20,
-                    {true,ready,offset,heading,.20});mission.observe(s,p,false);
+                p=manager.update(s,s.captured,.07,true,reveal?target:selected?split:absent,track,{},false,true,0,true,false,.20,
+                    {true,ready,direction*offset,direction*heading,p.stop?0.f:.20f});mission.observe(s,p,false);
             };
             for(int j=0;j<45;++j){step(true,true);if(j>config.confirmFrames)
                 require(!p.completedDirection&&p.speedCap<=.201,"Visible sign prematurely ends task");}
             for(int j=0;j<15;++j){step(false,false);require(!p.completedDirection,"No road feedback completes fork");}
             for(int j=0;j<15;++j){step(false,true,100,90);require(!p.completedDirection,"Poor tracking completes fork");}
-            for(int j=0;j<20;++j){step(false,true);if(p.completedDirection){completed=true;break;}}
+            reveal=true;
+            for(int j=0;j<30;++j){step(false,true);if(p.completedDirection){completed=true;break;}}
             require(completed&&p.completedDirection==direction&&p.speedCap>.20&&!p.stop&&p.guidePwm==0,"Curved recovered road retains fork speed or bias");
             require(std::string(mission.name())=="LAP1_RETURN_PRESS_N_AT_START","Recovered fork completion never reaches mission state");
             step(false,true);require(p.speedCap>.20&&p.completedDirection==0,"Fork cap reapplied or completion event repeated");

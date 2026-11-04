@@ -4,9 +4,9 @@
 #include <fstream>
 
 // 配置结构增加字段后拒绝与旧版插件混用，避免跨动态库解释错误的结构布局。
-extern "C" int raceBackendAbi() { return 5; }
+extern "C" int raceBackendAbi() { return 6; }
 
-extern "C" RacePerception *raceCreatePerceptionV5(const RaceConfig *input) {
+extern "C" RacePerception *raceCreatePerceptionV6(const RaceConfig *input) {
     const RaceConfig &config=*input;
     namespace fs=std::filesystem;
     const fs::path path=config.modelDirectory;

@@ -3,7 +3,9 @@
 #include "race_perception.hpp"
 #include "race_detection_review.hpp"
 #include <algorithm>
+#include <string_view>
 #include <opencv2/calib3d.hpp>
+#include <opencv2/features2d.hpp>
 #include <opencv2/video/tracking.hpp>
 
 struct RaceGroundPose {
@@ -24,6 +26,8 @@ struct RaceGroundMotionResult {
     bool estimatedOrigin=false;
     bool backupReferenceUsed=false;
     int backupAttempts=0;
+    bool absoluteProbe=false,absoluteRecovered=false;
+    int absoluteMatches=0,absoluteReference=0;
 };
 
 struct RaceGroundFitDiagnostics {
@@ -51,6 +55,75 @@ class RaceGroundMotion {
     float rigidResidualLimit=.005f;
     bool parkingMode=false;
 
+    // Keep a camera image whose pose is in the original parking frame even
+    // when relative LK is restarted from a command-estimated origin.
+    struct ParkingAnchor {
+        Reference view;
+        std::vector<cv::KeyPoint> keys;
+        cv::Mat descriptors;
+        bool prepared=false;
+    };
+    ParkingAnchor absoluteAnchor;
+    std::vector<ParkingAnchor> parkingViews;
+    size_t probeView=0;
+    cv::Mat recoveryMask;
+    cv::Ptr<cv::ORB> orb;
+    double lastProbe=-1e20,pendingAt=-1;
+    RaceGroundPose pendingPose;
+
+    bool relocalize(ParkingAnchor &anchor,const cv::Mat &gray,const cv::Mat &currentMask,double now,RaceGroundMotionResult &out) {
+        out.absoluteProbe=true;lastProbe=now;
+        const double priorTime=pendingAt;pendingAt=-1;
+        cv::Mat roi;
+        const auto &view=anchor.view;
+        if(!anchor.prepared) {
+            cv::bitwise_and(view.mask,recoveryMask,roi);
+            orb->detectAndCompute(view.image,roi,anchor.keys,anchor.descriptors);
+            anchor.prepared=true;
+        }
+        if(anchor.descriptors.rows<16)return false;
+        std::vector<cv::KeyPoint> keys;cv::Mat descriptors;
+        cv::bitwise_and(currentMask,recoveryMask,roi);
+        orb->detectAndCompute(gray,roi,keys,descriptors);
+        if(descriptors.rows<16)return false;
+        cv::BFMatcher matcher(cv::NORM_HAMMING);
+        std::vector<std::vector<cv::DMatch>> forward,back;
+        matcher.knnMatch(anchor.descriptors,descriptors,forward,2);
+        matcher.knnMatch(descriptors,anchor.descriptors,back,2);
+        const auto distinct=[](const auto &pair){return pair.size()==2&&pair[0].distance<=48&&pair[0].distance<.72f*pair[1].distance;};
+        std::vector<cv::Point2f> a,b;
+        for(const auto &pair:forward)if(distinct(pair)) {
+            const auto &m=pair.front();const auto &reverse=back[m.trainIdx];
+            if(!distinct(reverse)||reverse.front().trainIdx!=m.queryIdx)continue;
+            a.push_back(map.toGround(anchor.keys[m.queryIdx].pt));b.push_back(map.toGround(keys[m.trainIdx].pt));
+        }
+        out.absoluteMatches=int(a.size());if(a.size()<16)return false;
+        auto pose=view.pose;RaceGroundFitDiagnostics info;int inliers=0;float residual=0;
+        if(!fit(a,b,pose,inliers,residual,&info,float(now-view.captured),.005f)||
+           residual>.004f||std::abs(info.scale-1.f)>.01f)return false;
+        // Reject ambiguous matches confined to one divider or one small patch.
+        std::vector<cv::Point2f> consistent,hull;
+        for(size_t i=0;i<a.size();++i)if(cv::norm(pose.local(view.pose.world(a[i]))-b[i])<=.006f)
+            consistent.push_back(a[i]);
+        if(consistent.size()<16||consistent.size()<.85f*a.size())return false;
+        cv::convexHull(consistent,hull);if(cv::contourArea(hull)<.012)return false;
+        // Adjacent bay markings can repeat. An older view may locate the car
+        // near its last measured position, not teleport it to another bay.
+        const auto &lastMeasured=absoluteAnchor.view.pose;
+        if(std::hypot(pose.x-lastMeasured.x,pose.z-lastMeasured.z)>.30f||
+           std::abs(std::remainder(pose.angle-lastMeasured.angle,float(2*CV_PI)))>.65f)return false;
+        const double dt=now-priorTime;
+        if(priorTime<0||dt<=0||dt>.25||std::hypot(pose.x-pendingPose.x,pose.z-pendingPose.z)>.008+.42*dt||
+           std::abs(std::remainder(pose.angle-pendingPose.angle,float(2*CV_PI)))>.025+1.4*dt) {
+            pendingAt=now;pendingPose=pose;return false;
+        }
+        out.pose=pose;out.valid=true;out.estimatedOrigin=false;out.absoluteRecovered=true;
+        out.reason="PARK_ABSOLUTE_VISUAL_RECOVERED";out.matches=out.absoluteMatches;out.inliers=inliers;
+        out.features=int(keys.size());out.residual=residual;out.referenceAge=float(now-view.captured);
+        out.fitScale=info.scale;out.fitAngle=info.angle;out.fitTranslation=info.translation;
+        out.spanX=info.spanX;out.spanZ=info.spanZ;return true;
+    }
+
     cv::Mat mask(const RaceSnapshot &s) {
         regions.erase(std::remove_if(regions.begin(),regions.end(),[&](const Region &r){return s.captured-r.captured>.65;}),regions.end());
         for(const auto &d:s.detections)if(raceDetectionBoxValid(d))regions.push_back({{d.x,d.y,d.width,d.height},s.captured});
@@ -76,7 +149,18 @@ public:
     // scale variation, but 5.087mm rigid residual. Do not permanently freeze
     // the reference over that 0.087mm excess. Keep this opt-in for parking;
     // RANSAC, scale, span and motion-step checks are still applied.
-    void enableParkingNoiseTolerance(){rigidResidualLimit=.008f;parkingMode=true;}
+    void enableParkingNoiseTolerance(){
+        rigidResidualLimit=.008f;parkingMode=true;orb=cv::ORB::create(500,1.2f,8,19,0,2,cv::ORB::HARRIS_SCORE,31,10);
+        // Near ground beside the bay is often textured while the central
+        // calibration rectangle contains just black asphalt. Use the same
+        // measured map and dynamic object/body mask as local tracking; cap
+        // depth at the far calibration mark for descriptor relocalization.
+        recoveryMask=cv::Mat::zeros(480,640,CV_8UC1);
+        for(int y=20;y<420;++y)for(int x=10;x<630;++x) {
+            const auto p=map.toGround({float(x),float(y)});
+            if(std::abs(p.x)<=cfg.roadWidth&&p.y>=.12f&&p.y<=cfg.farDistance)recoveryMask.at<uchar>(y,x)=255;
+        }
+    }
     // Recover relative visual tracking after a parking-only command estimate.
     // The caller supplies the propagated pose at THIS frame, never the old
     // frozen pose. Absolute coordinates remain explicitly estimated thereafter.
@@ -85,7 +169,9 @@ public:
            !std::isfinite(s.captured)||s.image.type()!=CV_8UC3||s.image.size()!=cv::Size(640,480)||
            !std::isfinite(pose.x)||!std::isfinite(pose.z)||!std::isfinite(pose.angle)||
            result.valid||misses<3)return false;
-        cv::cvtColor(s.image,previous,cv::COLOR_BGR2GRAY);previousMask=mask(s);
+        // previous may share pixels with an absolute keyframe. Never write
+        // the estimated-origin image into that original-coordinate reference.
+        cv::Mat gray;cv::cvtColor(s.image,gray,cv::COLOR_BGR2GRAY);previous=gray;previousMask=mask(s);
         captured=s.captured;result.pose=pose;result.estimatedOrigin=true;
         references.clear();misses=0;result.misses=0;
         result.reason="PARKING_ESTIMATED_REFERENCE_REANCHORED";
@@ -95,12 +181,14 @@ public:
     void setMetricScale(float s) {
         if(std::abs(s-map.scale())<1e-6f)return;
         map.setMetricScale(s);previous.release();previousMask.release();captured=-1;
+        absoluteAnchor={};parkingViews.clear();probeView=0;lastProbe=-1e20;pendingAt=-1;
         result.pose={};result.valid=false;result.estimatedOrigin=false;++result.epoch;misses=0;discontinuous=true;regions.clear();references.clear();
     }
     // 也供回归测试验证米制刚体拟合，不接受像素/运动指令冒充位移。
     static bool fit(const std::vector<cv::Point2f> &before,const std::vector<cv::Point2f> &after,
                     RaceGroundPose &pose,int &inliers,float &residual,
-                    RaceGroundFitDiagnostics *diagnostics=nullptr,float referenceAge=.07f,float residualLimit=.005f) {
+                    RaceGroundFitDiagnostics *diagnostics=nullptr,float referenceAge=.07f,float residualLimit=.005f,
+                    bool checkArea=false) {
         RaceGroundFitDiagnostics info;
         auto fail=[&](const char *reason){info.reason=reason;if(diagnostics)*diagnostics=info;return false;};
         inliers=0;residual=0;
@@ -117,10 +205,17 @@ public:
         for(size_t i=0;i<before.size();++i)if(selected.at<uchar>(int(i))){meanBefore+=cv::Point2d(before[i]);meanAfter+=cv::Point2d(after[i]);++count;}
         inliers=count;
         if(count<8)return fail("TOO_FEW_INLIERS");
-        meanBefore*=1./count;meanAfter*=1./count;double dot=0,cross=0;
+        meanBefore*=1./count;meanAfter*=1./count;double dot=0,cross=0,xx=0,zz=0,xz=0;
         for(size_t i=0;i<before.size();++i)if(selected.at<uchar>(int(i))) {
             const auto p=cv::Point2d(before[i])-meanBefore,q=cv::Point2d(after[i])-meanAfter;
             dot+=p.x*q.x+p.y*q.y;cross+=p.x*q.y-p.y*q.x;
+            if(checkArea){xx+=p.x*p.x;zz+=p.y*p.y;xz+=p.x*p.y;}
+        }
+        if(checkArea) {
+            // A diagonal row of features can pass both bounding-box spans.
+            // Require spread across the weaker axis as well (2 residual gates RMS).
+            const double minorVariance=.5*(xx+zz-std::hypot(xx-zz,2*xz))/count;
+            if(minorVariance<4*residualLimit*residualLimit)return fail("GROUND_SUPPORT_COLLINEAR");
         }
         const double theta=std::atan2(cross,dot);
         const float c=std::cos(theta),s=std::sin(theta);
@@ -144,12 +239,89 @@ public:
         pose.x=position.x;pose.z=position.y;pose.angle-=theta;
         info.reason="GROUND_RIGID_OK";if(diagnostics)*diagnostics=info;return true;
     }
+    // Reuse already-tracked points when a wide-field fit shows scale distortion.
+    // Project the allowed LK round-trip tolerance (1.4 px) through the local
+    // ground map at BOTH ends. Only retry on tracks whose combined metric
+    // sensitivity fits inside the unchanged RANSAC residual budget.
+    bool fitMetricSupport(const std::vector<cv::Point2f> &before,const std::vector<cv::Point2f> &after,
+                          RaceGroundPose &pose,int &matches,int &inliers,float &residual,
+                          RaceGroundFitDiagnostics &info,float age,bool nearBand=false) const {
+        if(before.size()<12||before.size()!=after.size())return false;
+        auto metresPerPixel=[&](cv::Point2f floor){
+            const auto pixel=map.toImage(floor);
+            const auto dx=map.toGround(pixel+cv::Point2f{1,0})-floor;
+            const auto dy=map.toGround(pixel+cv::Point2f{0,1})-floor;
+            return std::sqrt(dx.dot(dx)+dy.dot(dy));
+        };
+        std::vector<cv::Point2f> a,b;
+        const auto nearGround=[&](cv::Point2f p){return p.y>=.12f&&p.y<=cfg.farDistance*map.scale()&&
+            std::abs(p.x)<=cfg.roadWidth*map.scale();};
+        for(size_t i=0;i<before.size();++i) {
+            const bool usable=nearBand?nearGround(before[i])&&nearGround(after[i]):
+                1.4f*(metresPerPixel(before[i])+metresPerPixel(after[i]))<=rigidResidualLimit;
+            if(usable) {
+                a.push_back(before[i]);b.push_back(after[i]);
+            }
+        }
+        if(a.size()<12||a.size()==before.size())return false;
+        // Independent scale check over all well-conditioned long baselines.
+        // A compact RANSAC subset alone must not hide coherent image zoom.
+        std::vector<float> scaleRatios;
+        for(size_t i=0;i<a.size();++i)for(size_t j=0;j<i;++j) {
+            const float length=cv::norm(a[i]-a[j]);
+            if(length>=.15f)scaleRatios.push_back(cv::norm(b[i]-b[j])/length);
+        }
+        if(scaleRatios.size()<12)return false;
+        const auto middle=scaleRatios.begin()+scaleRatios.size()/2;
+        std::nth_element(scaleRatios.begin(),middle,scaleRatios.end());
+        if(*middle<.98f||*middle>1.02f)return false;
+        int supported=0;float error=0;RaceGroundFitDiagnostics local;
+        if(!fit(a,b,pose,supported,error,&local,age,rigidResidualLimit,true))return false;
+        matches=int(a.size());inliers=supported;residual=error;info=local;
+        info.reason=nearBand?"GROUND_RIGID_OK_NEAR_CALIBRATED_DEPTH":"GROUND_RIGID_OK_METRIC_SUPPORT";return true;
+    }
+    // Busy bay edges can supply a mixture of ground and off-plane tracks.
+    // Recover only a dominant, spatially spread rigid surface whose forward
+    // AND inverse reprojections agree with the tracked image points.
+    bool fitParkingConsensus(const std::vector<cv::Point2f> &a,const std::vector<cv::Point2f> &b,
+                             RaceGroundPose &pose,int &inliers,float &residual,RaceGroundFitDiagnostics &info,float age)const {
+        if(a.size()<32||a.size()!=b.size())return false;
+        cv::Mat selected;
+        const auto transform=cv::estimateAffinePartial2D(a,b,selected,cv::RANSAC,.005,300,.995,10);
+        if(transform.empty())return false;
+        const auto scale=std::hypot(transform.at<double>(0,0),transform.at<double>(1,0));
+        if(scale<.98||scale>1.02)return false;
+        std::vector<cv::Point2f> src,dst,others,nextOthers;
+        for(size_t i=0;i<a.size();++i){
+            if(selected.at<uchar>(int(i))){src.push_back(a[i]);dst.push_back(b[i]);}
+            else {others.push_back(a[i]);nextOthers.push_back(b[i]);}
+        }
+        if(src.size()<24||src.size()<.55f*a.size())return false;
+        if(others.size()>=16&&others.size()>=.25f*a.size()){
+            cv::Mat competing;
+            const auto other=cv::estimateAffinePartial2D(others,nextOthers,competing,cv::RANSAC,.005,200,.99,5);
+            if(!other.empty()&&cv::countNonZero(competing)>=std::max(16,int(std::ceil(.25f*a.size()))))return false;
+        }
+        auto candidate=pose;RaceGroundFitDiagnostics details;int supported=0;float error=0;
+        if(!fit(src,dst,candidate,supported,error,&details,age,.005f,true)||error>.004f)return false;
+        std::vector<cv::Point2f> consistent,hull;
+        for(size_t i=0;i<src.size();++i){
+            const auto forward=candidate.local(pose.world(src[i])),back=pose.local(candidate.world(dst[i]));
+            if(cv::norm(forward-dst[i])<=.006f&&cv::norm(map.toImage(forward)-map.toImage(dst[i]))<=2.5f&&
+               cv::norm(map.toImage(back)-map.toImage(src[i]))<=2.5f)consistent.push_back(src[i]);
+        }
+        if(consistent.size()<24||consistent.size()<.55f*a.size())return false;
+        cv::convexHull(consistent,hull);if(cv::contourArea(hull)<.025)return false;
+        pose=candidate;inliers=int(consistent.size());residual=error;info=details;
+        info.reason="GROUND_RIGID_OK_PARKING_CONSENSUS";return true;
+    }
     RaceGroundMotionResult update(const RaceSnapshot &s,bool preserveCoordinates=false,bool allowReanchor=true) {
         if(s.sequence==sequence)return result;
         result.valid=false;result.inliers=0;result.residual=0;result.features=result.matches=0;
         result.referenceAge=0;result.misses=misses;
         result.reason="REFERENCE_INITIALIZING";result.coordinatesHeld=false;
         result.backupReferenceUsed=false;result.backupAttempts=0;
+        result.absoluteProbe=result.absoluteRecovered=false;result.absoluteMatches=result.absoluteReference=0;
         result.fitScale=result.fitTranslation=result.fitAngle=result.spanX=result.spanZ=0;
         const bool fresh=!s.failed&&s.sequence>sequence&&std::isfinite(s.captured)&&
             s.image.type()==CV_8UC3&&s.image.size()==cv::Size(640,480);
@@ -190,12 +362,51 @@ public:
             candidate.matches=int(before.size());auto pose=origin;
             RaceGroundFitDiagnostics info;
             candidate.valid=fit(before,after,pose,candidate.inliers,candidate.residual,&info,float(age),rigidResidualLimit);
+            if(!candidate.valid&&parkingMode&&(std::string_view(info.reason)=="RIGID_RESIDUAL_HIGH"||
+                      std::string_view(info.reason)=="GROUND_SCALE_CHANGED"||std::string_view(info.reason)=="INLIER_RATIO_LOW")) {
+                candidate.valid=fitMetricSupport(before,after,pose,candidate.matches,candidate.inliers,
+                                                  candidate.residual,info,float(age));
+                // The measured calibration depth is a second fixed support
+                // region when the sensitivity-only mask has too few corners.
+                // Keep the same independent baseline-scale, 2D spread and fit checks.
+                if(!candidate.valid)candidate.valid=fitMetricSupport(before,after,pose,candidate.matches,candidate.inliers,
+                                                  candidate.residual,info,float(age),true);
+                if(!candidate.valid)
+                    candidate.valid=fitParkingConsensus(before,after,pose,candidate.inliers,candidate.residual,info,float(age));
+            }
             if(candidate.valid)candidate.pose=pose;
             candidate.reason=info.reason;candidate.fitScale=info.scale;candidate.fitTranslation=info.translation;candidate.fitAngle=info.angle;
             candidate.spanX=info.spanX;candidate.spanZ=info.spanZ;
         };
-        if(!previous.empty()&&gap>0&&gap<=horizon) {
-            attempt(previous,previousMask,gap,previousPose,result);
+        // An expired LK reference has no search path back to the original
+        // coordinates. Periodically match distinctive ground features directly
+        // to the last measured anchor instead. On a probe frame run only one
+        // matching pipeline; never add a second full optical-flow pass.
+        const bool probe=parkingMode&&preserveCoordinates&&!absoluteAnchor.view.image.empty()&&
+            (result.estimatedOrigin||gap>horizon)&&(pendingAt>=0||s.captured-lastProbe>=.30);
+        if(probe) {
+            result.reason="PARK_ABSOLUTE_VISUAL_SEARCH";
+            result.absoluteReference=int(probeView);
+            auto &anchor=probeView?parkingViews[parkingViews.size()-probeView]:absoluteAnchor;
+            if(!relocalize(anchor,gray,currentMask,s.captured,result)&&pendingAt<0)
+                probeView=(probeView+1)%(parkingViews.size()+1);
+        } else if(!previous.empty()&&gap>0&&gap<=horizon) {
+            // After a rejected short step, the same last frame may remain
+            // blurred or tilted. Try a recent independently located view on
+            // alternating misses, still using just one LK pipeline per frame.
+            Reference *alternate=nullptr;
+            if(parkingMode&&preserveCoordinates&&!result.estimatedOrigin&&misses%2==1) {
+                for(auto it=parkingViews.rbegin();it!=parkingViews.rend();++it){
+                    const double age=s.captured-it->view.captured;
+                    if(age>horizon)break;
+                    if(captured-it->view.captured>=.045){alternate=&it->view;break;}
+                }
+            }
+            if(alternate){
+                result.backupAttempts=1;
+                attempt(alternate->image,alternate->mask,s.captured-alternate->captured,alternate->pose,result,&alternate->features);
+                result.backupReferenceUsed=result.valid;
+            }else attempt(previous,previousMask,gap,previousPose,result);
         } else if(!previous.empty()) {
             result.reason="REFERENCE_TOO_OLD";
         }
@@ -255,6 +466,16 @@ public:
             if(!discontinuous)++result.epoch;
             result.pose={};discontinuous=true;references.clear();
         }else if(result.valid){misses=0;result.misses=0;discontinuous=false;}
+        if(parkingMode&&result.valid&&!result.estimatedOrigin){
+            absoluteAnchor={};absoluteAnchor.view={gray,currentMask,s.captured,result.pose,{}};
+            const auto p=result.pose;
+            if(parkingViews.empty()||std::hypot(p.x-parkingViews.back().view.pose.x,p.z-parkingViews.back().view.pose.z)>=.06f||
+               std::abs(std::remainder(p.angle-parkingViews.back().view.pose.angle,float(2*CV_PI)))>=.14f){
+                parkingViews.push_back(absoluteAnchor);
+                if(parkingViews.size()>20)parkingViews.erase(parkingViews.begin());
+            }
+            probeView=0;pendingAt=-1;
+        }
         previous=gray;previousMask=currentMask;captured=s.captured;return result;
     }
 };

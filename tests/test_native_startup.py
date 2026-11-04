@@ -39,6 +39,9 @@ class NativeStartup(unittest.TestCase):
     def test_parking_checks_then_records_automatic_reverse_parameter(self):
         first=self.run_native('--prepare-only','mission','competition','black')
         self.assertNotEqual(first.returncode,0)
+        path=self.root/'race.json';legacy=json.loads(path.read_text())
+        legacy.pop('parkingExitSearchLimitM',None)
+        path.write_text(json.dumps(legacy))
         (self.root/'ground-calibration.json').write_text('{}')
         (self.root/'parking-reverse-check.json').write_text('{"reverse_verified":true}')
         result=self.run_native('--prepare-only','mission','competition','black')
@@ -48,14 +51,41 @@ class NativeStartup(unittest.TestCase):
         race=json.loads((self.root/race_path).read_text())
         self.assertFalse(race['stopAfterCross']);self.assertGreaterEqual(race['forkMaxTime'],12)
         self.assertEqual(race['parkingSpeed'],.30)
-        self.assertEqual(record['backend_abi'],5)
+        self.assertEqual(record['backend_abi'],6)
+        self.assertEqual(record['parking_control']['exit_search_command_limit_m'],1.50)
         self.assertIn('left or right',record['parking_control']['selection_policy'])
     def test_parking_area_speed_preserves_vehicle_override(self):
-        path=self.root/'race.json';config=json.loads(path.read_text());config['parkingSpeed']=.4
+        path=self.root/'race.json';config=json.loads(path.read_text());config.update(parkingSpeed=.4,parkingExitSearchLimitM=2.25)
         path.write_text(json.dumps(config))
         result=self.run_native('--prepare-only','mission-lab','competition','black')
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(self.record()['parking_control']['parking_area_speed_cap_mps'],.4)
+        record=self.record()
+        self.assertEqual(record['parking_control']['parking_area_speed_cap_mps'],.4)
+        self.assertEqual(record['parking_control']['exit_search_command_limit_m'],2.25)
+        race_path=record['command'][record['command'].index('--race-config')+1]
+        self.assertEqual(json.loads((self.root/race_path).read_text())['parkingExitSearchLimitM'],2.25)
+
+    def test_gate_stop_row_preserves_default_and_converts_explicit_values_once(self):
+        path=self.root/'race.json'
+        original=json.loads(path.read_text())
+        for width,row,expected in ((320,None,245),(640,None,245),(320,135,270),
+                                   (640,270,270),(320,130,260),(640,251,251)):
+            with self.subTest(width=width,row=row):
+                config=dict(original)
+                config.pop('gateStopRow',None)
+                if width==640:
+                    for key in ('minBranchWidth','minBranchGap','triggerRow','obstacleRow','crossPassedRow'):
+                        if key in config:config[key]*=2
+                config.update(imageWidth=width,imageHeight=width*3//4)
+                if row is not None:config['gateStopRow']=row
+                path.write_text(json.dumps(config))
+                result=self.run_native('--prepare-only','mission-lab','competition','black')
+                self.assertEqual(result.returncode,0,result.stderr)
+                command=self.record()['command']
+                prepared=json.loads((self.root/command[command.index('--race-config')+1]).read_text())
+                # RaceConfig supplies 245 if the launcher leaves the key absent.
+                self.assertEqual(prepared.get('gateStopRow',245),expected)
+                self.assertEqual(json.loads(path.read_text()),config)
     def test_bare_racing_prepares_drive_before_any_hardware_access(self):
         self.manifest['files']['racing']='invalid';self.save_manifest()
         result=self.run_native()

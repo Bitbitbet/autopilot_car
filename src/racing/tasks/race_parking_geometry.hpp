@@ -67,6 +67,11 @@ inline RaceParkingMouthCheck raceCheckParkingMouth(cv::Point2f near,cv::Point2f 
     out.valid=true;out.reason="P_MOUTH_OK";return out;
 }
 inline float raceParkingAngle(float a) {return std::remainder(a,float(2*CV_PI));}
+inline float raceParkingSteeringStep(float current,float target,float dt,const RaceParkingDimensions &d) {
+    const float lock=d.fullLockDegrees*float(CV_PI)/180;
+    const float step=lock*600/400*std::clamp(dt,0.f,.1f);
+    return current+std::clamp(std::clamp(target,-lock,lock)-current,-step,step);
+}
 inline RaceParkingPose raceParkingAdvance(RaceParkingPose p,float ds,float curvature,const RaceParkingDimensions &d) {
     // Rear axle bicycle integration, then transform back to front-bumper coordinates.
     float x=p.x+d.frontToRearAxle*std::sin(p.yaw),z=p.z-d.frontToRearAxle*std::cos(p.yaw);
@@ -147,12 +152,67 @@ public:
     static constexpr float observedRearTolerance=.002f;
     static constexpr float observedMouthTolerance=.01f;
     bool freeObserved(RaceParkingPose p)const {return freeWithRearTolerance(p,observedRearTolerance,observedMouthTolerance);}
+    // A stopped planning frame and the first live frame can differ by millimetres
+    // (field run 1793620274097: 4.7-5.9mm behind the initial rear plane).
+    // Startup also checks the full pose against the route; this allowance must
+    // not enlarge the searched space or authorize a reverse manoeuvre.
+    static constexpr float startRearTolerance=.010f;
+    bool freeStartObserved(RaceParkingPose p)const {return freeWithRearTolerance(p,startRearTolerance,observedMouthTolerance);}
+    static constexpr float startPositionTolerance=.025f,startHeadingTolerance=.07f;
+    static bool nearRouteStart(RaceParkingPose p,RaceParkingPose start) {
+        return std::hypot(p.x-start.x,p.z-start.z)<=startPositionTolerance&&
+            std::abs(raceParkingAngle(p.yaw-start.yaw))<=startHeadingTolerance;
+    }
+    // The rear plane records the frozen starting footprint, not a painted edge.
+    // Check the entire straight departure plus its stopping envelope in the
+    // convex aisle. The planner and every reverse manoeuvre keep the old plane.
+    static constexpr float startJoinSpeed=.04f;
+    bool insideAisle(RaceParkingPose p)const {
+        for(auto q:body(p))if(!(std::abs(q.x)<=cfg.aisle/2))return false;
+        return true;
+    }
+    // Physical rightmost corner in the canonical left-bay frame, including
+    // the tail swing. Right-bay parking reflects the whole frame upstream.
+    float oppositeEdgeClearance(RaceParkingPose p)const {
+        return cfg.aisle/2-p.x-.5f*cfg.width*std::abs(std::cos(p.yaw))-cfg.length*std::max(0.f,std::sin(p.yaw));
+    }
+    float oppositeEdgeCoastClearance(RaceParkingPose p,RaceParkingPose prior,float gap)const {
+        const float now=oppositeEdgeClearance(p);
+        return now+.45f*std::min(0.f,(now-oppositeEdgeClearance(prior))/gap);
+    }
+    struct ExitEdge {bool near=false,align=false;};
+    ExitEdge exitEdge(RaceParkingPose p,RaceParkingPose prior,float gap)const {
+        const float left=p.x-.5f*cfg.width*std::abs(std::cos(p.yaw))+cfg.length*std::min(0.f,std::sin(p.yaw));
+        const float clearance=oppositeEdgeClearance(p);
+        const bool near=left>=-cfg.aisle/2&&clearance<.08f;
+        return {near,near&&(clearance<.035f||(gap>0&&gap<=.25f&&oppositeEdgeCoastClearance(p,prior,gap)<.02f))};
+    }
+    bool canJoinStartForward(RaceParkingPose p,RaceParkingPose start)const {
+        if(!nearRouteStart(p,start)||!std::isfinite(rearBoundary)||std::cos(p.yaw)<.95f||
+           !freeWithRearTolerance(p,std::numeric_limits<float>::infinity()))return false;
+        auto points=body(p);
+        float rear=points.front().y;
+        for(auto q:points)rear=std::min(rear,q.y);
+        if(rear>=rearBoundary)return false;
+        const float ds=(rearBoundary-rear)/std::cos(p.yaw)+startJoinSpeed*.5f+.005f;
+        const cv::Point2f shift{-ds*std::sin(p.yaw),ds*std::cos(p.yaw)};
+        for(auto q:points)if(std::abs(q.x)>cfg.aisle/2||std::abs(q.x+shift.x)>cfg.aisle/2)return false;
+        return free(raceParkingAdvance(p,ds,0,cfg));
+    }
     // A convex tapered transition over traversable mouth paint. It adds no
     // space at the outer bay edge, does not move the road/rear limits, and is
     // never used as the parked-success boundary or a planning shortcut.
     static constexpr float entryMouthAllowance=.04f;
     bool freeEntryMouth(RaceParkingPose p)const {
         return freeWithRearTolerance(p,observedRearTolerance,entryMouthAllowance,true);
+    }
+    bool needsEntryMouthRecovery(RaceParkingPose p)const {
+        // A rear-plane/start observation error is not a crossed bay divider.
+        // Only the portion physically across the mouth can request recovery.
+        const auto polygon=body(p);const float edge=-cfg.aisle/2;
+        if(std::none_of(polygon.begin(),polygon.end(),[&](auto q){return q.x<edge;}))return false;
+        return !freeWithRearTolerance(p,std::numeric_limits<float>::infinity(),observedMouthTolerance)&&
+            freeWithRearTolerance(p,std::numeric_limits<float>::infinity(),entryMouthAllowance,true);
     }
     bool parked(RaceParkingPose p)const {
         // Aim inside the paint rather than accepting the first 5mm-clear pose.
@@ -164,6 +224,19 @@ public:
         // Keep planning clearance out of a stationary camera-jitter decision.
         // Physical footprint must remain in the bay, within 3mm observation noise.
         for(auto q:body(p,0))if(!inBay(q,-.003f))return false;
+        return true;
+    }
+    static constexpr float goalDividerMargin=.05f;
+    bool parkingGoal(RaceParkingPose p)const {
+        if(!parked(p))return false;
+        // The side dividers offer more room than the depth of this bay.
+        // Reserve 5cm on both sloping dividers for real tracking error;
+        // the physical dwell/containment test still uses the original paint.
+        const float slope=cfg.stagger()/cfg.depth;
+        for(auto q:body(p,0)) {
+            const float h=(q.y-(-cfg.aisle/2-q.x)*slope)*cfg.depth/cfg.side;
+            if(h<goalDividerMargin||cfg.depth-h<goalDividerMargin)return false;
+        }
         return true;
     }
 };
@@ -187,15 +260,24 @@ inline std::vector<RaceParkingPose> raceParkingReverseSamples(const std::vector<
     if(cv::norm(axle(entry.back())-axle(result.back()))<.003f)result.back()=entry.back();else result.push_back(entry.back());
     std::reverse(result.begin(),result.end());return result;
 }
-struct RaceParkingSearchTrial {float curvatureScale=1,heuristicWeight=1;int expanded=0,candidates=0,rejected=0;const char *reason="NOT_RUN";float curvaturePreview=.10f;};
+struct RaceParkingSearchTrial {float curvatureScale=1,heuristicWeight=1;int expanded=0,candidates=0,rejected=0;const char *reason="NOT_RUN";float curvaturePreview=.10f,outwardYawLimit=.24f;};
 struct RaceParkingRoute {bool valid=false;const char *reason="NO_PARKING_PATH";std::vector<RaceParkingPose> entry,exit;int expanded=0,geometricCandidates=0,modelRejected=0;std::vector<RaceParkingSearchTrial> searches;float entryCurvaturePreview=.10f;};
 inline RaceParkingRoute racePlanParking(const RaceParkingSpace &space,RaceParkingPose start,float curvatureScale=1.f,
-                                      const std::function<bool(const RaceParkingRoute&)> &acceptRoute={},float heuristicWeight=1.f,bool preferEarlyTurn=true) {
+                                      const std::function<bool(const RaceParkingRoute&)> &acceptRoute={},float heuristicWeight=1.f,bool preferEarlyTurn=true,
+                                      float outwardYawLimit=.24f) {
     RaceParkingRoute out;
     if(!std::isfinite(curvatureScale)||curvatureScale<.7f||curvatureScale>1||
-       !std::isfinite(heuristicWeight)||heuristicWeight<1||heuristicWeight>2){out.reason="INVALID_PARKING_SEARCH_CURVATURE";return out;}
+       !std::isfinite(heuristicWeight)||heuristicWeight<1||heuristicWeight>2||
+       !std::isfinite(outwardYawLimit)||outwardYawLimit<0||outwardYawLimit>.24f){out.reason="INVALID_PARKING_SEARCH_CURVATURE";return out;}
     if(!space.free(start)){out.reason="START_OUTSIDE_AISLE_OR_BAY";return out;}
     const auto &d=space.dimensions();const float step=.025f,k=curvatureScale*std::tan(d.fullLockDegrees*float(CV_PI)/180)/d.wheelbase;
+    // With a long approach the car can shift laterally across many steps.
+    // An aggressive outward swing followed by counterlock overshot the
+    // opposite aisle edge. Leave space for that tracking error.
+    const bool longApproach=start.z<-d.length;
+    const float outwardYaw=std::min(start.yaw,-outwardYawLimit);
+    float outerEdge=d.aisle/2-.025f;
+    for(auto q:space.body(start,0))outerEdge=std::max(outerEdge,q.x);
     struct Node {RaceParkingPose p;float cost;int parent;float steering=0;};
     struct Item {float score;int index;bool operator<(const Item &b)const{return score>b.score;}};
     auto key=[](RaceParkingPose p,float steering) {
@@ -217,7 +299,7 @@ inline RaceParkingRoute racePlanParking(const RaceParkingSpace &space,RaceParkin
         ++out.expanded;
         // A complete body inside the bay is a goal. Do not require another
         // centimetre beyond the already inflated footprint in this tight bay.
-        if(space.parked(node.p)) {
+        if(space.parkingGoal(node.p)) {
             ++out.geometricCandidates;RaceParkingRoute candidate=out;
             for(int i=index;i>=0;i=nodes[i].parent)candidate.entry.push_back(nodes[i].p);
             std::reverse(candidate.entry.begin(),candidate.entry.end());candidate.exit=candidate.entry;std::reverse(candidate.exit.begin(),candidate.exit.end());
@@ -242,6 +324,11 @@ inline RaceParkingRoute racePlanParking(const RaceParkingSpace &space,RaceParkin
                 wheel+=std::clamp(target-wheel,-wheelRate*(step/5)/.10f,wheelRate*(step/5)/.10f);
                 next=raceParkingAdvance(next,step/5,std::tan(wheel)/d.wheelbase,d);
                 if(!space.free(next)){ok=false;break;}
+                if(longApproach) {
+                    if(next.yaw<outwardYaw){ok=false;break;}
+                    for(auto q:space.body(next,0))if(q.x>outerEdge){ok=false;break;}
+                    if(!ok)break;
+                }
             }
             if(!ok)continue;
             // Prefer fewer steering reversals, rather than a lattice zigzag

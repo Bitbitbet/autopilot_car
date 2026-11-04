@@ -27,7 +27,7 @@ def native_pixels(config, distances, gains=False):
             if 'runP2' in config:config['runP2']/=4
     config.update(imageWidth=640,imageHeight=480)
 native_pixels(track,('curveLookaheadRow','borderMargin','minSpan','minWidth','maxWidth','rowCutUp','rowCutBottom','maxErrorRate'),True)
-native_pixels(race,('minBranchWidth','minBranchGap','triggerRow','obstacleRow','crossPassedRow'))
+native_pixels(race,('minBranchWidth','minBranchGap','triggerRow','obstacleRow','crossPassedRow','gateStopRow'))
 if surface!='config':track['roadSurface']=surface
 if track.get('roadSurface','white') not in ('white','black'):raise SystemExit('roadSurface 必须是 white 或 black。')
 minimum=track.get('minSpeed',.05)
@@ -109,11 +109,12 @@ record['sample_write_mode']='bounded_background_queue'
 record['parking_geometry_preview_only']=mode=='parking-preview'
 record['parking_control']={'enabled':mode=='parking-drive' or mode.startswith('mission') and 'lab' not in mode,'reverse_source':reverse_source,'bay':None,'selection_policy':'nearby fully visible left or right bay, all assumed empty',
     'parking_area_speed_cap_mps':race['parkingSpeed'],'exit_gate_release_restores_cruise':True,
-    'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':3,'entrance_exit_turns_integrated':mode.startswith('mission') and 'lab' not in mode}
+    'exit_search_command_limit_m':race.get('parkingExitSearchLimitM',1.5),
+    'live_teaching_required':False,'automatic_live_mouth_geometry':True,'dwell_seconds':1,'entrance_exit_turns_integrated':mode.startswith('mission') and 'lab' not in mode}
 record['reverse_check']={'operator_trigger_required':True,'speed_command_mps':-.08,'duration_s':.5,'command_is_not_measured_motion':True} if mode=='reverse-check' else None
 record['mission']={'enabled':mode.startswith('mission'),'lab_single_loop':'lab' in mode,'lap_finish_source':'post-parking FLOW or operator n; finish operator n','ground_arrow_assisted':True,'ground_arrow_turn_trigger':'parking_exit_stage_only'}
 record['processing_resolution']=[640,480]
-record['backend_abi']=5
+record['backend_abi']=6
 record['bypass_algorithm']='virtual_boundary_master640' if 'virtual' in mode or mode.startswith('mission') else 'metric_ground' if mode=='bypass' else 'shadow'
 Path(prefix+'-launch.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
 print('启动记录: '+prefix+'-launch.json')

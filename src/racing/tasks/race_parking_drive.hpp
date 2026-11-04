@@ -12,6 +12,7 @@
 #include "trackview_display.hpp"
 #include "race_ui.hpp"
 #include "control.hpp"
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -24,6 +25,48 @@ inline uint16_t raceParkingServo(float curvature,const RaceParkingDimensions &d)
     const float angle=std::atan(d.wheelbase*curvature),lock=d.fullLockDegrees*float(CV_PI)/180;
     return uint16_t(std::lround(std::clamp(float(PWMSERVOMID)-400*angle/lock,float(PWMSERVOMIN),float(PWMSERVOMAX))));
 }
+
+// Last override before sending the chosen steering and speed to the actuator.
+inline void raceApplyMissionFinish(const RaceMission &mission,RaceParkingCommand &command,float &speed,uint16_t &servo) {
+    if(!mission.complete())return;
+    speed=0;servo=PWMSERVOMID;
+    command={0,0,mission.name(),mission.statusReason(),command.segment};
+}
+
+// One manually marked, motor-free push trial per run directory.
+struct RaceParkingMotionLossWindow {
+    uint64_t startFrame=0,triggerFrame=0;
+    static constexpr unsigned postFrames=6;
+    bool update(uint64_t frame,bool eligible,bool savedSample,bool visualValid,int misses) {
+        if(triggerFrame)return false;
+        if(!eligible){startFrame=0;return false;}
+        if(!startFrame&&savedSample&&visualValid)startFrame=frame;
+        if(!startFrame||visualValid||misses<3)return false;
+        triggerFrame=frame;return true;
+    }
+};
+
+class RaceParkingAisleHandoff {
+    double since=-1,lastCapture=-1;
+    uint64_t lastFrame=0;
+public:
+    enum class State {Waiting,Confirming,Ready};
+    State update(const RaceParkingControl &controller,const RaceParkingSpace &space,
+                 const RaceParkingObservation &observation,double now,bool trafficClear,bool aiReady) {
+        // Done follows stationary dwell and a measured displacement out of the bay.
+        // Require an applied reverse command as well, then a continuous absolute
+        // view of the rejoined aisle before the forward pilot can take control.
+        if(!controller.done()||controller.reverseDistanceEstimate()<=0||!trafficClear||!aiReady||
+           !observation.valid||observation.estimated||!std::isfinite(now)||!std::isfinite(observation.captured)||
+           now<observation.captured||now-observation.captured>.18||observation.sequence<=lastFrame||
+           observation.captured<=lastCapture||!raceParkingReadyToRejoin(space,observation.pose)) {
+            since=-1;return State::Waiting;
+        }
+        if(since<0||observation.captured-lastCapture>.25)since=observation.captured;
+        lastFrame=observation.sequence;lastCapture=observation.captured;
+        return lastCapture-since>=.5?State::Ready:State::Confirming;
+    }
+};
 
 template<class Preprocess,class StopFlag>
 int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroundCalibration &calibration,
@@ -55,7 +98,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
         if(q.clicks.size()<2)q.clicks.emplace_back(float(x),float(y));
     },&input);
     if(missionEnabled)std::cout<<"[Mission] "<<directory<<"\n"<<(previewOnly?"NO MOTOR | ":"")
-        <<(labMission?"实验室单圈；不套用比赛停车路线。":"北京比赛两圈；第一圈按直行及岔路牌绕行，第二圈识别PARK左转停车，出库后左转返回终点。")
+        <<(labMission?"实验室单圈；不套用比赛停车路线。":"北京比赛两圈；第二圈出库返程确认停止符后继续循迹，越过终点斑马线再停车。")
         <<" a开始；n仅在实际起点确认计圈/终点；空格停；g复位；s保存当前图。\n";
     else std::cout<<"[Parking] "<<directory<<"\n默认从当前车载图自动找左右两侧完整可见车位口并规划，不需逐次点选；出现黄色车位和绿色路线后按a执行。\n"
         <<"按g重新识别；f进入手动点选诊断。后方有道闸时不要求后退，车身扫掠不得超过起始后沿。\n"
@@ -66,10 +109,11 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
         auto saveTest=[&]{std::ofstream(directory/"parking-test-summary.json")<<test.toJson().dump(2);};
         try {
             RaceParkingDimensions dims;RaceParkingSpace space(dims);RaceGroundMap map=labMission?RaceGroundMap{}:RaceGroundMap(calibration);
+            const RaceGroundMap finishGround=map; // The parking bay scale is local to its taught route.
             RaceParkingControl controller(space,raceConfig.parkingSpeed);RaceParkingPoseFallback poseFallback;
             RaceManager manager(raceConfig);RaceTaskPilot pilot(config),virtualPilot(config);
             RaceVirtualSteeringFeedback virtualFeedback;
-            RaceMission mission(labMission);bool missionAutomatic=false;
+            RaceMission mission(labMission,raceConfig.parkingExitSearchLimitM,raceConfig.crossClearTime);bool missionAutomatic=false;
             RaceNavigationConfig navConfig;RaceVirtualBoundary virtualBoundary(navConfig);Track matchedTrack;
             std::ofstream missionLog;if(missionEnabled)missionLog.open(directory/"mission-state.jsonl");
             Track track;track.rowCutUp=config.rowCutUp;track.rowCutBottom=config.rowCutBottom;
@@ -78,14 +122,16 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
             cv::Mat frozenImage;std::vector<cv::Point2f> corners;
             RaceParkingFrame bayFrame;bool frozen=false,taught=false,armed=false,continueLane=false;
             bool rejoinAligning=false;float rejoinAlignmentTime=0;
-            double last=raceTime(),completedAt=-1;uint64_t frame=0;uint16_t previousServo=PWMSERVOMID;
+            RaceParkingAisleHandoff aisleHandoff;
+            double last=raceTime();uint64_t frame=0;uint16_t previousServo=PWMSERVOMID;
             RaceSpeedSettings speedSettings(config,raceConfig.forkSpeed);
             float &cruise=speedSettings.cruise;
             float previousSpeed=0;std::string previousState;
             std::string firstMotionFailure;
             std::string teachingFeedback,teachingDetails;
-            bool autoEnabled=!missionEnabled,autoPlanning=false;double lastScan=-1e30;int stableMouths=0;
-            RaceParkingMouthCandidate previousMouth;std::vector<RaceParkingMouthCandidate> autoMouths;
+            bool autoEnabled=!missionEnabled,autoPlanning=false;double lastScan=-1e30,lastMissionScan=-1e30;
+            RaceParkingMouthConfirmation mouthConfirmation;std::vector<RaceParkingMouthCandidate> autoMouths;
+            double bayConfirmStoppedAt=-1;RaceParkingMouthCandidate stoppedMouth;
             RaceParkingBaySearch baySearch;bool searchAdvance=false,searchRequested=false;
             bool standaloneExitGateSeen=false,standaloneExitReleased=false;
             std::ofstream searchLog(directory/"parking-bay-search.jsonl");
@@ -93,10 +139,68 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
             struct EvidenceFrame {cv::Mat image;nlohmann::json metadata;};
             std::deque<EvidenceFrame> recent;
             std::future<void> evidenceWriter;int evidenceCount=0;
+            double postStopEvidenceAt=-1;
+            std::deque<EvidenceFrame> pendingStop;
+            struct RoadEvidence {
+                const char *folder;const char *event=nullptr;
+                uint64_t trigger=0;int direction=0;
+                std::deque<EvidenceFrame> frames{};
+            } forkSelected{"signed-fork-selected"},forkWait{"signed-fork-wait"},
+              exitArrow{"parking-exit-arrow"},exitDecision{"parking-exit-decision"},
+              reverseLoss{"parking-reverse-visual-loss"};
+            int observedForkDirection=0;
+            RaceParkingMotionLossWindow pushWindow;
+            std::deque<EvidenceFrame> pushFrames;
+            auto writerReady=[&]{return !evidenceWriter.valid()||
+                evidenceWriter.wait_for(std::chrono::seconds(0))==std::future_status::ready;};
+            auto writeEvidence=[&](std::deque<EvidenceFrame> frames,const std::filesystem::path &destination,nlohmann::json event){
+                if(evidenceWriter.valid())evidenceWriter.get();
+                evidenceWriter=std::async(std::launch::async,[frames=std::move(frames),destination,event=std::move(event)]{
+                    try {
+                        std::filesystem::create_directories(destination);nlohmann::json saved=nlohmann::json::array();
+                        for(const auto &item:frames) {
+                            const auto name="frame-"+std::to_string(item.metadata.at("frame").template get<uint64_t>())+".png";
+                            if(!cv::imwrite((destination/name).string(),item.image))throw std::runtime_error("PNG evidence write failed");
+                            auto metadata=item.metadata;metadata["image"]=name;saved.push_back(std::move(metadata));
+                        }
+                        std::ofstream index(destination/"frames.json");index<<saved.dump(2);index.close();
+                        if(!index)throw std::runtime_error("Cannot save frames.json");
+                        if(!event.is_null()) {
+                            std::ofstream info(destination/"event.json");info<<event.dump(2);info.close();
+                            if(!info)throw std::runtime_error("Cannot save event.json");
+                        }
+                    }catch(const std::exception &e){
+                        std::cerr<<"[Parking evidence] "<<destination<<": "<<e.what()<<'\n';
+                        std::ofstream(destination.parent_path()/"parking-evidence-errors.txt",std::ios::app)<<destination.filename()<<": "<<e.what()<<'\n';
+                    }
+                });
+            };
+            auto savePushWindow=[&]{
+                const auto first=pushFrames.front().metadata.at("frame").template get<uint64_t>();
+                const auto lastFrame=pushFrames.back().metadata.at("frame").template get<uint64_t>();
+                writeEvidence(std::move(pushFrames),directory/"parking-motion-loss-1",{
+                    {"event","FIRST_SUSTAINED_VISUAL_LOSS_AFTER_MARKED_PUSH_START"},{"motor_control",false},
+                    {"start_sample_frame",pushWindow.startFrame},{"trigger_frame",pushWindow.triggerFrame},
+                    {"first_frame",first},{"last_frame",lastFrame},{"requested_post_frames",pushWindow.postFrames},
+                    {"post_frames_captured",lastFrame-pushWindow.triggerFrame}});
+                pushFrames.clear();
+            };
+            auto captureRoadWindow=[&](RoadEvidence &window,const char *event,uint64_t trigger,int direction){
+                if(window.trigger)return;
+                window.trigger=trigger;window.direction=direction;window.event=event;
+                const auto count=std::min<size_t>(4,recent.size());
+                window.frames.assign(recent.end()-count,recent.end());
+            };
+            auto writeRoadWindow=[&](RoadEvidence &window){
+                writeEvidence(std::move(window.frames),directory/window.folder,{
+                    {"event",window.event},{"trigger_frame",window.trigger},{"direction",window.direction},{"motor_control",true}});
+                window.frames.clear();
+            };
+            const std::array<RoadEvidence*,4> roadWindows{&forkWait,&forkSelected,&exitArrow,&exitDecision};
             auto world=[&](cv::Point2f p){return bayFrame.world(p,dims.aisle);};
             while(!stop.load()) {
                 if(car->hardFault())throw std::runtime_error("Parking serial/exit fault: restart required");
-                if(car->commandTimedOut())previousSpeed=0;
+                if(car->commandTimedOut()){previousSpeed=0;previousServo=PWMSERVOMID;}
                 cv::Mat image;if(!video.read(image)||image.empty())throw std::runtime_error("Parking camera unavailable");
                 const double captured=raceTime();
                 if(image.size()!=cameraSize) {
@@ -111,7 +215,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 raceNormalizeFrame(image);
                 predeal.correct(image);++frame;perception->submit(image,frame,captured);
                 const auto bin=predeal.binarize(image);track.handle(bin);
-                bool mouthsScanned=false;std::vector<RaceParkingMouthCandidate> liveMouths;
+                bool mouthsScanned=false,parkingSearchStarted=false;std::vector<RaceParkingMouthCandidate> liveMouths;
                 auto scanMouths=[&]() -> const std::vector<RaceParkingMouthCandidate>& {
                     if(!mouthsScanned){liveMouths=raceDetectParkingMouths(image,map,dims);mouthsScanned=true;}return liveMouths;
                 };
@@ -120,7 +224,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(!armed&&dt>0&&dt<=.25f) {
                     const float angle=(float(PWMSERVOMID)-previousServo)/400*dims.fullLockDegrees*float(CV_PI)/180;
                     const float distance=previousSpeed*dt;
-                    baySearch.advance(distance,distance*std::tan(angle)/dims.wheelbase);
+                    const float yaw=distance*std::tan(angle)/dims.wheelbase;
+                    baySearch.advance(distance,yaw);mouthConfirmation.advance(distance,yaw);
                 }
                 RaceObstaclePreviewPlan virtualPlan;RaceBypassDecision virtualDecision;
                 if(missionEnabled&&!mission.parkingSearch()&&!mission.parkingRun()&&!ai.image.empty()) {
@@ -132,16 +237,20 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 RaceGroundArrow groundArrow;
                 if(missionEnabled){
                     groundArrow=raceGroundArrow(image,track,config.roadSurface=="black");
-                    mission.observeExitArrow(groundArrow,frame,before-captured<=.18);
+                    mission.observeExitArrow(groundArrow,frame,before-captured<=.18,captured);
                 }
                 auto traffic=manager.update(ai,before,dt,missionEnabled?missionAutomatic:true,bin,track,image,
                     virtualDecision.authorizeCone,true,missionEnabled?mission.routeDirection():0,missionEnabled,
-                    missionEnabled&&((mission.parkingApproach()&&mission.routeDirection()==-1)||mission.exitArrowTurnAuthorized()),
+                    missionEnabled&&((mission.parkingApproach()&&mission.routeDirection()==-1)||mission.exitTurnAuthorized()),
                     missionEnabled&&mission.parkingSpeedLimited()?raceConfig.parkingSpeed:speedSettings.fork,
                     {true,pilot.ready&&pilot.alignment.valid&&!virtualDecision.involved&&!armed,
-                     pilot.alignment.offset,pilot.alignment.heading,previousSpeed},
-                    missionEnabled&&mission.parkingEntrancePending(),missionEnabled&&mission.parkingEntranceNear());
-                if(missionEnabled)mission.observeGate(traffic);
+                     pilot.alignment.offset,pilot.alignment.heading,previousSpeed,previousServo},
+                    missionEnabled&&mission.parkingEntrancePending(),missionEnabled&&mission.parkingEntranceNear(),
+                    missionEnabled&&mission.followParkingAisle(),missionEnabled&&mission.exitTurnAuthorized(),missionEnabled&&mission.finalReturn());
+                if(missionEnabled){
+                    mission.advance(traffic,dt,previousSpeed);
+                    mission.observeGate(traffic,armed&&controller.rejoiningAfterReverse());
+                }
                 else if(controller.done()) {
                     if(traffic.gateWaiting)standaloneExitGateSeen=true;
                     if(standaloneExitGateSeen&&traffic.gateOpened)standaloneExitReleased=true;
@@ -153,16 +262,25 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 pilot.setDegradedSpeed(speedSettings.degraded);
                 virtualPilot.setCurveSpeed(speedSettings.curve);virtualPilot.setDegradedSpeed(speedSettings.degraded);
                 if(missionEnabled) {
-                    // Bay search cannot be consumed until the entrance turn
-                    // finishes. Avoid a full 640px mouth scan on every turning
-                    // frame, which competes with the 250ms command watchdog.
-                    auto visibleCandidates=missionAutomatic&&mission.canScanParkingBays(traffic)&&!taught?
-                        scanMouths():std::vector<RaceParkingMouthCandidate>{};
+                    // Scan the acquired entrance as well as the aisle: waiting
+                    // for a gate/zero-split completion missed the whole car park.
+                    // Throttle pre-plan scans; parkingSearch uses the same current
+                    // image in the confirmation block below.
+                    std::vector<RaceParkingMouthCandidate> visibleCandidates;
+                    if(missionAutomatic&&mission.canScanParkingBays(traffic)&&!mission.parkingSearch()&&!taught&&
+                       (mouthConfirmation.tracking(before)||before-lastMissionScan>=.12)){
+                        lastMissionScan=before;visibleCandidates=scanMouths();
+                    }
                     baySearch.filter(visibleCandidates);
-                    const bool visibleMouth=!visibleCandidates.empty();
-                    mission.observe(ai,traffic,visibleMouth);
+                    // Confirm while following the aisle. A single clipped T must
+                    // not latch a stationary search that can never see it again.
+                    const bool visibleMouth=mouthsScanned&&mouthConfirmation.update(visibleCandidates,before,frame,previousSpeed);
+                    mission.observe(ai,traffic,visibleMouth,&finishGround,calibration.vehicleLength);
                     if(mission.parkingSearch()&&!taught&&!frozen&&!controller.failed()) {
-                        if(continueLane){car->pauseMotion();previousSpeed=0;}
+                        if(continueLane){
+                            parkingSearchStarted=true;car->pauseMotion();previousSpeed=0;
+                            bayConfirmStoppedAt=before;stoppedMouth=visibleCandidates.front();
+                        }
                         continueLane=false;searchAdvance=false;autoEnabled=true;
                     }
                 }
@@ -180,24 +298,43 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 auto keys=display.takeKeys();
                 if(missionEnabled&&mission.parkingSearch()&&taught&&route.valid&&measured.valid&&!traffic.stop)keys.push_back('a');
                 if(!missionEnabled&&searchRequested&&taught&&route.valid&&!armed&&measured.valid&&!traffic.stop)keys.push_back('a');
-                if(std::find(keys.begin(),keys.end(),' ')==keys.end()&&autoEnabled&&!taught&&!frozen&&!armed&&(!continueLane||searchAdvance)&&!controller.failed()&&before-lastScan>=.1) {
-                    const double scanGap=before-lastScan;lastScan=before;map.setMetricScale(1);autoMouths=scanMouths();
+                if(std::find(keys.begin(),keys.end(),' ')==keys.end()&&autoEnabled&&
+                   (!missionEnabled||(mission.parkingSearch()&&!parkingSearchStarted&&traffic.fresh&&!traffic.stop&&!traffic.gateWaiting))&&
+                   !taught&&!frozen&&!armed&&(!continueLane||searchAdvance)&&!controller.failed()&&
+                   (mouthConfirmation.tracking(before)||before-lastScan>=.1)) {
+                    lastScan=before;map.setMetricScale(1);autoMouths=scanMouths();
                     baySearch.filter(autoMouths);
-                    if(autoMouths.empty()) {stableMouths=0;teachingFeedback="AUTO_WAIT_FULL_VISIBLE_BAY";}
+                    if(missionEnabled&&bayConfirmStoppedAt>=0) {
+                        // While coasting to rest, track the selected bay only.
+                        autoMouths.erase(std::remove_if(autoMouths.begin(),autoMouths.end(),[&](const auto &m){
+                            return !m.withinStoppedBay(stoppedMouth);
+                        }),autoMouths.end());
+                    }
+                    const bool confirmed=mouthConfirmation.update(autoMouths,before,frame,previousSpeed);
+                    if(autoMouths.empty()) {teachingFeedback="AUTO_WAIT_FULL_VISIBLE_BAY";}
                     else {
                         const auto &m=autoMouths.front();
-                        const float travel=std::abs(previousSpeed)*std::min(float(scanGap),.3f);
-                        const bool same=stableMouths&&m.side==previousMouth.side&&cv::norm(m.nearGround-previousMouth.nearGround)<.015+travel&&
-                            cv::norm(m.farGround-previousMouth.farGround)<.015+travel;
-                        stableMouths=same?stableMouths+1:1;previousMouth=m;
                         teachingFeedback="AUTO_CONFIRMING_BAY_MARKINGS";
-                        if(stableMouths>=3) {
+                        if(confirmed&&(!missionEnabled||mouthConfirmation.settledAfter(bayConfirmStoppedAt))) {
                             if(searchAdvance){car->pauseMotion();previousSpeed=0;continueLane=false;searchAdvance=false;}
                             frozenImage=image.clone();frozen=true;autoPlanning=true;autoEnabled=false;
                             corners={m.nearImage,m.farImage};keys.push_back('p');
                         }
                     }
                 }
+                if(missionEnabled&&missionAutomatic&&mission.parkingSearch()&&!taught&&!frozen&&!armed&&
+                   bayConfirmStoppedAt>=0&&before-bayConfirmStoppedAt>=.8&&traffic.fresh&&!traffic.stop&&
+                   !traffic.gateWaiting&&pilot.ready&&before-captured<=.18) {
+                    // Coast/occlusion can remove even a confirmed mouth. Skip
+                    // this lost candidate, retaining the total search bound.
+                    baySearch.reject(stoppedMouth.nearGround,stoppedMouth.farGround);
+                    mission.nextParkingBay("BAY_CONFIRMATION_LOST_FIND_NEXT");mouthConfirmation.reset();bayConfirmStoppedAt=-1;
+                    if(car->resumeMotion(car->motionEpoch())){continueLane=true;searchAdvance=true;}
+                    teachingFeedback="BAY_CONFIRMATION_LOST_FIND_NEXT";
+                    searchLog<<nlohmann::json({{"frame",frame},{"event",teachingFeedback},
+                        {"search_travel_reset",false}}).dump()<<'\n';
+                }
+                bool savedSample=false;
                 for(int key:keys) {
                     if(key>='A'&&key<='Z')key=key-'A'+'a';
                     if(const char *setting=speedSettings.adjust(key)) {
@@ -214,11 +351,11 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         }
                     }
                     else if((key=='r'||key=='g')&&!armed&&(!continueLane||(missionEnabled&&(!missionAutomatic||mission.complete()||mission.failed())))) {
-                        if(missionEnabled){mission=RaceMission(labMission);missionAutomatic=false;continueLane=false;virtualBoundary=RaceVirtualBoundary(navConfig);}
+                        if(missionEnabled){mission=RaceMission(labMission,raceConfig.parkingExitSearchLimitM,raceConfig.crossClearTime);missionAutomatic=false;continueLane=false;virtualBoundary=RaceVirtualBoundary(navConfig);}
                         test.reset();saveTest();
-                        car->pauseMotion();space=RaceParkingSpace(dims);controller=RaceParkingControl(space,raceConfig.parkingSpeed);route={};motion.reset();measured={};taught=frozen=false;corners.clear();map.setMetricScale(1);completedAt=-1;firstMotionFailure.clear();recent.clear();teachingFeedback.clear();teachingDetails.clear();
+                        car->pauseMotion();space=RaceParkingSpace(dims);controller=RaceParkingControl(space,raceConfig.parkingSpeed);route={};motion.reset();measured={};taught=frozen=false;corners.clear();map.setMetricScale(1);aisleHandoff={};firstMotionFailure.clear();recent.clear();teachingFeedback.clear();teachingDetails.clear();
                         standaloneExitGateSeen=standaloneExitReleased=false;
-                        autoEnabled=!missionEnabled&&key=='g';autoPlanning=false;stableMouths=0;
+                        autoEnabled=!missionEnabled&&key=='g';autoPlanning=false;mouthConfirmation.reset();bayConfirmStoppedAt=-1;
                         baySearch.reset();searchAdvance=searchRequested=false;
                         std::lock_guard lock(input.mutex);input.clicks.clear();
                     } else if(key=='f'&&!armed&&!continueLane&&!taught) {
@@ -229,7 +366,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         if(!frozen){teachingFeedback="P_PRESS_F_TO_FREEZE";continue;}
                         if(corners.size()!=2){teachingFeedback="P_CLICK_TWO_POINTS_FIRST";continue;}
                         std::vector<std::vector<cv::Point2f>> choices{corners};
-                        if(autoPlanning){choices.clear();for(const auto &m:autoMouths)choices.push_back({m.nearImage,m.farImage});}
+                        if(autoPlanning&&!missionEnabled){choices.clear();for(const auto &m:autoMouths)choices.push_back({m.nearImage,m.farImage});}
                         for(const auto &choice:choices) {
                         corners=choice;
                         map.setMetricScale(1);auto a=map.toGround(corners[0]),b=map.toGround(corners[1]);
@@ -241,8 +378,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         nlohmann::json attempt={{"frame",frame},{"reason",check.reason},{"valid",check.valid},
                             {"automatic",autoPlanning},{"image_points",{{corners[0].x,corners[0].y},{corners[1].x,corners[1].y}}},
                             {"raw_ground_points",{{a.x,a.y},{b.x,b.y}}},{"scale",scale},
-                            {"parking_clearance_m",dims.clearance},{"goal_extra_margin_m",0.0},
-                            {"predicted_boundary_policy","warning_continue"},{"route_preference","early_turn_into_selected_bay_far_divider_clearance"},
+                            {"parking_clearance_m",dims.clearance},{"goal_extra_margin_m",std::max(0.f,.015f-dims.clearance)},
+                            {"goal_divider_margin_m",RaceParkingSpace::goalDividerMargin},{"predicted_boundary_policy","deep_entry_visual_swept_stop"},
+                            {"route_preference","early_turn_into_selected_bay_far_divider_clearance"},
                             {"scaled_near_m",{check.near.x,check.near.y}},{"scaled_far_m",{check.far.x,check.far.y}}};
                         std::ofstream(directory/"parking-teaching-attempt.json")<<attempt.dump(2);
                         cv::imwrite((directory/"parking-teaching-attempt.png").string(),frozenImage);
@@ -264,7 +402,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         attempt["searches"]=nlohmann::json::array();
                         for(const auto &s:route.searches)attempt["searches"].push_back({{"curvature_scale",s.curvatureScale},
                             {"heuristic_weight",s.heuristicWeight},{"expanded",s.expanded},{"candidates",s.candidates},
-                            {"model_rejected",s.rejected},{"reason",s.reason},{"entry_curvature_preview_m",s.curvaturePreview}});
+                            {"model_rejected",s.rejected},{"reason",s.reason},{"entry_curvature_preview_m",s.curvaturePreview},
+                            {"outward_heading_limit_rad",s.outwardYawLimit}});
                         std::ofstream(directory/"parking-teaching-attempt.json")<<attempt.dump(2);
                         std::cout<<"[Parking] "<<route.reason<<" nodes="<<route.expanded<<" candidates="<<route.geometricCandidates<<" model_rejected="<<route.modelRejected<<'\n';
                         if(!route.valid){if(autoPlanning)baySearch.reject(rawNear,rawFar);continue;}
@@ -276,8 +415,9 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         std::ofstream(directory/"parking-route.json")<<nlohmann::json({{"bay",autoPlanning?nlohmann::json(nullptr):nlohmann::json(2)},{"entry",points},{"reverse_reference","visual_entry_poses_with_marked_command_fallback"},
                             {"selection_source",autoPlanning?"fresh_live_white_T_junction_geometry":"manual_current_frame"},
                             {"recognizes_bay_number",false},{"rear_boundary_m",space.rearLimit()},
-                            {"parking_clearance_m",dims.clearance},{"goal_extra_margin_m",0.0},
-                            {"predicted_boundary_policy","warning_continue"},{"route_preference","early_turn_into_selected_bay_far_divider_clearance"},
+                            {"parking_clearance_m",dims.clearance},{"goal_extra_margin_m",std::max(0.f,.015f-dims.clearance)},
+                            {"goal_divider_margin_m",RaceParkingSpace::goalDividerMargin},{"predicted_boundary_policy","deep_entry_visual_swept_stop"},
+                            {"route_preference","early_turn_into_selected_bay_far_divider_clearance"},
                             {"entry_curvature_preview_m",route.entryCurvaturePreview},{"observed_mouth_tolerance_m",RaceParkingSpace::observedMouthTolerance},
                             {"origin_m",{bayFrame.origin.x,bayFrame.origin.y}},{"forward_axis",{bayFrame.along.x,bayFrame.along.y}},{"ground_scale",scale},
                             {"parking_side",bayFrame.side<0?"left":"right"},{"canonical_frame_handedness",bayFrame.handedness()},
@@ -291,7 +431,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         if(autoPlanning&&!taught) {
                             searchLog<<nlohmann::json({{"frame",frame},{"event","PLAN_FAILED_FIND_NEXT_BAY"},
                                 {"reason",teachingFeedback},{"rejection_tracking","applied_command_estimate_not_measured"}}).dump()<<'\n';
-                            frozen=false;corners.clear();route={};map.setMetricScale(1);stableMouths=0;autoEnabled=true;
+                            frozen=false;corners.clear();route={};map.setMetricScale(1);mouthConfirmation.reset();autoEnabled=true;
                             controller=RaceParkingControl(RaceParkingSpace(dims),raceConfig.parkingSpeed);test.reset();saveTest();
                             if((missionEnabled&&missionAutomatic)||searchRequested) {
                                 if(missionEnabled)mission.nextParkingBay();
@@ -319,9 +459,17 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         if(!traffic.stop&&measured.valid&&controller.arm(route,observation,raceTime(),reverseVerified||previewOnly)) {
                             if(car->resumeMotion(commandEpoch)){armed=true;test.start();saveTest();if(missionEnabled){mission.parkingStarted();virtualBoundary=RaceVirtualBoundary(navConfig);}}
                             else {controller.abort();std::cout<<"[Parking] Stop epoch changed; reteach.\n";}
-                        } else {teachingFeedback="G_RESCAN_CURRENT_POSE_OR_STALE_ROUTE";test.startBlocked(teachingFeedback);saveTest();std::cout<<"[Parking] Start blocked: current pose/route continuity; press g to rescan.\n";}
+                        } else {
+                            const char *reason=controller.armBlockReason(route,observation,raceTime(),reverseVerified||previewOnly);
+                            const std::string feedback=reason?reason:"PARK_START_WAIT_TRAFFIC_OR_MOTION";
+                            if(teachingFeedback!=feedback)std::cout<<"[Parking] Start blocked: "<<feedback<<'\n';
+                            teachingFeedback=feedback;test.startBlocked(feedback);saveTest();
+                        }
                     } else if(key=='s'&&(missionEnabled||std::abs(previousSpeed)<1e-5f)) {
-                        cv::imwrite((directory/("sample-"+std::to_string(frame)+".png")).string(),image);
+                        savedSample=cv::imwrite((directory/("sample-"+std::to_string(frame)+".png")).string(),image);
+                        if(savedSample)std::cout<<"[Parking evidence] Saved sample-"<<frame<<".png | visual="
+                            <<(measured.valid&&!measured.estimatedOrigin?"absolute":"unconfirmed")<<'\n';
+                        if(!savedSample)std::cerr<<"[Parking evidence] Failed to save sample frame "<<frame<<'\n';
                     }
                 }
                 RaceParkingCommand command;
@@ -335,7 +483,10 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                         const auto seed=bayFrame.physical(observation.pose,dims.aisle);
                         motion->reanchorParkingEstimate(current,{seed.x,seed.z,seed.yaw});
                     }
-                    command=controller.update(observation,raceTime(),dt,!traffic.stop,std::min(taskCruise,traffic.speedCap),previousSpeed);
+                    command=controller.update(observation,raceTime(),dt,!traffic.stop,std::min(taskCruise,traffic.speedCap),previousSpeed,
+                        bayFrame.handedness()*std::tan(appliedAngle)/dims.wheelbase);
+                    if(!traffic.stop&&poseFallback.budgetExhausted()&&std::string(command.state)=="PARK_HOLD")
+                        command.reason="PARK_ESTIMATE_LIMIT_WAIT_ABSOLUTE_VISION";
                 }
                 else if(controller.failed())command=controller.status();
                 else command.reason=frozen?(corners.size()==2?"P_PLAN_ROUTE":"CLICK_NEAR_THEN_FAR_WHITE_LINE_TIPS"):taught?"A_START_PARKING":"F_FREEZE_AT_BAY_2";
@@ -348,15 +499,24 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     // also centre the wheels and force a fresh steering wait.
                     const auto requested=hold?previousServo:raceParkingServo(bayFrame.handedness()*command.curvature,dims);
                     requestedServo=requested;
-                    servo=uint16_t(std::lround(std::clamp(float(requested),float(previousServo)-600*std::min(dt,.1f),float(previousServo)+600*std::min(dt,.1f))));
+                    const float lock=dims.fullLockDegrees*float(CV_PI)/180;
+                    const float currentAngle=(float(PWMSERVOMID)-previousServo)/400*lock;
+                    const float targetAngle=(float(PWMSERVOMID)-requested)/400*lock;
+                    const float appliedAngle=raceParkingSteeringStep(currentAngle,targetAngle,dt,dims);
+                    servo=uint16_t(std::lround(PWMSERVOMID-appliedAngle/lock*400));
                     speed=command.speed;
                     actuatorReason=command.speed==0?"CONTROLLER_STOP":std::abs(int(servo)-int(requested))>35?"STEERING_SLEW_MOVING":"TRACKING";
                     // A command calculated from a frame that became old during processing cannot move.
                     if(raceTime()-captured>.18||raceTime()-ai.captured>raceConfig.maxDetectionAge)speed=0;
                     if(controller.done()) {
-                        if(completedAt<0)completedAt=raceTime();
-                        // Rejoining uses the original lane quality/curve limits and all traffic stops.
-                        if(raceTime()-completedAt>=.5){continueLane=true;armed=false;rejoinAligning=true;rejoinAlignmentTime=0;pilot.resetControl();if(missionEnabled)mission.parkingFinished();}
+                        const double now=raceTime();
+                        const auto handoff=aisleHandoff.update(controller,space,observation,now,!traffic.stop,manager.aiReady(ai,now));
+                        if(handoff==RaceParkingAisleHandoff::State::Waiting)
+                            command={0,0,"PARK_HOLD","WAIT_ABSOLUTE_AISLE_HANDOFF",command.segment};
+                        if(handoff==RaceParkingAisleHandoff::State::Ready){
+                            continueLane=true;armed=false;rejoinAligning=true;rejoinAlignmentTime=0;pilot.resetControl();
+                            if(missionEnabled)mission.parkingFinished(!controller.terminalRecoveryUsed());
+                        }
                     }
                 }
                 if(continueLane||(missionEnabled&&!mission.parkingSearch()&&!mission.parkingRun())) {
@@ -411,7 +571,19 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 }
                 if(missionEnabled) {
                     if(controller.failed())mission.fault(controller.status().reason);
+                    if(mission.baySearchTravelExhausted()) {
+                        speed=0;servo=previousServo;command.state="PARK_BAY_SEARCH_HOLD";
+                        command.reason="NO_BAY_WITHIN_SEARCH_TRAVEL_RESCAN_STOPPED";
+                    }
+                    if(mission.exitSearchTravelExhausted()) {
+                        speed=0;servo=previousServo;command.state="PARK_EXIT_SEARCH_HOLD";
+                        command.reason="NO_EXIT_LANDMARK_WITHIN_SEARCH_TRAVEL";
+                    }
+                    if(mission.finishSearchHeld()){
+                        speed=0;servo=PWMSERVOMID;command.state="FINISH_CROSSWALK_HOLD";command.reason="NEAR_CROSSWALK_NOT_VERIFIED";
+                    }
                     if(mission.failed()||mission.complete()||!missionAutomatic) {speed=0;if(mission.complete()||mission.failed())car->pauseMotion();}
+                    if(mission.failed()){command.state=mission.name();command.reason=mission.statusReason();}
                 }
                 if(traffic.stop) {speed=0;command.reason=traffic.reason;}
                 const double finalTime=raceTime();
@@ -423,7 +595,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 if(car->hardFault())throw std::runtime_error("Parking serial/exit fault during control");
                 const bool commandExpired=car->commandTimedOut();
                 if(commandExpired){
-                    speed=0;
+                    speed=0;servo=PWMSERVOMID;
                     command.reason="CONTROL_TIMEOUT_WAIT_FRESH_FRAME";
                     if(!stop.load()&&finalTime-captured<=.18&&manager.aiReady(ai,finalTime)&&dt>0&&dt<=.25f&&
                        car->recoverCommandTimeout(commandEpoch))
@@ -431,10 +603,11 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     std::cerr<<"[Parking timing] "<<command.reason<<" frame="<<frame<<" dt="<<dt
                              <<" processing="<<finalTime-captured<<'\n';
                 }
+                if(missionEnabled)raceApplyMissionFinish(mission,command,speed,servo);
                 const float previousCommandSpeed=previousSpeed;
                 if(!virtualDecision.follow||speed==0)virtualFeedback.reset();
                 car->carControl(speed,servo);previousServo=servo;previousSpeed=speed;
-                test.observe(command.state,command.reason,speed,actuatorReason,!observation.estimated&&!controller.exitRecoveryUsed(),controller.terminalRecoveryUsed());
+                test.observe(command.state,command.reason,speed,actuatorReason,observation.valid&&!observation.estimated&&!controller.exitRecoveryUsed(),controller.terminalRecoveryUsed());
                 if(!armed)poseFallback.reset();
                 if(missionLog) {
                     auto row=mission.json();row["frame"]=frame;row["no_control"]=previewOnly;row["speed_command"]=speed;row["pwm"]=servo;
@@ -448,6 +621,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["fork_completed_direction"]=traffic.completedDirection;row["fork_command_distance_m"]=traffic.forkCommandDistance;
                     row["fork_tracking_seconds"]=traffic.forkTrackingTime;row["fork_sign_clear_seconds"]=traffic.forkSignClearTime;
                     row["fork_pulse_phase"]=traffic.forkPulsePhase;row["geometry_split_rows"]=traffic.geometrySplitRows;
+                    row["geometry_choice_rows"]=traffic.geometryChoiceRows;row["single_road_ahead"]=traffic.singleRoadAhead;
+                    row["fork_lost_command_m"]=traffic.forkLostDistance;row["fork_lost_moving_s"]=traffic.forkLostMovingTime;
                     row["lane_alignment_valid"]=pilot.alignment.valid;row["lane_alignment_offset_px"]=pilot.alignment.offset;
                     row["lane_alignment_heading_px"]=pilot.alignment.heading;row["lane_alignment_pwm"]=pilot.alignment.servo;
                     row["parking_rejoin_aligning"]=rejoinAligning;
@@ -455,10 +630,16 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     row["parking_bay_scan_performed"]=mouthsScanned;
                     row["parking_bay_candidates"]=liveMouths.size();
                     row["parking_search_feedback"]=teachingFeedback;
+                    row["parking_mouth_confirmation_frames"]=mouthConfirmation.count();
                     row["cruise_setting"]=cruise;row["task_cruise_limit"]=taskCruise;
                     row["curve_setting"]=speedSettings.curve;row["degraded_setting"]=speedSettings.degraded;
                     row["fork_setting"]=speedSettings.fork;row["traffic_speed_cap"]=traffic.speedCap;
                     row["gate_waiting"]=traffic.gateWaiting;row["gate_opened"]=traffic.gateOpened;
+                    if(traffic.gateClearRegion.area()>0){
+                        const auto &r=traffic.gateClearRegion;
+                        row["gate_clear_region"]={r.x,r.y,r.width,r.height};
+                        row["gate_road_fraction"]=traffic.gateRoadFraction;row["gate_yellow_fraction"]=traffic.gateYellowFraction;
+                    }
                     row["gate_stop_row"]=raceConfig.gateStopRow;row["gate_approach_speed"]=raceConfig.gateApproachSpeed;
                     row["decision_reason"]=command.reason;row["arrow_allowed"]=groundArrow.allowed;row["arrow_box"]={groundArrow.box.x,groundArrow.box.y,groundArrow.box.width,groundArrow.box.height};
                     row["bypass"]=raceObstacleJson(virtualPlan,navConfig);missionLog<<row.dump()<<'\n';
@@ -476,6 +657,8 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"fork_completed_direction",traffic.completedDirection},{"fork_command_distance_m",traffic.forkCommandDistance},
                     {"fork_tracking_seconds",traffic.forkTrackingTime},{"fork_sign_clear_seconds",traffic.forkSignClearTime},
                     {"fork_pulse_phase",traffic.forkPulsePhase},{"geometry_split_rows",traffic.geometrySplitRows},
+                    {"geometry_choice_rows",traffic.geometryChoiceRows},{"single_road_ahead",traffic.singleRoadAhead},
+                    {"fork_lost_command_m",traffic.forkLostDistance},{"fork_lost_moving_s",traffic.forkLostMovingTime},
                     {"lane_alignment_valid",pilot.alignment.valid},{"lane_alignment_offset_px",pilot.alignment.offset},
                     {"lane_alignment_heading_px",pilot.alignment.heading},{"lane_alignment_pwm",pilot.alignment.servo},
                     {"parking_rejoin_aligning",rejoinAligning},
@@ -487,14 +670,21 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"inside_observed_envelope",space.freeObserved(observation.pose)},
                     {"inside_mouth_transition",space.freeEntryMouth(observation.pose)},
                     {"base_curvature",command.baseCurvature},{"requested_curvature",command.requestedCurvature},
-                    {"physical_curvature",bayFrame.handedness()*command.curvature},{"pose_frame","canonical_left_bay"},
+                    {"physical_curvature",std::tan((float(PWMSERVOMID)-servo)/400*dims.fullLockDegrees*float(CV_PI)/180)/dims.wheelbase},
+                    {"requested_physical_curvature",bayFrame.handedness()*command.curvature},
+                    {"physical_curvature_source","applied_pwm_experimental_mapping"},{"pose_frame","canonical_left_bay"},
                     {"pose",{observation.pose.x,observation.pose.z,observation.pose.yaw}},{"motion_valid",measured.valid},
                     {"pose_estimated",observation.estimated},
+                    {"estimate_budget_exhausted",poseFallback.budgetExhausted()},{"estimate_age_s",poseFallback.estimateAge()},
+                    {"estimate_applied_travel_m",poseFallback.estimateTravel()},
                     {"motion_estimated_origin",measured.estimatedOrigin},
                     {"terminal_recovery",controller.terminalRecoveryUsed()},
+                    {"final_inset_used",controller.usedFinalInset()},
                     {"exit_distance_recovery",controller.exitRecoveryUsed()},
                     {"reverse_command_distance_m",controller.reverseDistanceEstimate()},{"reverse_distance_budget_m",controller.reverseBudget()},
-                    {"pose_source",measured.valid&&measured.estimatedOrigin?"VISUAL_RELATIVE_ESTIMATED_ORIGIN":observation.estimated?"APPLIED_COMMAND_ESTIMATE":"VISUAL_ODOMETRY"},
+                    {"forward_alignment_command_m",controller.forwardAlignCommandM()},{"forward_alignment_active_s",controller.forwardAlignMovingSeconds()},
+                    {"forward_alignment_limit_m",RaceParkingControl::forwardAlignDistanceLimit},{"forward_alignment_time_limit_s",RaceParkingControl::forwardAlignTimeLimit},
+                    {"pose_source",!observation.valid?"UNAVAILABLE":measured.valid&&measured.estimatedOrigin?"VISUAL_RELATIVE_ESTIMATED_ORIGIN":observation.estimated?"APPLIED_COMMAND_ESTIMATE":"VISUAL_ODOMETRY"},
                     {"visual_pose",{visualObservation.pose.x,visualObservation.pose.z,visualObservation.pose.yaw}},
                     {"motion_epoch",measured.epoch},{"motion_reason",measured.reason},{"motion_inliers",measured.inliers},
                     {"motion_residual_m",measured.residual},{"motion_residual_limit_m",.008},{"motion_fit_scale",measured.fitScale},
@@ -507,34 +697,90 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                     {"rear_boundary_m",taught?nlohmann::json(space.rearLimit()):nlohmann::json(nullptr)},
                     {"observed_rear_tolerance_m",RaceParkingSpace::observedRearTolerance},{"traffic_state",traffic.state},
                     {"traffic_reason",traffic.reason},{"ai_sequence",ai.sequence},{"ai_age_s",now-ai.captured}};
+                row["motion_misses"]=measured.misses;
+                row["pose_coast_confirmed"]=armed&&controller.acceptedCoastObservation();
+                row["pose_continuity_reason"]=controller.poseContinuityReason();
+                row["absolute_visual_probe"]=measured.absoluteProbe;
+                row["absolute_visual_matches"]=measured.absoluteMatches;
+                row["absolute_visual_recovered"]=measured.absoluteRecovered;
+                if(measured.absoluteProbe)row["absolute_reference_index"]=measured.absoluteReference;
+                const bool pushTriggered=pushWindow.update(frame,missionEnabled&&previewOnly&&taught&&!armed,
+                    savedSample,measured.valid&&!measured.estimatedOrigin,measured.misses);
+                if(pushWindow.startFrame==frame)std::cout<<"[Parking evidence] Hand-push visual start marked at frame "<<frame<<'\n';
+                if(pushTriggered){
+                    row["push_motion_loss_trigger"]=true;
+                    std::cout<<"[Parking evidence] First sustained tracking loss at frame "<<frame<<'\n';
+                }
                 row["lane_ready"]=pilot.ready;row["lane_path_issue"]=pilot.pathIssue;
                 row["lane_speed_reason"]=pilot.speedReason;row["lane_quality"]=pilot.confidence;
+                const bool competitionExit=missionEnabled&&!labMission&&!previewOnly&&missionAutomatic&&
+                    std::string_view(mission.name())=="PARKING_EXIT_LEFT";
+                const bool exitAuthorized=competitionExit&&mission.exitTurnAuthorized();
+                const bool exitSearchHeld=competitionExit&&mission.exitSearchTravelExhausted();
+                if(competitionExit){
+                    row["arrow_allowed"]=groundArrow.allowed;
+                    row["arrow_box"]={groundArrow.box.x,groundArrow.box.y,groundArrow.box.width,groundArrow.box.height};
+                    row["parking_exit_turn_authorized"]=exitAuthorized;
+                    row["exit_search_travel_exhausted"]=exitSearchHeld;
+                }
                 row["ai_detections"]=nlohmann::json::array();
                 for(const auto &d:ai.detections){const auto reviewed=reviewRaceDetection(d,ai.image,raceConfig,&ai.crosswalk);
                     row["ai_detections"].push_back({{"type",d.type},{"score",d.score},{"box",{d.x,d.y,d.width,d.height}},
                         {"accepted",reviewed.accepted},{"review",reviewed.reason}});}
                 telemetry<<row.dump()<<'\n';
                 if(!telemetry)throw std::runtime_error("Parking telemetry disk write failed");
+                if(mouthsScanned) {
+                    nlohmann::json candidates=nlohmann::json::array();
+                    for(const auto &m:liveMouths)candidates.push_back({{"side",m.side},{"near",{m.nearGround.x,m.nearGround.y}},
+                        {"far",{m.farGround.x,m.farGround.y}},{"support",m.support}});
+                    searchLog<<nlohmann::json({{"frame",frame},{"event","LIVE_BAY_SCAN"},{"candidates",candidates},
+                        {"confirmation_frames",mouthConfirmation.count()},{"feedback",teachingFeedback}}).dump()<<'\n';
+                }
                 recent.push_back({image.clone(),row});if(recent.size()>12)recent.pop_front();
-                const bool firstStop=previousCommandSpeed!=0&&speed==0&&
-                    (std::string(command.state)=="PARK_HOLD"||controller.failed());
-                if(firstStop&&evidenceCount<3&&(!evidenceWriter.valid()||
-                   evidenceWriter.wait_for(std::chrono::seconds(0))==std::future_status::ready)) {
-                    if(evidenceWriter.valid())evidenceWriter.get();
-                    auto frames=recent;const auto destination=directory/("parking-stop-evidence-"+std::to_string(++evidenceCount));
-                    // Encode only in a bounded background task, after the zero-speed
-                    // command. Evidence I/O must not create a new visual-frame gap.
-                    evidenceWriter=std::async(std::launch::async,[frames=std::move(frames),destination]{
-                        try {
-                            std::filesystem::create_directories(destination);nlohmann::json saved=nlohmann::json::array();
-                            for(const auto &item:frames) {
-                                const auto name="frame-"+std::to_string(item.metadata.at("frame").template get<uint64_t>())+".png";
-                                if(!cv::imwrite((destination/name).string(),item.image))throw std::runtime_error("PNG evidence write failed");
-                                auto metadata=item.metadata;metadata["image"]=name;saved.push_back(std::move(metadata));
-                            }
-                            std::ofstream(destination/"frames.json")<<saved.dump(2);
-                        }catch(const std::exception &e){std::cerr<<"[Parking evidence] "<<e.what()<<'\n';}
-                    });
+                if(!previewOnly&&armed&&previousCommandSpeed<0&&(!measured.valid||measured.estimatedOrigin)&&!reverseLoss.trigger)
+                    captureRoadWindow(reverseLoss,"FIRST_REVERSE_ABSOLUTE_VISUAL_LOSS",frame,0);
+                else if(!reverseLoss.frames.empty()&&frame<=reverseLoss.trigger+6)reverseLoss.frames.push_back(recent.back());
+                if(!reverseLoss.frames.empty()&&frame>=reverseLoss.trigger+6&&speed==0&&writerReady())writeRoadWindow(reverseLoss);
+                // Freeze the pre-trigger window immediately. A busy encoder must
+                // not replace the first lost frames with later samples.
+                if(pushTriggered)pushFrames=recent;
+                else if(!pushFrames.empty()&&frame<=pushWindow.triggerFrame+pushWindow.postFrames)
+                    pushFrames.push_back(recent.back());
+                if(!pushFrames.empty()&&frame>=pushWindow.triggerFrame+pushWindow.postFrames&&writerReady())savePushWindow();
+                const bool firstStop=(parkingSearchStarted||previousCommandSpeed!=0)&&speed==0&&
+                    (std::string_view(command.state)=="PARK_HOLD"||std::string_view(command.state)=="PARK_BRAKE"||controller.failed()||
+                     (missionEnabled&&(mission.parkingSearch()||mission.baySearchTravelExhausted())));
+                const bool afterStop=postStopEvidenceAt>=0&&before>=postStopEvidenceAt;
+                // A fork PNG batch must never discard the parking-stop trigger.
+                // Retain its original images even if the encoder is still busy.
+                if((firstStop||afterStop)&&evidenceCount<3&&pendingStop.empty()) {
+                    postStopEvidenceAt=firstStop?before+.5:-1;
+                    pendingStop=recent;
+                }
+                if(!pendingStop.empty()&&writerReady()) {
+                    writeEvidence(std::move(pendingStop),directory/("parking-stop-evidence-"+std::to_string(++evidenceCount)),nullptr);
+                    pendingStop.clear();
+                }
+                const bool ordinaryFork=missionEnabled&&!labMission&&!previewOnly&&missionAutomatic&&
+                    std::string_view(mission.name())=="LAP1_FLOW_THEN_SIGNED_FORK";
+                if(ordinaryFork) {
+                    const std::string_view state=traffic.state;
+                    if(state=="FORK_SEEK_RIGHT"||state=="FORK_RIGHT")observedForkDirection=1;
+                    if(state=="FORK_SEEK_LEFT"||state=="FORK_LEFT")observedForkDirection=-1;
+                    const bool waiting=state=="SIGNED_FORK_WAIT_TARGET_ROAD"||
+                        std::string_view(traffic.reason)=="SIGNED_FORK_WAIT_TARGET_ROAD";
+                    const bool selected=traffic.selectedBranch&&(state=="FORK_LEFT"||state=="FORK_RIGHT");
+                    if(waiting)captureRoadWindow(forkWait,"SIGNED_FORK_WAIT_TARGET_ROAD",frame,observedForkDirection);
+                    else if(selected)captureRoadWindow(forkSelected,"SIGNED_FORK_SELECTED_ROAD",frame,observedForkDirection);
+                }
+                if(competitionExit){
+                    if(before-captured<=.18&&groundArrow.allowed==RoadLeft&&groundArrow.box.br().y>=180)
+                        captureRoadWindow(exitArrow,"FIRST_NEAR_LEFT_ONLY_EXIT_ARROW",frame,-1);
+                    if(exitAuthorized)captureRoadWindow(exitDecision,"PARKING_EXIT_LEFT_TURN_AUTHORIZED",frame,-1);
+                    else if(exitSearchHeld)captureRoadWindow(exitDecision,"PARKING_EXIT_SEARCH_TRAVEL_EXHAUSTED",frame,0);
+                }
+                if((ordinaryFork||competitionExit)&&pushFrames.empty()&&pendingStop.empty()&&postStopEvidenceAt<0&&writerReady()) {
+                    for(auto *window:roadWindows)if(!window->frames.empty()){writeRoadWindow(*window);break;}
                 }
                 if(previousState!=command.state) {
                     saveTest();std::cout<<"[Parking test] "<<test.progress()<<'\n';
@@ -593,7 +839,7 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 }
                 cv::copyMakeBorder(shown,shown,0,136,0,0,cv::BORDER_CONSTANT,{0,0,0});
                 cv::putText(shown,std::string(command.state)+" "+command.reason,{5,500},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
-                cv::putText(shown,missionEnabled?std::string(mission.name())+(previewOnly?" NO MOTOR":""):frozen&&!teachingDetails.empty()?teachingDetails:test.progress(),{5,522},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
+                cv::putText(shown,missionEnabled?std::string(mission.finalReturn()?mission.statusReason():mission.name())+(previewOnly?" NO MOTOR":""):frozen&&!teachingDetails.empty()?teachingDetails:test.progress(),{5,522},cv::FONT_HERSHEY_PLAIN,1,{0,255,255});
                 std::ostringstream settings;settings<<std::fixed<<std::setprecision(2)
                     <<"SET "<<cruise<<" CURVE "<<speedSettings.curve<<" QUALITY "<<speedSettings.degraded
                     <<" FORK "<<speedSettings.fork<<" CMD "<<speed;
@@ -635,6 +881,10 @@ int raceDriveParking(cv::VideoCapture &video,Preprocess &predeal,const RaceGroun
                 }
             }
             car->pauseMotion();
+            if(!pushFrames.empty())savePushWindow(); // Preserve a short tail when the operator exits early.
+            if(!pendingStop.empty())writeEvidence(std::move(pendingStop),directory/("parking-stop-evidence-"+std::to_string(++evidenceCount)),nullptr);
+            for(auto *window:roadWindows)if(!window->frames.empty())writeRoadWindow(*window);
+            if(!reverseLoss.frames.empty())writeRoadWindow(reverseLoss);
             test.finish("OPERATOR_EXIT");saveTest();
         }catch(const std::exception &e) {
             try{car->latchStop();}catch(...){}display.failed=true;

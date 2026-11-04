@@ -12,6 +12,8 @@ struct RaceConfig {
     int confirmFrames=3;
     float limitedSpeed=0.40f, forkSpeed=0.15f, approachSpeed=0.12f;
     float parkingSpeed=0.30f;
+    static constexpr float defaultExitSearchLimitM=1.50f;
+    float parkingExitSearchLimitM=defaultExitSearchLimitM;
     float directionMemory=4.f, forkConfirmTime=0.12f, forkMinTime=0.40f;
     float forkMaxTime=4.f, forkExitTime=0.35f, cooldown=2.f;
     int minBranchWidth=60, minBranchGap=24, minBranchRows=3;
@@ -23,7 +25,7 @@ struct RaceConfig {
     float crossClearTime=0.25f, stopHoldTime=1.f;
     // 抬杆或持续可见的空通道可放行；仅一次漏检不能放行。
     float gateOpenAspect=0.75f;
-    int gateStopRow=410; // Experimental image row; tune at the physical sensor, not metres.
+    int gateStopRow=245; // Horizontal bar box bottom in a 640x480 image; earlier stop for manual lifting.
     float gateApproachSpeed=.12f;
     float gateHoldTime=1.f;
     bool verifyForkArrows=true; // 对左右岔路类别增加蓝底白箭头几何复核。
@@ -33,7 +35,7 @@ struct RaceConfig {
     bool verifyCrosswalkGeometry=true;
     float crossCandidateConfidence=.10f; // 仅斑马线：低分结果须同帧条纹复核；远处可单独提供几何证据。
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(RaceConfig,imageWidth,imageHeight,confidence,maxDetectionAge,confirmGap,
-        confirmFrames,limitedSpeed,forkSpeed,approachSpeed,parkingSpeed,directionMemory,
+        confirmFrames,limitedSpeed,forkSpeed,approachSpeed,parkingSpeed,parkingExitSearchLimitM,directionMemory,
         forkConfirmTime,forkMinTime,forkMaxTime,forkExitTime,cooldown,minBranchWidth,
         minBranchGap,minBranchRows,triggerRow,obstacleRow,clearTime,stopAfterCross,
         crossPassedRow,crossClearTime,stopHoldTime,gateOpenAspect,gateStopRow,gateApproachSpeed,gateHoldTime,verifyForkArrows,modelDirectory,
@@ -43,7 +45,7 @@ struct RaceConfig {
         if(imageWidth!=640||imageHeight!=480||!range(confidence,0.1f,1.f)||!range(maxDetectionAge,0.05f,1.f)||
            !range(confirmGap,0.05f,1.f)||confirmFrames<2||confirmFrames>10||
            !range(limitedSpeed,0.05f,0.49f)||!range(forkSpeed,0.05f,10.f)||
-           !range(approachSpeed,0.05f,10.f)||!range(parkingSpeed,0.05f,10.f)||!range(directionMemory,0.5f,15.f)||
+           !range(approachSpeed,0.05f,10.f)||!range(parkingSpeed,0.05f,10.f)||!range(parkingExitSearchLimitM,.25f,10.f)||!range(directionMemory,0.5f,15.f)||
            !range(forkConfirmTime,0.05f,1.f)||!range(forkMinTime,0.1f,3.f)||
            !range(forkMaxTime,forkMinTime,60.f)||!range(forkExitTime,0.1f,2.f)||
            !range(cooldown,0.1f,10.f)||minBranchWidth<40||minBranchWidth>200||
@@ -51,7 +53,7 @@ struct RaceConfig {
            triggerRow<100||triggerRow>440||obstacleRow<100||obstacleRow>460||
            !range(clearTime,0.2f,3.f)||crossPassedRow<300||crossPassedRow>470||
            !range(crossClearTime,0.1f,2.f)||!range(stopHoldTime,0.1f,10.f)||
-           !range(gateOpenAspect,0.1f,1.f)||gateStopRow<triggerRow||gateStopRow>460||!range(gateApproachSpeed,.05f,.30f)||!range(gateHoldTime,1.f,5.f)||modelDirectory.empty()||
+           !range(gateOpenAspect,0.1f,1.f)||gateStopRow<150||gateStopRow>460||!range(gateApproachSpeed,.05f,.30f)||!range(gateHoldTime,1.f,5.f)||modelDirectory.empty()||
            !range(stopCandidateConfidence,.30f,.50f)||!range(crossCandidateConfidence,.05f,.35f))
             throw std::invalid_argument("Invalid race configuration");
     }

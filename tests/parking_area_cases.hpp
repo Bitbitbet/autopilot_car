@@ -51,7 +51,9 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         ++s.sequence;s.captured+=.07;require(tracker.update(s,true,false).valid,"Textured parking reference cannot initialize");
         s.image=cv::Mat(480,640,CV_8UC3,cv::Scalar(60,60,60));
         for(int i=0;i<4;++i){++s.sequence;s.captured+=.2;require(!tracker.update(s,true,false).valid,"Blank frame invents visual motion");}
-        s.image=texture;++s.sequence;s.captured+=.07;
+        // A new visible patch has no match to the original absolute anchor.
+        // The estimate-seeded local tracker must keep its origin labelled.
+        s.image=texture.clone();random.fill(s.image,cv::RNG::UNIFORM,0,255);++s.sequence;s.captured+=.07;
         require(!tracker.update(s,true,false).valid,"Old reference unexpectedly bridged a long gap");
         const RaceGroundPose seed{.12f,.27f,.18f};
         require(tracker.reanchorParkingEstimate(s,seed),"Parking estimated reference cannot recover frozen tracking");
@@ -73,12 +75,12 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         tick(0);p=tick(154);
         require(!p.stop&&!p.gateWaiting&&p.speedCap<=.12f,"First far horizontal gate fails to slow before sensor approach");
         p=tick(0);require(!p.stop&&p.speedCap<=.12f,"Brief distant gate miss drops slowdown");
-        for(int i=0;i<4;++i)p=tick(330);
+        for(int i=0;i<4;++i)p=tick(config.gateStopRow-40);
         require(!p.stop&&p.gateWaiting&&p.alignRoad&&p.speedCap<=.12f&&std::string(p.state)=="GATE_APPROACH","Distant gate must approach sensor slowly");
         p=tick(0);require(p.stop&&!p.gateOpened,"Lost bar permits blind sensor approach");
-        p=tick(380);require(!p.stop,"Fresh bar cannot resume sensor approach");
+        p=tick(config.gateStopRow-10);require(!p.stop,"Fresh bar cannot resume sensor approach");
         p=tick(config.gateStopRow);require(p.stop&&p.gateWaiting,"Sensor row must stop for closed bar");
-        p=tick(380);require(p.stop,"Box jitter restarts stopped gate approach");
+        p=tick(config.gateStopRow-10);require(p.stop,"Box jitter restarts stopped gate approach");
         std::cout<<"PASS sensor gate approach; late stop; missing bar hold; no jitter creep\n";
     }
 
@@ -230,33 +232,85 @@ static void parkingAreaChecks(RaceConfig config,const RaceGroundCalibration &ref
         previousSpeed=command.speed;reversing=std::string(command.state)=="PARK_EXIT";
     }
     require(reversing,"Budget case never reaches reverse");
-    bool correcting=false,sawUnalignedCorrection=false;double alignedSince=-1;
-    for(int i=0;i<1600&&!biased.done();++i) {
+    // Simulate a biased reverse that reaches the aisle but retains a heading
+    // error. Spread the measured motion across the whole reverse so no pose
+    // discontinuity or artificial jump is needed to set up the correction.
+    const auto reverseStart=observation.pose;
+    const RaceParkingPose nearAisle{-.05f,.2f,.35f};
+    for(int i=0;i<1200&&!biased.exitRecoveryUsed();++i) {
         if(i==30) {
             const float before=biased.reverseDistanceEstimate();
-            for(int wait=0;wait<50;++wait){clock+=.04;observation.captured=clock;++observation.sequence;
+            for(int wait=0;wait<50;++wait) {
+                clock+=.04;observation.captured=clock;++observation.sequence;
                 const auto held=biased.update(observation,clock,.04,false,.3,0);
-                require(held.speed==0&&!biased.failed(),"Gate pause during reverse changes the task to a fault");}
-            require(std::abs(biased.reverseDistanceEstimate()-before)<1e-6,"Zero-speed gate wait consumes the reverse distance budget");
+                require(held.speed==0&&!biased.failed(),"Gate wait during reverse aborts parking");
+            }
+            require(biased.reverseDistanceEstimate()==before,"Stopped gate wait consumes reverse budget");
             previousSpeed=0;
         }
+        const float distance=biased.reverseDistanceEstimate()+std::max(0.f,-previousSpeed)*.04f;
+        const float t=std::min(1.f,distance/biased.reverseBudget());
+        observation.pose={reverseStart.x+(nearAisle.x-reverseStart.x)*t,
+                          reverseStart.z+(nearAisle.z-reverseStart.z)*t,
+                          reverseStart.yaw+raceParkingAngle(nearAisle.yaw-reverseStart.yaw)*t};
         clock+=.04;observation.captured=clock;++observation.sequence;
-        if(raceParkingReadyToRejoin(space,observation.pose)){if(alignedSince<0)alignedSince=clock;}
-        else alignedSince=-1;
         command=biased.update(observation,clock,.04,true,.3,previousSpeed);
-        require(!biased.failed(),"Biased reverse becomes a terminal race fault instead of forward rejoin");
-        if(std::string(command.state)=="PARK_EXIT_ALIGN"){
-            correcting=true;sawUnalignedCorrection|=std::abs(observation.pose.yaw)>.20f;
-            require(!biased.done()&&command.speed>0,"Budget ends parking before alignment correction");
-        }
-        if(correcting)observation.pose=raceParkingAdvance(observation.pose,command.speed*.04,command.curvature,dims);
-        else observation.pose.z-=std::abs(command.speed)*.04;
+        require(!biased.failed()&&!biased.done(),"Biased reverse hands off before alignment");
         previousSpeed=command.speed;
     }
-    require(biased.done()&&biased.exitRecoveryUsed()&&command.speed==0&&sawUnalignedCorrection&&
-        std::string(command.reason)=="CORRECTED_AISLE_ALIGNMENT_FORWARD_REJOIN","Reverse-budget correction failed to rejoin");
-    require(alignedSince>0&&clock-alignedSince>=.19&&raceParkingReadyToRejoin(space,observation.pose),
-        "Reverse budget bypasses continuous alignment confirmation");
-    require(biased.reverseDistanceEstimate()<=biased.reverseBudget()+.03f,"Reverse distance budget is substantially exceeded");
-    std::cout<<"PASS strict aisle alignment; 28 degree rejection; bounded reverse with forward correction; continuous aligned handoff\n";
+    require(biased.exitRecoveryUsed()&&std::string(command.state)=="PARK_EXIT_ALIGN"&&command.speed>0,
+        "Reverse budget does not begin bounded forward alignment");
+    require(biased.reverseDistanceEstimate()<=biased.reverseBudget()+.03f,"Reverse budget substantially exceeded");
+    {
+        auto recovery=biased;auto o=observation;auto c=command;double alignedSince=-1;
+        for(int i=0;i<180&&!recovery.done();++i) {
+            o.pose=raceParkingAdvance(o.pose,c.speed*.04f,c.curvature,dims);
+            o.captured+=.04;++o.sequence;
+            if(raceParkingReadyToRejoin(space,o.pose)){if(alignedSince<0)alignedSince=o.captured;}
+            else alignedSince=-1;
+            c=recovery.update(o,o.captured,.04f,true,.3f,c.speed,c.curvature);
+            require(!recovery.failed(),"Reachable near-aisle correction cannot rejoin");
+        }
+        require(recovery.done()&&c.speed==0&&std::string(c.reason)=="CORRECTED_AISLE_ALIGNMENT_FORWARD_REJOIN"&&
+                alignedSince>0&&o.captured-alignedSince>=.19&&raceParkingReadyToRejoin(space,o.pose),
+                "Near-aisle correction bypasses continuous measured alignment");
+    }
+    // Keep the measured heading unaligned while translation continues. At
+    // .12 m/s the travel cap wins; at .04 m/s the moving-time cap wins.
+    for(float cap:{.12f,.04f}) {
+        auto recovery=biased;auto o=observation;auto c=command;
+        float applied=std::min(cap,c.speed);
+        for(int i=0;i<210&&!recovery.failed();++i) {
+            if(i==25) {
+                const float beforeM=recovery.forwardAlignCommandM(),beforeS=recovery.forwardAlignMovingSeconds();
+                require(beforeM>0&&beforeS>0,"No active correction budget to test before pause");
+                for(int wait=0;wait<175;++wait) {
+                    o.captured+=.04;++o.sequence;
+                    c=recovery.update(o,o.captured,.04f,false,cap,0);
+                    require(c.speed==0&&!recovery.failed(),"Traffic pause consumes forward correction time");
+                }
+                o.estimated=true;o.captured+=.04;++o.sequence;
+                c=recovery.update(o,o.captured,.04f,true,cap,0);
+                require(c.speed==0&&std::string(c.reason)=="WAIT_ABSOLUTE_VISUAL_CONFIRMATION",
+                        "Forward alignment continues on relative-only position");
+                require(recovery.forwardAlignCommandM()==beforeM&&recovery.forwardAlignMovingSeconds()==beforeS,
+                        "Zero-speed hold resets or consumes forward correction budget");
+                o.estimated=false;applied=0;
+            }
+            o.pose.z+=applied*.04f;o.captured+=.04;++o.sequence;
+            c=recovery.update(o,o.captured,.04f,true,cap,applied);
+            require(!recovery.done(),"Unaligned correction is accepted as completion");
+            applied=c.speed;
+        }
+        require(recovery.failed()&&c.speed==0&&std::string(c.reason)=="PARK_EXIT_ALIGNMENT_LIMIT",
+                "Unaligned forward correction did not fault at its limit");
+        const float usedM=recovery.forwardAlignCommandM(),usedS=recovery.forwardAlignMovingSeconds();
+        if(cap>.1f)require(usedM>=RaceParkingControl::forwardAlignDistanceLimit-.0001f&&
+            usedM<=RaceParkingControl::forwardAlignDistanceLimit+.005f&&usedS<RaceParkingControl::forwardAlignTimeLimit,
+            "Fast alignment did not stop on applied travel");
+        else require(usedS>=RaceParkingControl::forwardAlignTimeLimit-.0001f&&
+            usedS<=RaceParkingControl::forwardAlignTimeLimit+.041f&&usedM<RaceParkingControl::forwardAlignDistanceLimit,
+            "Slow alignment did not stop on moving time");
+    }
+    std::cout<<"PASS strict aisle alignment; 28 degree rejection; bounded reverse; near-aisle recovery; forward travel/time limits; continuous aligned handoff\n";
 }

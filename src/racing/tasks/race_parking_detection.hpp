@@ -7,6 +7,66 @@ struct RaceParkingMouthCandidate {
     cv::Point2f nearImage,farImage,nearGround,farGround;
     float support=0;
     int side=-1;
+    bool withinStoppedBay(const RaceParkingMouthCandidate &first)const {
+        return side==first.side&&cv::norm(nearGround-first.nearGround)<=.12f&&cv::norm(farGround-first.farGround)<=.12f;
+    }
+    // Move ground coordinates into the next camera frame for association only.
+    // Planning always projects corners from a current image.
+    void advance(float distance,float yaw) {
+        const cv::Point2f translation{-std::sin(yaw*.5f)*distance,std::cos(yaw*.5f)*distance};
+        auto transform=[&](cv::Point2f q){q-=translation;return cv::Point2f{
+            std::cos(yaw)*q.x+std::sin(yaw)*q.y,-std::sin(yaw)*q.x+std::cos(yaw)*q.y};};
+        nearGround=transform(nearGround);farGround=transform(farGround);
+    }
+};
+// Confirm the same bay across candidate reordering and a short paint dropout.
+// Planning always uses a candidate in the current image, never cached clicks.
+class RaceParkingMouthConfirmation {
+    RaceParkingMouthCandidate previous;
+    double lastSeen=-1,stillSince=-1;
+    float travel=0;
+    cv::Point2f stillNear,stillFar;
+    uint64_t lastFrame=0;
+    int hits=0;
+public:
+    void reset(){lastSeen=stillSince=-1;lastFrame=0;hits=0;travel=0;}
+    int count()const{return hits;}
+    bool tracking(double now)const{return hits&&now>=lastSeen&&now-lastSeen<=.35;}
+    void advance(float distance,float yaw) {
+        if(!hits||!std::isfinite(distance)||!std::isfinite(yaw))return;
+        previous.advance(distance,yaw);travel+=std::abs(distance);
+    }
+    bool settledAfter(double stoppedAt)const{
+        return hits>=3&&stillSince>=0&&lastSeen-std::max(stillSince,stoppedAt)>=.12;
+    }
+    bool update(std::vector<RaceParkingMouthCandidate> &mouths,double now,uint64_t frame,float appliedSpeed) {
+        if(!std::isfinite(now)||frame<=lastFrame)return false;
+        lastFrame=frame;
+        const double gap=now-lastSeen;
+        if(gap<0||gap>.35){hits=0;lastSeen=stillSince=-1;travel=0;}
+        if(mouths.empty()){stillSince=-1;return false;}
+        auto selected=mouths.begin();bool same=false;
+        if(hits) {
+            // The last applied speed may already be zero at the search bound.
+            // Predict both corners with all intervals since their last sighting.
+            const float tolerance=.025f+std::min(.020f,.5f*travel);
+            float best=2*tolerance;
+            for(auto it=mouths.begin();it!=mouths.end();++it) {
+                const float near=cv::norm(it->nearGround-previous.nearGround),far=cv::norm(it->farGround-previous.farGround);
+                if(it->side==previous.side&&near<=tolerance&&far<=tolerance&&near+far<best){selected=it;best=near+far;same=true;}
+            }
+        }
+        if(travel>0||appliedSpeed!=0)stillSince=-1;
+        else if(stillSince<0||!same||gap>.25||
+                cv::norm(selected->nearGround-stillNear)>.012f||
+                cv::norm(selected->farGround-stillFar)>.012f) {
+            stillSince=now;stillNear=selected->nearGround;stillFar=selected->farGround;
+        }
+        travel=0;
+        hits=same?std::min(3,hits+1):1;previous=*selected;lastSeen=now;
+        std::rotate(mouths.begin(),selected,selected+1);
+        return hits>=3;
+    }
 };
 // Rejected bays remain rejected in the current camera ground frame. Applied
 // command integration only prevents retry loops; it is not measured odometry.
@@ -17,10 +77,7 @@ public:
     bool hasRejected()const{return !rejected.empty();}
     void advance(float distance,float yaw) {
         if(!std::isfinite(distance)||!std::isfinite(yaw))return;
-        const cv::Point2f translation{-std::sin(yaw*.5f)*distance,std::cos(yaw*.5f)*distance};
-        auto transform=[&](cv::Point2f q){q-=translation;return cv::Point2f{
-            std::cos(yaw)*q.x+std::sin(yaw)*q.y,-std::sin(yaw)*q.x+std::cos(yaw)*q.y};};
-        for(auto &m:rejected){m.nearGround=transform(m.nearGround);m.farGround=transform(m.farGround);}
+        for(auto &m:rejected)m.advance(distance,yaw);
         rejected.erase(std::remove_if(rejected.begin(),rejected.end(),[](const auto &m){return m.farGround.y<-.1f;}),rejected.end());
     }
     bool accepts(const RaceParkingMouthCandidate &m)const {
@@ -57,7 +114,7 @@ inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouthsSide(const 
             if(bird.at<uchar>(row+dy,col+dx))return 1;
         return 0;
     };
-    struct Junction {cv::Point2f point;float score;};std::vector<Junction> junctions;
+    struct Junction {cv::Point2f point;float score;bool farOnly=false;};std::vector<Junction> junctions;
     const float slope=dims.stagger()/dims.depth;
     for(float z=.015f;z<maxZ-.04f;z+=resolution)for(float x=-.48f;x<=-.055f;x+=resolution) {
         if(sample(x,z,0)!=1)continue;
@@ -76,22 +133,49 @@ inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouthsSide(const 
         float low=z,high=z;
         for(int i=1;i<55&&sample(x,z-i*resolution,0)==1;++i)low=z-i*resolution;
         for(int i=1;i<55&&sample(x,z+i*resolution,0)==1;++i)high=z+i*resolution;
-        if(high-low<.07f||high-low>.24f)continue;
+        if(high-low<.07f)continue;
         // Penalize paint below the outgoing diagonal; broad white areas and digits
         // must not become bay mouths just because they contain a vertical stroke.
         int off=0,offN=0;
         for(float dx:{-.04f,-.07f,-.10f}) {int v=sample(x+dx,z+dx*slope,0);if(v>=0){off+=1-v;++offN;}}
         if(offN<1||float(off)/offN<.66f)continue;
-        const float centered=std::max(0.f,1-std::abs(z-(low+high)/2)/.04f);
-        junctions.push_back({{x,z},stemRatio+armRatio+darkRatio+float(off)/offN+.5f*centered});
+        const float support=stemRatio+armRatio+darkRatio+float(off)/offN;
+        if(high-low<=.24f) {
+            const float centered=std::max(0.f,1-std::abs(z-(low+high)/2)/.04f);
+            junctions.push_back({{x,z},support+.5f*centered});
+        } else {
+            // At the last bay the far divider can join the white surround.
+            // Locate its near-facing diagonal EDGE across three separate
+            // columns. A broad white patch or a long stem alone is insufficient.
+            std::array<float,3> intercepts{};int count=0;
+            for(float dx:{-.04f,-.07f,-.10f}) {
+                for(int k=-5;k<=4;++k) {
+                    const float edge=z-dx*slope+k*resolution;
+                    if(sample(x+dx,edge-resolution,0)==0&&sample(x+dx,edge,0)==1&&
+                       sample(x+dx,edge+.015f,0)==1) {
+                        intercepts[count++]=edge+dx*slope;break;
+                    }
+                }
+            }
+            if(count!=3)continue;
+            std::sort(intercepts.begin(),intercepts.end());
+            if(intercepts.back()-intercepts.front()>.0201f)continue;
+            const float center=intercepts[1]+.0125f;
+            // Require the visible tip projecting towards the bay opening.
+            if(center-low<.040f||center-low>.15f||high-center<.12f)continue;
+            junctions.push_back({{x,center},support+.5f-std::abs(center-z)*10,true});
+        }
     }
-    std::sort(junctions.begin(),junctions.end(),[](auto a,auto b){return a.score>b.score;});
+    std::stable_sort(junctions.begin(),junctions.end(),[](auto a,auto b){
+        return a.farOnly!=b.farOnly?!a.farOnly:a.score>b.score;
+    });
     std::vector<Junction> selected;
     for(auto j:junctions) {
         if(std::any_of(selected.begin(),selected.end(),[&](auto old){return std::abs(old.point.x-j.point.x)<.045f&&std::abs(old.point.y-j.point.y)<.075f;}))continue;
         selected.push_back(j);if(selected.size()>=12)break;
     }
     for(auto &j:selected) {
+        if(j.farOnly)continue; // Already localized from the boundary of the white surround.
         // Far stems can be cropped at the top of the image. Locate the actual
         // branch/stem junction from the sloping arm, not the cropped stem's center.
         std::vector<float> intercepts;
@@ -111,10 +195,11 @@ inline std::vector<RaceParkingMouthCandidate> raceDetectParkingMouthsSide(const 
     if(junctionDebug)for(auto j:selected)junctionDebug->push_back(physical(j.point));
     std::vector<RaceParkingMouthCandidate> mouths;
     for(size_t i=0;i<selected.size();++i)for(size_t j=i+1;j<selected.size();++j) {
+        if(selected[i].farOnly)continue;
         const auto a=selected[i].point,b=selected[j].point;
         if(std::abs(a.x-b.x)>.045f||!raceCheckParkingMouth(a,b,dims).valid)continue;
         // Require adjacent junctions on this side; do not skip a visible divider.
-        if(std::any_of(selected.begin(),selected.end(),[&](auto k){return k.point.y>a.y+.08f&&k.point.y<b.y-.08f&&std::abs(k.point.x-(a.x+b.x)/2)<.05f;}))continue;
+        if(std::any_of(selected.begin(),selected.end(),[&](auto k){return !k.farOnly&&k.point.y>a.y+.08f&&k.point.y<b.y-.08f&&std::abs(k.point.x-(a.x+b.x)/2)<.05f;}))continue;
         const auto near=physical(a),far=physical(b);
         mouths.push_back({map.toImage(near),map.toImage(far),near,far,(selected[i].score+selected[j].score)/9,side});
     }

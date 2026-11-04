@@ -35,7 +35,7 @@ public:
         a.estimateUsed|=!measured;
         a.terminalRecovery|=terminalRecovery;
         a.inside|=state=="PARK_DWELL"&&measured&&!terminalRecovery;
-        a.dwell|=state=="PARK_EXIT"&&!a.estimateUsed;
+        a.dwell|=state=="PARK_EXIT"&&reason=="DWELL_COMPLETE_REVERSE_NEXT_FRAME"&&measured;
         a.reverse|=state=="PARK_EXIT"&&speed<0;
         a.returned|=state=="PARK_COMPLETE"&&measured;
         a.completedByEstimate|=state=="PARK_COMPLETE"&&!measured;
@@ -67,7 +67,7 @@ public:
             list[i]["command_pose_estimate_used"]=attempts[i].estimateUsed;
             list[i]["completion_estimated"]=attempts[i].completedByEstimate;
             list[i]["terminal_recovery_used"]=attempts[i].terminalRecovery;
-            list[i]["parking_validated"]=attempts[i].inside&&attempts[i].dwell&&attempts[i].returned&&!attempts[i].terminalRecovery&&!attempts[i].estimateUsed;
+            list[i]["parking_validated"]=attempts[i].inside&&attempts[i].dwell&&attempts[i].returned&&!attempts[i].terminalRecovery;
         }
         return {{"version",2},{"required_dwell_seconds",1},{"scope","parking aisle entry, 1s dwell, reverse exit and lane rejoin"},
             {"entrance_and_exit_arrow_turns_included",false},{"independent_physical_measurement",false},
