@@ -7,6 +7,7 @@
 
 using cv::Mat;
 using cv::Point;
+using cv::Point2d;
 using cv::Point2f;
 using cv::Rect;
 using cv::Size;
@@ -24,6 +25,7 @@ void GroundOdometry::reset() {
     pose_ = {};
     prev_pyr_.clear();
     prev_pts_.clear();
+    last_motion_.release();
     valid_ = false;
     inliers_ = 0;
     speed_ = 0;
@@ -71,12 +73,45 @@ void GroundOdometry::update(const Mat &grey, const Camera &camera, double dt,
         return;
     }
 
-    vector<Point2f> tracked;
+    // 初值：把上一帧拟合出的运动套到每个点上，预测它在当前帧的位置。
+    // 动态模糊时角点被拖成短线、匹配本身就模糊，一个好的初值能把它拉回正确
+    // 的收敛域里（纯零初值时相邻帧位移一大就跟丢）。
+    const Point2f origin(float(roi_rect.x), float(roi_rect.y));
+    vector<Point2f> guess;
+    guess.reserve(prev_pts_.size());
+    for (const auto &p : prev_pts_) {
+        Point2f g = p;
+        if (!last_motion_.empty()) {
+            const Point2f ground = camera.image_to_ground(p + origin);
+            const double x = last_motion_.at<double>(0, 0) * ground.x +
+                             last_motion_.at<double>(0, 1) * ground.y +
+                             last_motion_.at<double>(0, 2);
+            const double y = last_motion_.at<double>(1, 0) * ground.x +
+                             last_motion_.at<double>(1, 1) * ground.y +
+                             last_motion_.at<double>(1, 2);
+            const Point2d img = camera.ground_to_image({x, y});
+            if (isfinite(img.x) && isfinite(img.y)) {
+                const Point2f q(float(img.x) - origin.x, float(img.y) - origin.y);
+                // 预测跑到画面外太远就不用了
+                if (q.x > -WIN.width && q.x < ROI_W + WIN.width &&
+                    q.y > -WIN.height && q.y < ROI_H + WIN.height)
+                    g = q;
+            }
+        }
+        guess.push_back(g);
+    }
+
+    vector<Point2f> tracked = guess;
     vector<uchar> status;
     vector<float> error;
     cv::calcOpticalFlowPyrLK(prev_pyr_, pyramid, prev_pts_, tracked, status,
-                             error, WIN, MAX_LEVEL);
+                             error, WIN, MAX_LEVEL,
+                             cv::TermCriteria(cv::TermCriteria::COUNT |
+                                                  cv::TermCriteria::EPS,
+                                              30, 0.01),
+                             cv::OPTFLOW_USE_INITIAL_FLOW);
     // 反向再跟一次，来回对不上的是跟丢了。
+    // 这里不能给初值：如果从原位置起步，来回一致性就被“人为对齐”了。
     vector<Point2f> back;
     vector<uchar> back_status;
     cv::calcOpticalFlowPyrLK(pyramid, prev_pyr_, tracked, back, back_status,
@@ -133,6 +168,7 @@ void GroundOdometry::update(const Mat &grey, const Camera &camera, double dt,
 
     // 拟合给的是 车体系新 = R(turn) * 车体系旧 + step，
     // 而位姿定义是 世界 = R(theta) * 车体系 + t，所以反过来解。
+    last_motion_ = motion.clone();
     pose_.theta = wrap(pose_.theta - turn);
     const float c = std::cos(pose_.theta), s = std::sin(pose_.theta);
     pose_.x -= c * step.x - s * step.y;

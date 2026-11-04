@@ -380,12 +380,14 @@ int main(int argc, char **argv) {
         cv::Point2f target_local{};
         if (aiming) {
             target_local = odometry.pose().local(targets[target_index]);
-            if (hypot(target_local.x, target_local.y) <= ARRIVE_DIST) {
+            // 到点，或者已经被车开过去了（y < 0）：这个点结束，换下一个
+            if (target_local.y < 0 ||
+                hypot(target_local.x, target_local.y) <= ARRIVE_DIST) {
                 if (++target_index < targets.size()) {
-                    cout << "[Target] 第 " << target_index << " 个到点\n";
+                    cout << "[Target] 下一个点\n";
                 } else {
                     aiming = false;
-                    cout << "[Target] 全部到点\n";
+                    cout << "[Target] 全部走完\n";
                 }
             }
         }

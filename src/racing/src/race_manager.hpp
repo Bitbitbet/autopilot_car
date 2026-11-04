@@ -35,7 +35,7 @@ class RaceManager {
   private:
     // 只有 Lane 是“正常巡线”，其余都是它前后的局部任务。
     // FatalStop 是死锁状态，进入后不能改变
-    enum class State { Lane, CrossApproach, SignalWait, FatalStop };
+    enum class State { Lane, FatalStop };
 
     RaceConfig cfg;
     State state = State::Lane;
@@ -52,12 +52,11 @@ class RaceManager {
     double lastCrossSeen = 0; // 最近一次看到斑马线
     double gateClearSince = -1, hazardClearSince = -1;
 
-    // 目标点序列：choice+park 触发生成，整串走完后清空
+    // 目标点序列号
     int targetSeq = 0;
-    std::vector<cv::Point2d> points; // 当前这串目标点
 
     bool lastActive = false;
-    bool limited = false;         // 限速区，跨人工接管保持
+    bool driving_on_park_lane = false;
     bool crossBottomSeen = false; // 车身已压过斑马线
     bool gateWaiting = false;
     InferenceResult gateBox{};
