@@ -167,8 +167,8 @@ void draw_hud(Mat &image, const AutoPilot &pilot, Mode mode, bool panic,
     snprintf(text, sizeof text, "center=%d  quality=%.2f curve=%.2f, dt=%.2f",
              pilot.center, pilot.confidence, pilot.severity, dt);
     line(text);
-    snprintf(text, sizeof text, "race=%s ai_age=%.2fs side=%d", plan.state,
-             plan.detectionAge, plan.branchSide);
+    snprintf(text, sizeof text, "race=%s ai_age=%.2fs side=%d force=%d",
+             plan.state, plan.detectionAge, plan.branchSide, plan.forceTurn);
     line(text);
     const auto &pose = odometry.pose();
     snprintf(text, sizeof text, "odom x=%+.2f y=%+.2f th=%+.2f inl=%d trk=%d",
@@ -317,8 +317,14 @@ int main(int argc, char **argv) {
         timing.lap("track");
 
         // ---- RACE SECTION
-        const auto plan = race_manager.update(
-            observation, dt, mode == Mode::Auto, camera, aiming);
+        // 回传给任务层：上一帧的速度、位移和是否跟住路面（岔路收尾判据）
+        RaceFeedback feedback;
+        feedback.speed = speed;
+        feedback.distance = std::fabs(speed) * float(dt);
+        feedback.tracking = pilot.valid && !pilot.lost;
+        const auto plan = race_manager.update(observation, dt,
+                                              mode == Mode::Auto, camera,
+                                              aiming, feedback);
 
         // ---- TARGET / ODOMETRY SECTION
         // 目标点只在需要时才跟踪：锚定那一刻把里程计清零，于是“世界系”就是
@@ -428,7 +434,10 @@ int main(int argc, char **argv) {
             }
         }
         int aim_col = -1;
-        if (aiming) {
+        if (plan.forceTurn != 0) {
+            // 岔路：不依赖边线，硬拐
+            pilot.force_turn(plan.forceTurn, dt, speed);
+        } else if (aiming) {
             // 有期望方向就沿圆弧取前视点，否则直接朝点开
             const cv::Point2f aim =
                 arc_aim(odometry.pose(), targets[target_index], PARK_RADIUS,
@@ -441,8 +450,11 @@ int main(int argc, char **argv) {
             pilot.aim_at(aim_col, dt, speed);
         } else {
             pilot.update(rows, camera, dt, speed, plan.branchSide);
+            // 岔路引导脉冲：在巡线舵量上叠加最小舵量
+            pilot.apply_guidance(plan.guideDirection, plan.guidePwm);
         }
-        if (mode == Mode::Auto && pilot.lost) {
+        // 岔路引导期间允许丢线：岔口本来就看不见完整路面
+        if (mode == Mode::Auto && pilot.lost && plan.guideDirection == 0) {
             mode = Mode::Manual;
             panic = true;
             jsSpeed = 0;
@@ -460,7 +472,9 @@ int main(int argc, char **argv) {
                 if (plan.stop) {
                     pilot.resetControl();
                 } else {
-                    speed = pilot.speedFor(min(cruise, plan.speedCap), dt);
+                    speed = plan.guideDirection != 0
+                                ? pilot.guidedSpeed(min(cruise, plan.speedCap), dt)
+                                : pilot.speedFor(min(cruise, plan.speedCap), dt);
                     servo = pilot.servo;
                 }
             } else {
@@ -479,6 +493,7 @@ int main(int argc, char **argv) {
         // ---- OUTPUT/DEBUG SECTION
         timing.lap(nullptr);
         if (!headless || do_produce_debug_video) {
+            detection_draw_box(image, perception->snapshot().detections);
             track_draw_result(rows, image);
             if (aiming)
                 draw_target(image, camera, target_local, aiming, aim_col);

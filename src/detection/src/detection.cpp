@@ -36,7 +36,69 @@ namespace {
 
 constexpr int TEXT_HEIGHT = 15;
 
+Scalar get_label_color(int label) {
+    switch (label) { // BGR
+    case 0:
+        return Scalar(204, 0, 255); // 锥桶: 紫色
+        break;
+    case 1:
+        return Scalar(0, 0, 255); // 行人: 紫色
+        break;
+    case 2:
+        return Scalar(0, 255, 255); // 施工区标志: 黄色
+        break;
+    case 3:
+        return Scalar(0, 255, 255); // 限速: 黄色
+        break;
+    case 4:
+        return Scalar(0, 255, 0); // 解除限速: 绿色
+        break;
+    case 5:
+        return Scalar(0, 0, 255); // 禁行标志: 红色
+        break;
+    case 6:
+        return Scalar(0, 255, 0); // 畅行标志: 绿色
+        break;
+    case 7:
+        return Scalar(255, 51, 0); // 停车场标志: 蓝色
+        break;
+    case 8:
+        return Scalar(0, 0, 255); // 阻拦杆: 红色
+        break;
+    case 9:
+        return Scalar(255, 255, 255); // 斑马线: 白色
+        break;
+    case 10:
+        return Scalar(0, 102, 255); // 岔路标志: 橙色
+        break;
+    case 11:
+        return Scalar(0, 102, 255); // 左转标志: 橙色
+        break;
+    case 12:
+        return Scalar(0, 102, 255); // 双向标志: 橙色
+        break;
+    case 13:
+        return Scalar(255, 51, 0); // 左岔路标志: 蓝色
+        break;
+    case 14:
+        return Scalar(255, 51, 0); // 右岔路标志: 蓝色
+        break;
+    case 15:
+        return Scalar(255, 255, 255);
+        break;
+    case 16:
+        return Scalar(237, 226, 19);
+        break;
+    case 17:
+        return Scalar(132, 255, 10);
+        break;
+    default:
+        return Scalar(255, 0, 0);
+        break;
+    }
 }
+
+} // namespace
 
 void buildNms(const string &model_dir) {
     string model_file = model_dir + "/nms.tar";
@@ -255,12 +317,12 @@ void Detection::render() {
     }
 }
 
-void Detection::draw_box(Mat &img) {
+void detection_draw_box(Mat &img, vector<InferenceResult> results) {
     for (const auto &result : results) {
         // 绘制标签文本的框
         cv::Rect rectText(result.rect.x, max(result.rect.y - TEXT_HEIGHT, 0),
                           result.rect.width, TEXT_HEIGHT);
-        cv::rectangle(img, rectText, getCvcolor(result.type), -1);
+        cv::rectangle(img, rectText, get_label_color(result.type), -1);
 
         // 绘制标签文本
         cv::putText(
@@ -272,68 +334,6 @@ void Detection::draw_box(Mat &img) {
         // 绘制检测框
         cv::Rect rect(result.rect.x, result.rect.y, result.rect.width,
                       result.rect.height);
-        cv::rectangle(img, rect, getCvcolor(result.type), 1);
-    }
-}
-
-Scalar Detection::getCvcolor(int index) {
-    switch (index) { // BGR
-    case 0:
-        return Scalar(204, 0, 255); // 锥桶: 紫色
-        break;
-    case 1:
-        return Scalar(0, 0, 255); // 行人: 紫色
-        break;
-    case 2:
-        return Scalar(0, 255, 255); // 施工区标志: 黄色
-        break;
-    case 3:
-        return Scalar(0, 255, 255); // 限速: 黄色
-        break;
-    case 4:
-        return Scalar(0, 255, 0); // 解除限速: 绿色
-        break;
-    case 5:
-        return Scalar(0, 0, 255); // 禁行标志: 红色
-        break;
-    case 6:
-        return Scalar(0, 255, 0); // 畅行标志: 绿色
-        break;
-    case 7:
-        return Scalar(255, 51, 0); // 停车场标志: 蓝色
-        break;
-    case 8:
-        return Scalar(0, 0, 255); // 阻拦杆: 红色
-        break;
-    case 9:
-        return Scalar(255, 255, 255); // 斑马线: 白色
-        break;
-    case 10:
-        return Scalar(0, 102, 255); // 岔路标志: 橙色
-        break;
-    case 11:
-        return Scalar(0, 102, 255); // 左转标志: 橙色
-        break;
-    case 12:
-        return Scalar(0, 102, 255); // 双向标志: 橙色
-        break;
-    case 13:
-        return Scalar(255, 51, 0); // 左岔路标志: 蓝色
-        break;
-    case 14:
-        return Scalar(255, 51, 0); // 右岔路标志: 蓝色
-        break;
-    case 15:
-        return Scalar(255, 255, 255);
-        break;
-    case 16:
-        return Scalar(237, 226, 19);
-        break;
-    case 17:
-        return Scalar(132, 255, 10);
-        break;
-    default:
-        return Scalar(255, 0, 0);
-        break;
+        cv::rectangle(img, rect, get_label_color(result.type), 1);
     }
 }

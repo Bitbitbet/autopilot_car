@@ -28,7 +28,7 @@ int main() {
 
         detection.inference(img); // AI推理
         timing.lap("infer");
-        detection.draw_box(img); // 图像绘制AI结果
+        detection_draw_box(img, detection.results); // 图像绘制AI结果
 
         imshow("img", img);
         waitKey(1);

@@ -289,6 +289,54 @@ float AutoPilot::qualitySpeedLimit() const {
     return cfg::MAX_SPEED; // 健康的混合路径不额外限速
 }
 
+void AutoPilot::apply_guidance(int dir, float pwm) {
+    if (dir == 0 || pwm <= 0)
+        return;
+    const float lane = float(servo) - float(PWMSERVOMID);
+    const float directed = float(dir) * lane;      // 巡线想往引导方向打多少
+    servo = clampServo(float(PWMSERVOMID) +
+                       float(dir) * std::max(directed, pwm));
+}
+
+float AutoPilot::guidedSpeed(float cruise, float dt) {
+    if (!std::isfinite(cruise) || !std::isfinite(dt) || dt <= 0 ||
+        dt > MAX_FRAME_GAP) {
+        commandedSpeed = 0;
+        return 0;
+    }
+    const float target = std::min(cruise, cfg::MAX_SPEED);
+    if (target < commandedSpeed)
+        commandedSpeed = std::max(target, commandedSpeed - DECELERATION * dt);
+    else
+        commandedSpeed = std::min(target, commandedSpeed + ACCELERATION * dt);
+    return commandedSpeed;
+}
+
+void AutoPilot::force_turn(int dir, float dt, float previousSpeed) {
+    if (!std::isfinite(dt) || dt <= 0 || dt > MAX_FRAME_GAP) {
+        valid = false;
+        lost = true;
+        degraded = false;
+        confidence = 0;
+        severity = 0;
+        path_issue = "FRAME_GAP";
+        qualityGoodTime = 0;
+        centerEdge.clear();
+        resetControl();
+        return;
+    }
+    // 直接把期望中心顶到图像一侧：PD 会把舵机推到该方向的极限，
+    // 误差变化率限幅负责把这一下打舵拉平，不需要另写一套输出。
+    valid = true;
+    lost = false;
+    degraded = false;
+    confidence = 1.f;
+    path_issue = dir < 0 ? "FORCE_LEFT" : "FORCE_RIGHT";
+    centerEdge.clear();
+    center = dir < 0 ? 0 : cols - 1;
+    update_steering(dt, previousSpeed, 0.f);
+}
+
 void AutoPilot::aim_at(int target_col, float dt, float previousSpeed) {
     if (!std::isfinite(dt) || dt <= 0 || dt > MAX_FRAME_GAP) {
         valid = false;

@@ -57,6 +57,17 @@ class AutoPilot {
     void update(const TrackRows &rows, const Camera &camera, float dt,
                 float previousSpeed, int branchSide = 0);
 
+    // 岔路引导：在巡线算出的舵量上叠加“最小舵量”要求。
+    // 方向同向时取较大者，绝不往反方向打；dir=0 时不动。
+    void apply_guidance(int dir, float pwm);
+
+    // 引导期间的速度：不受“丢线/置信度”影响（岔口本来就会丢线）。
+    float guidedSpeed(float cruise, float dt);
+
+    // 强制转向（岔路）：把期望中心压到图像一侧，用同一套 PD 打满舵，
+    // 不依赖任何边线。dir<0 左转，dir>0 右转。
+    void force_turn(int dir, float dt, float previous_speed);
+
     // 目标点模式：外部直接给定期望的图像列，用同一套 PD 出舵机。
     // 不依赖中心线，所以看不见路面时也不会被判丢线。
     void aim_at(int target_col, float dt, float previous_speed);

@@ -24,7 +24,7 @@ struct InferenceResult {
     int width;   // 尺寸
     int height;  // 尺寸
 };
-cv::Scalar getCvcolor(int index) {
+cv::Scalar get_label_color(int index) {
     switch (index) { // BGR
     case 0:
         return cv::Scalar(204, 0, 255);
@@ -74,11 +74,11 @@ void drawBox(cv::Mat &img, const std::vector<InferenceResult> &snapshot) {
         if (pointY < 0)
             pointY = 0;
         cv::Rect rectText(result.x, pointY, result.width, 20);
-        cv::rectangle(img, rectText, getCvcolor(result.type), -1);
+        cv::rectangle(img, rectText, get_label_color(result.type), -1);
         std::string label_name = labels[result.type] + " [" +
                                  score.substr(0, score.find(".") + 3) + "]";
         cv::Rect rect(result.x, result.y, result.width, result.height);
-        cv::rectangle(img, rect, getCvcolor(result.type), 1);
+        cv::rectangle(img, rect, get_label_color(result.type), 1);
         if (result.y < 15)
             result.y = 15;
         cv::putText(img, label_name, cv::Point(result.x, result.y),

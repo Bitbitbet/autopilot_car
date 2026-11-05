@@ -34,8 +34,6 @@ class Detection {
      */
     void inference(const cv::Mat &img);
 
-    void draw_box(cv::Mat &img);
-
   private:
     // onnx info
     std::vector<std::string> onnx_input_names;
@@ -58,15 +56,9 @@ class Detection {
     void preprocess(const cv::Mat &frame);
     void run();
     void render();
-
-    /**
-     * @brief 获取Opencv颜色
-     *
-     * @param index 序号
-     * @return cv::Scalar
-     */
-    cv::Scalar getCvcolor(int index);
 };
+
+void detection_draw_box(cv::Mat &img, std::vector<InferenceResult> results);
 
 // 必须与label_list.txt一致
 enum : int {

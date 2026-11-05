@@ -13,6 +13,31 @@ using std::vector;
 
 namespace {
 
+// Y 形岔路：脉冲式引导（数值照着分支的实测来）
+constexpr double YFORK_STRONG_TIME = 0.40; // 强打舵持续多久（秒）
+constexpr double YFORK_RAMP_TIME = 1.00;   // 之后线性回中所用的时间（秒）
+constexpr float YFORK_PWM = 400.f;         // 脉冲幅度（PWM 偏离中值）
+constexpr float YFORK_REF_SPEED = 0.20f;   // 脉冲相位的参考速度
+constexpr float YFORK_MIN_DISTANCE = 0.30f; // 至少走这么远（米）
+constexpr double YFORK_CLEAR_TIME = 0.60;   // 牌子消失这么久
+constexpr double YFORK_TRACK_TIME = 0.60;   // 新路跟住这么久
+
+/**
+ * @brief 引导脉冲幅度
+ *
+ * Y 岔路比停车场入口浅：先强打方向，再线性松开，一直满舵会绕圈转过头。
+ * 0~0.4 s: 360→400；0.4~1.4 s: 400→0。
+ */
+float guidance_pwm(double elapsed) {
+    if (elapsed < YFORK_STRONG_TIME)
+        return 360.f +
+               40.f * float(std::clamp(elapsed / 0.12, 0.0, 1.0));
+    return YFORK_PWM * float(
+                          1.0 - std::clamp((elapsed - YFORK_STRONG_TIME) /
+                                               YFORK_RAMP_TIME,
+                                           0.0, 1.0));
+}
+
 inline Point2d center_coord(Rect r) {
     return {r.x + r.width / 2.0, r.y + r.height / 2.0};
 }
@@ -54,18 +79,14 @@ bool RaceManager::update_observation(const DetectionSnapshot &snap) {
 }
 
 RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
-                             bool active, const Camera &camera, bool aiming) {
+                             bool active, const Camera &camera, bool aiming,
+                             const RaceFeedback &feedback) {
     const double now = global_microsec() / 1000000.0;
     RacePlan p;
     p.detectionAge = now - double(snap.captured) / 1000000.0;
     const bool fresh = p.detectionAge <= cfg.maxDetectionAge;
 
-    // 人工接管：丢掉确认结果方便重新开始；限速区状态必须保留，
-    // 不能靠按一下 a 就取消限速。
     if (active != lastActive) {
-        if (state != State::FatalStop)
-            state = State::Lane;
-        clear_observations();
         lastActive = active;
     }
     if (!active) {
@@ -92,6 +113,52 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
 
     p.branchSide = 0;
 
+    // -------- Y 形岔路 SECTION
+    // 照分支的做法：限速 + 脉冲式强转向；转完之后用
+    // （脉冲相位 / 行进距离 / 牌子消失时长 / 新路跟踪时长）判断这段走完。
+    if (!yfork && (seen(LABEL_YLEFT) || seen(LABEL_YRIGHT))) {
+        yfork = true;
+        yfork_dir = seen(LABEL_YLEFT) ? -1 : 1;
+        yfork_elapsed = yfork_phase = yfork_clear = yfork_track = 0;
+        yfork_distance = 0;
+        cout << "[YFork] 看到 " << (yfork_dir < 0 ? "yleft" : "yright")
+             << "，脉冲引导转向" << endl;
+    }
+    if (yfork) {
+        yfork_elapsed += dt;
+        // 相位按速度推进：慢下来时脉冲也会拖长，但最多 2.8 s
+        const float speed =
+            feedback.speed > 0 ? std::min(feedback.speed, 1.f) : 0.f;
+        yfork_phase = std::max(
+            yfork_phase + dt * std::min(double(speed / YFORK_REF_SPEED), 1.0),
+            yfork_elapsed * 0.5);
+        yfork_distance += std::fabs(feedback.distance);
+        if (seen(LABEL_YLEFT) || seen(LABEL_YRIGHT)) {
+            yfork_clear = yfork_track = 0; // 牌子还在：重新计时
+        } else {
+            yfork_clear += dt;
+            yfork_track = (yfork_phase >= 1.4 && feedback.tracking)
+                              ? yfork_track + dt
+                              : 0;
+        }
+        const bool done = yfork_phase >= 1.4 &&
+                          yfork_distance >= YFORK_MIN_DISTANCE &&
+                          yfork_clear >= YFORK_CLEAR_TIME &&
+                          yfork_track >= YFORK_TRACK_TIME;
+        if (done) {
+            yfork = false;
+            cout << "[YFork] 岔路完成" << endl;
+        } else {
+            p.guideDirection = yfork_dir;
+            p.guidePwm = guidance_pwm(yfork_elapsed);
+            // 限速：和分支一致——在停车场区域里用停车场速度当上限，
+            // 否则用岔路速度。
+            const float fork_speed =
+                driving_on_park_lane ? cfg.targetSpeed : cfg.yforkSpeed;
+            p.speedCap = std::min(p.speedCap, fork_speed);
+        }
+    }
+
     // -------- TARGET POINT SECTION
     // 走目标点期间限速
     if (aiming)
@@ -100,7 +167,6 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
     // 停车场左转：choice（地面标线）和
     // park（立牌）同时看到时生成一串目标点。
     if (!aiming) {
-        vector<RaceTarget> targets;
         if (seen(LABEL_CHOICE) && seen(LABEL_PARK)) {
             driving_on_park_lane = true;
             const auto &choice_boxes = boxes_of(LABEL_CHOICE);
@@ -120,8 +186,8 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
             if (isfinite(ground.x) && isfinite(ground.y)) {
                 cout << "[Target] 看到停车场，准备左转" << endl;
                 // 第 1 个点直着走到库口；第 2 个点沿左侧圆弧进库（到达时朝左）
-                targets = {{{ground.x, ground.y - 0.2}, {0, 1}},
-                           {{ground.x - 0.5, ground.y}, {-1, 0}}};
+                p.targets = {{{ground.x, ground.y - 0.2}, {0, 1}},
+                             {{ground.x - 0.5, ground.y}, {-1, 0}}};
                 ++target_seq;
             }
         } else if (seen(LABEL_LEFT)) {
@@ -132,51 +198,18 @@ RacePlan RaceManager::update(const DetectionSnapshot &snap, double dt,
                     driving_on_park_lane = false;
                     cout << "[Target] 看到左转标识，准备左转离开停车场道"
                          << endl;
-                    targets = {{{ground.x - 0.5, ground.y}, {-1, 0}}};
+                    p.targets = {{{ground.x - 0.5, ground.y}, {-1, 0}}};
                     ++target_seq;
                 }
             }
         }
-        if (seen(LABEL_FORK) && !driving_on_park_lane) {
-            auto ground = camera.image_to_ground(
-                center_coord(boxes_of(LABEL_FORK).front().rect));
-            if (isfinite(ground.x) && isfinite(ground.y)) {
-                cout << "[Target] 看到岔路标识，准备对齐" << endl;
-                targets = {{
-                               {ground.x + 0.5, ground.y - 0.3},
-                               {0, 1},
-                           },
-                           {
-                               {ground.x, ground.y},
-                               {-1, 0},
-                           }};
-                yfork_left_target = {{ground.x - 0.45, ground.y - 0.4},
-                                     {-1, 0}};
-                yfork_left_target = {{ground.x - 0.45, ground.y + 0.4},
-                                     {-1, 0}};
-                yfork_target_ready = true;
-                ++target_seq;
-            }
-        }
-        if ((seen(LABEL_YLEFT) || seen(LABEL_YRIGHT)) && yfork_target_ready) {
-            if (seen(LABEL_YLEFT)) {
-                cout << "[Target] 看到岔路方向，准备走左边" << endl;
-                targets = {{yfork_left_target}};
-            } else {
-                cout << "[Target] 看到岔路方向，准备走右边" << endl;
-                targets = {{yfork_right_target}};
-            }
-            ++target_seq;
-            yfork_target_ready = false;
-        }
-        p.targets = targets;
     }
     p.target_seq = target_seq;
 
-    if (state == State::FatalStop) {
+    if (fatal_stop) {
         p.stop = true;
         p.state = "REVIEW_STOP";
-        p.reason_for_stage = reviewReason;
+        p.reason_for_stage = reason_for_review;
     }
     return p;
 }
